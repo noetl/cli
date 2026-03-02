@@ -1,0 +1,506 @@
+# NoETL CLI
+
+[![Crates.io](https://img.shields.io/crates/v/noetl.svg)](https://crates.io/crates/noetl)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+NoETL workflow automation CLI - Execute playbooks locally or orchestrate distributed server-worker pipelines.
+
+## Installation
+
+`noetl` package installs **two equivalent commands**:
+
+- `noetl` (full name)
+- `ntl` (short alias)
+
+Both binaries run the same CLI and are interchangeable.
+
+### Via Cargo
+
+```bash
+cargo install --bins noetl
+```
+
+### Via Homebrew (macOS)
+
+```bash
+brew tap noetl/tap
+brew install noetl
+```
+
+### Via APT (Ubuntu/Debian)
+
+```bash
+echo 'deb [trusted=yes] https://noetl.github.io/apt jammy main' | sudo tee /etc/apt/sources.list.d/noetl.list
+sudo apt-get update
+sudo apt-get install noetl
+```
+
+### Via GitHub Release Tarball
+
+```bash
+# Example: Linux x86_64
+VERSION=2.8.7
+curl -L -o /tmp/noetl.tgz "https://github.com/noetl/cli/releases/download/v${VERSION}/noetl-v${VERSION}-linux-x86_64.tar.gz"
+tar -xzf /tmp/noetl.tgz -C /tmp
+sudo install -m 0755 /tmp/noetl /usr/local/bin/noetl
+sudo install -m 0755 /tmp/ntl /usr/local/bin/ntl
+```
+
+### Verify Install
+
+```bash
+noetl --version
+ntl --version
+```
+
+## Quick Start
+
+Create a simple playbook:
+
+```yaml
+# hello.yaml
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: hello_world
+
+workflow:
+  - step: start
+    tool:
+      kind: shell
+      cmds:
+        - "echo 'Hello from NoETL!'"
+    next:
+      - step: end
+  - step: end
+```
+
+Run it:
+
+```bash
+noetl run hello.yaml
+```
+
+## Features
+
+- **Local Playbook Execution** - Run workflows without server infrastructure
+- **HTTP Actions** - Make REST API calls with automatic pagination
+- **Conditional Flow** - Dynamic routing with case/when/then/else
+- **Playbook Composition** - Call sub-playbooks for modularity
+- **Server/Worker Management** - Start/stop distributed services
+- **Kubernetes Operations** - Deploy to K8s clusters
+- **Database Management** - Initialize and validate schemas
+
+## Usage
+
+Check version:
+```bash
+noetl --version
+```
+
+### Local Execution
+
+```bash
+# Run playbook locally
+noetl run playbook.yaml
+
+# Pass variables
+noetl run playbook.yaml --set env=prod --set version=v2.5.5
+
+# Verbose output
+noetl run playbook.yaml --verbose
+```
+
+### Server Management
+
+Start NoETL server:
+```bash
+noetl server start
+noetl server start --init-db  # Initialize database on startup
+```
+
+Stop NoETL server:
+```bash
+noetl server stop
+noetl server stop --force  # Force stop without confirmation
+```
+
+### Worker Management
+
+Start NoETL worker:
+```bash
+noetl worker start
+noetl worker start --max-workers 4
+```
+
+Stop NoETL worker:
+```bash
+noetl worker stop  # Interactive selection if multiple workers
+noetl worker stop --name my-worker
+noetl worker stop --name my-worker --force
+```
+
+### Database Management
+
+Initialize database schema:
+```bash
+noetl db init
+```
+
+Validate database schema:
+```bash
+noetl db validate
+```
+
+### Build Management
+
+Build NoETL Docker image:
+```bash
+noetl build
+noetl build --no-cache  # Build without using cache
+```
+
+The build command:
+- Builds the Docker image with a timestamp-based tag
+- Saves the tag to `.noetl_last_build_tag.txt` for deployment use
+- Streams build output to console
+
+### Kubernetes Management
+
+Deploy NoETL to kind cluster:
+```bash
+noetl k8s deploy
+```
+
+Remove NoETL from cluster:
+```bash
+noetl k8s remove
+```
+
+Rebuild and redeploy:
+```bash
+noetl k8s redeploy
+noetl k8s redeploy --no-cache  # Rebuild without cache
+```
+
+Full reset (schema reset + redeploy + test setup):
+```bash
+noetl k8s reset
+noetl k8s reset --no-cache  # Reset with clean build
+```
+
+The k8s commands:
+- `deploy`: Applies Kubernetes manifests to kind cluster
+- `remove`: Deletes NoETL resources from cluster
+- `redeploy`: Builds image, loads to kind, and deploys
+- `reset`: Full workflow - resets database schema, redeploys, runs test setup
+
+### Configuration and Contexts
+
+`noetl` supports multiple contexts to manage different server environments.
+
+#### Add a Context
+```bash
+noetl context add local --server-url http://localhost:8082 --set-current
+noetl context add prod --server-url http://noetl-server:8082
+```
+
+#### List Contexts
+```bash
+noetl context list
+```
+
+#### Switch Context
+```bash
+noetl context use prod
+```
+
+#### Show Current Context
+```bash
+noetl context current
+```
+
+### Gateway Mode (No Port-Forward)
+
+Use Gateway as API entrypoint (with auth) instead of port-forwarding to `svc/noetl`.
+
+Token flow:
+- Auth0 issues `id_token` / `access_token` after user login.
+- `noetl auth login` sends that token to **Gateway** (`/api/auth/login`).
+- Gateway validates via auth playbooks and returns `session_token` for protected `/noetl/*` calls.
+
+1. Add/use a gateway context:
+```bash
+noetl context add gateway \
+  --server-url https://gateway.mestumre.dev \
+  --auth0-domain mestumre-development.us.auth0.com \
+  --set-current
+```
+
+2. Login and cache session token in current context:
+```bash
+noetl auth login --auth0-token '<ID_TOKEN_FROM_AUTH0>'
+# or:
+noetl auth login --auth0-callback-url 'https://mestumre.dev/login#id_token=...'
+# or (email/login hint -> CLI prompts for callback URL/token once):
+noetl auth login --auth0 'akuksin@gmail.com'
+```
+
+3. Run commands through gateway proxy:
+```bash
+noetl --gateway register playbook -f tests/fixtures/playbooks/api_integration/amadeus_ai_api/amadeus_ai_api.yaml
+noetl --gateway register credential -f tests/fixtures/credentials/pg_k8s.json
+noetl --gateway exec catalog://tests/fixtures/playbooks/batch_execution/traveler_batch_enrichment_in_step@4 -r distributed
+```
+
+You can also pass token inline:
+```bash
+noetl --gateway --session-token '<gateway-session-token>' catalog list Playbook
+```
+
+Clear cached token:
+```bash
+noetl auth logout
+```
+
+### CLI Mode
+
+#### Catalog Management
+
+Register a resource (auto-detects kind: Credential or Playbook):
+```bash
+noetl catalog register tests/fixtures/playbooks/data_transfer/http_to_postgres_transfer/http_to_postgres_transfer.yaml
+```
+
+Get resource details:
+```bash
+noetl catalog get tests/fixtures/playbooks/data_transfer/http_iterator_save_postgres
+```
+
+List resources:
+```bash
+noetl catalog list Playbook --json
+```
+
+#### Execution
+
+Execute a playbook:
+```bash
+noetl execute playbook tests/fixtures/playbooks/regression_test/master_regression_test --json
+```
+
+Get execution status:
+```bash
+noetl execute status 522107710393811426 --json
+```
+
+#### Credentials
+
+Get credential details:
+```bash
+noetl get credential gcs_service_account --include-data
+```
+
+#### SQL Query Execution
+
+Execute SQL queries via NoETL Postgres API:
+
+```bash
+# Query with table format (default)
+noetl query "SELECT * FROM noetl.keychain LIMIT 5"
+
+# Query with specific schema
+noetl query "SELECT execution_id, credential_name FROM noetl.keychain WHERE execution_id = 12345" --schema noetl
+
+# Query with JSON output
+noetl query "SELECT * FROM noetl.event ORDER BY created_at DESC LIMIT 10" --format json
+
+# Query public schema tables
+noetl query "SELECT * FROM users LIMIT 5" --schema public --format table
+```
+
+**Output Formats:**
+- `table` (default): Formatted ASCII table with borders
+- `json`: Pretty-printed JSON output
+
+**Example Output (table format):**
+```
+┌────────────────────┬────────────────┬──────────────┐
+│ execution_id       │ credential_name│ access_count │
+├────────────────────┼────────────────┼──────────────┤
+│ 507861119290048685 │ openai-api-key │ 0            │
+│ 507861119290048686 │ postgres-creds │ 2            │
+└────────────────────┴────────────────┴──────────────┘
+(2 rows)
+```
+
+#### Registering (Legacy/Explicit)
+
+Register a Credential:
+```bash
+noetl register credential -f tests/fixtures/credentials/pg_k8s.json
+```
+
+Register a Playbook:
+```bash
+noetl register playbook -f tests/fixtures/playbooks/api_integration/auth0/provision_auth_schema.yaml
+```
+
+#### Direct Execution/Status/List
+
+Execute a Playbook:
+```bash
+noetl run playbook api_integration/auth0/provision_auth_schema
+```
+
+Get Execution Status:
+```bash
+noetl status <execution_id>
+```
+
+List Resources:
+```bash
+noetl list Playbook
+```
+
+### Interactive TUI Mode
+
+Run `noetl` with the `-i` or `--interactive` flag:
+
+```bash
+noetl --interactive
+```
+
+- **Navigation**: Use Up/Down arrows or `j`/`k` to navigate lists.
+- **Refresh**: Press `r` to refresh the data.
+- **Quit**: Press `q` to exit.
+
+## Docker Integration
+
+The `noetl` binary is built into the Docker image using a multi-stage build:
+
+```dockerfile
+# Rust builder stage compiles the CLI
+FROM rust:1.75-slim as rust-builder
+WORKDIR /build
+COPY noetlctl/ ./
+RUN cargo build --release
+
+# Production stage includes the binary
+COPY --from=rust-builder /build/target/release/noetl /usr/local/bin/noetl
+```
+
+The Kubernetes manifests use the Rust CLI for server and worker management:
+
+**Server deployment:**
+```yaml
+command: ["noetl"]
+args: ["server", "start"]
+```
+
+**Worker deployment:**
+```yaml
+command: ["noetl"]
+args: ["worker", "start"]
+```
+
+This provides a unified binary for both local development and containerized deployments.
+
+## Command Reference
+
+Common operations with the `noetl` CLI:
+
+| Operation | Command |
+|-----------|---------|
+| Build Docker image | `noetl build` |
+| Deploy to K8s | `noetl k8s deploy` |
+| Redeploy to K8s | `noetl k8s redeploy` |
+| Reset K8s deployment | `noetl k8s reset` |
+| Start server | `noetl server start` |
+| Start worker | `noetl worker start` |
+
+## Release and Distribution Channels
+
+This repository (`cli`) is the release coordinator for all public distribution channels.
+
+### Channel Matrix
+
+| Component | Repo | Crates.io | GitHub Release Tarballs | Homebrew | APT | Container Image |
+|-----------|------|-----------|--------------------------|----------|-----|-----------------|
+| CLI (`noetl`, `ntl`) | `noetl/cli` | ✅ `noetl` | ✅ | ✅ `noetl/homebrew-tap` | ✅ `noetl/apt` | Optional |
+| Server (`noetl-server`) | `noetl/server` | ✅ `noetl-server` | Optional | Optional | Optional | ✅ GHCR/GCR |
+| Worker (`noetl-worker`) | `noetl/worker` | ✅ `noetl-worker` | Optional | Optional | Optional | ✅ GHCR/GCR |
+| Gateway (`noetl-gateway`) | `noetl/gateway` | ✅ `noetl-gateway` | Optional | Optional | Optional | ✅ GHCR/GCR |
+| Shared tools (`noetl-tools`) | `noetl/tools` | ✅ `noetl-tools` | n/a | n/a | n/a | n/a |
+
+### Cloud Build vs Release Tarballs
+
+- **Use GitHub Actions + GitHub Releases** to produce and publish CLI tarballs.
+- **Use Cloud Build** for Kubernetes/deployment container images (GKE), not for Homebrew/APT artifact generation.
+
+### Required Tokens/Secrets
+
+For fully automated release, configure:
+
+- `CRATES_IO_TOKEN` (all crates: `cli`, `tools`, `server`, `worker`, `gateway`)
+- `HOMEBREW_TAP_PUSH_TOKEN` (push to `noetl/homebrew-tap`)
+- `APT_REPO_PUSH_TOKEN` (push to `noetl/apt`)
+- `GH_RELEASE_TOKEN` (if release upload does not use `GITHUB_TOKEN`)
+- `GHCR_TOKEN` / cloud registry credentials (for server/worker/gateway images)
+- `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` (if signing APT metadata)
+
+### Standard Release Order (vX.Y.Z)
+
+1. Publish library dependency first:
+   - `noetl-tools`
+2. Publish executables:
+   - `noetl-worker`
+   - `noetl-server`
+   - `noetl-gateway`
+   - `noetl` (CLI)
+3. Build and upload CLI release tarballs (must contain **both** `noetl` and `ntl` binaries).
+4. Update and push Homebrew formula in `noetl/homebrew-tap`.
+5. Append `.deb` packages to `noetl/apt` (do not delete old versions), regenerate metadata, sign, push.
+6. Build/push server, worker, gateway container images (Cloud Build or GH Actions), then deploy.
+
+### CLI Tarball Contract
+
+Each CLI release must ship archives containing both binaries:
+
+- `noetl`
+- `ntl`
+
+Verification examples:
+
+```bash
+cargo build --release --bins
+ls -l target/release/noetl target/release/ntl
+
+cargo package --list
+cargo publish --dry-run
+```
+
+### Homebrew Update Contract
+
+Homebrew tap repo: `https://github.com/noetl/homebrew-tap`
+
+- Formula path: `Formula/noetl.rb`
+- Use GitHub release source tarball URL (`https://github.com/noetl/cli/archive/refs/tags/vX.Y.Z.tar.gz`)
+- Update SHA256 and version, commit, push.
+
+### APT Update Contract
+
+APT repo: `https://github.com/noetl/apt`
+
+- Keep previously published `.deb` files in `pool/` (append-only).
+- Regenerate `Packages`, `Packages.gz`, `Release`, `InRelease`.
+- Sign repository metadata with release key.
+- Commit and push updated repo metadata.
+
+### Component Release Ownership
+
+- `cli` repo owns release orchestration and docs.
+- `server`, `worker`, and `gateway` repos each own:
+  - crate publish config (`Cargo.toml`),
+  - container image release path,
+  - per-repo release workflow.
