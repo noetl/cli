@@ -1,0 +1,224 @@
+name: release-cli
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without v prefix (e.g. 2.8.8). Leave empty for current Cargo.toml."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_VERSION=$(grep -E '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            TAG_VERSION="${TAG#v}"
+            if [[ "${TAG_VERSION}" != "${CARGO_VERSION}" ]]; then
+              echo "Tag version ${TAG_VERSION} does not match Cargo.toml version ${CARGO_VERSION}"
+              exit 1
+            fi
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            TAG="v${{ inputs.version }}"
+            if [[ "${{ inputs.version }}" != "${CARGO_VERSION}" ]]; then
+              echo "Input version ${{ inputs.version }} does not match Cargo.toml version ${CARGO_VERSION}"
+              exit 1
+            fi
+          else
+            TAG="v${CARGO_VERSION}"
+          fi
+          echo "version=${CARGO_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+  publish-crate:
+    runs-on: ubuntu-latest
+    needs: verify-version
+    if: ${{ secrets.CRATES_IO_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo publish
+
+  build-release-assets:
+    runs-on: ${{ matrix.os }}
+    needs: verify-version
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build binaries
+        run: cargo build --release --bins
+      - name: Package tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          OS="$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')"
+          ARCH="$(uname -m)"
+          mkdir -p dist
+          tar -C target/release -czf "dist/noetl-v${VERSION}-${OS}-${ARCH}.tar.gz" noetl ntl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bins-${{ matrix.os }}
+          path: dist/*.tar.gz
+
+  build-deb:
+    runs-on: ubuntu-latest
+    needs: verify-version
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build binaries
+        run: cargo build --release --bins
+      - name: Build deb package (amd64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          PKG_ROOT="dist/noetl_${VERSION}-1_amd64"
+          mkdir -p "${PKG_ROOT}/DEBIAN" "${PKG_ROOT}/usr/bin"
+          cp target/release/noetl "${PKG_ROOT}/usr/bin/noetl"
+          cp target/release/ntl "${PKG_ROOT}/usr/bin/ntl"
+          cat > "${PKG_ROOT}/DEBIAN/control" <<EOF
+          Package: noetl
+          Version: ${VERSION}-1
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: NoETL <support@noetl.io>
+          Description: NoETL workflow automation CLI
+          EOF
+          dpkg-deb --build "${PKG_ROOT}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-amd64
+          path: dist/*.deb
+
+  github-release:
+    runs-on: ubuntu-latest
+    needs: [verify-version, build-release-assets, build-deb]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Prepare files
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -type f -name '*.tar.gz' -o -name '*.deb' | sort > /tmp/release-files.txt
+          xargs -a /tmp/release-files.txt sha256sum > dist/checksums.txt
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify-version.outputs.tag }}
+          files: |
+            dist/**/*
+          generate_release_notes: true
+
+  update-homebrew-tap:
+    runs-on: ubuntu-latest
+    needs: [verify-version, github-release]
+    if: ${{ secrets.HOMEBREW_TAP_PUSH_TOKEN != '' }}
+    steps:
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: noetl/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_PUSH_TOKEN }}
+          path: tap
+      - name: Update formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          URL="https://github.com/noetl/cli/archive/refs/tags/v${VERSION}.tar.gz"
+          SHA=$(curl -sSL "${URL}" | sha256sum | awk '{print $1}')
+          cat > tap/Formula/noetl.rb <<EOF
+          class Noetl < Formula
+            desc "NoETL workflow automation CLI - Execute playbooks locally or orchestrate distributed pipelines"
+            homepage "https://noetl.io"
+            url "${URL}"
+            sha256 "${SHA}"
+            license "MIT"
+            head "https://github.com/noetl/cli.git", branch: "main"
+            depends_on "rust" => :build
+
+            def install
+              system "cargo", "install", *std_cargo_args
+            end
+
+            test do
+              assert_match "noetl", shell_output("#{bin}/noetl --version")
+              assert_match "ntl", shell_output("#{bin}/ntl --version")
+            end
+          end
+          EOF
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/noetl.rb
+          git commit -m "noetl ${{ needs.verify-version.outputs.version }}" || exit 0
+          git push origin HEAD:main
+
+  update-apt-repo:
+    runs-on: ubuntu-latest
+    needs: [verify-version, build-deb, github-release]
+    if: ${{ secrets.APT_REPO_PUSH_TOKEN != '' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb-amd64
+          path: dist
+      - name: Install apt tooling
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils
+      - name: Checkout apt repo
+        uses: actions/checkout@v4
+        with:
+          repository: noetl/apt
+          token: ${{ secrets.APT_REPO_PUSH_TOKEN }}
+          path: apt
+      - name: Update apt metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apt
+          mkdir -p pool/main dists/jammy/main/binary-amd64
+          cp ../dist/*.deb pool/main/
+          dpkg-scanpackages pool/main /dev/null > dists/jammy/main/binary-amd64/Packages
+          gzip -9c dists/jammy/main/binary-amd64/Packages > dists/jammy/main/binary-amd64/Packages.gz
+          apt-ftparchive release dists/jammy > dists/jammy/Release
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pool dists
+          git commit -m "noetl ${{ needs.verify-version.outputs.version }}" || exit 0
+          git push origin HEAD:main

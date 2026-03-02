@@ -403,8 +403,8 @@ This repository (`cli`) is the release coordinator for all public distribution c
 | Component | Repo | Crates.io | GitHub Release Tarballs | Homebrew | APT | Container Image |
 |-----------|------|-----------|--------------------------|----------|-----|-----------------|
 | CLI (`noetl`, `ntl`) | `noetl/cli` | ✅ `noetl` | ✅ | ✅ `noetl/homebrew-tap` | ✅ `noetl/apt` | Optional |
-| Server (`noetl-control-plane`) | `noetl/server` | ✅ `noetl-control-plane` | Optional | Optional | Optional | ✅ GHCR/GCR |
-| Worker (`noetl-worker`) | `noetl/worker` | ✅ `worker-pool` | Optional | Optional | Optional | ✅ GHCR/GCR |
+| Server (`noetl-server`) | `noetl/server` | ✅ `noetl-server` | Optional | Optional | Optional | ✅ GHCR/GCR |
+| Worker (`noetl-worker`) | `noetl/worker` | ✅ `noetl-worker` | Optional | Optional | Optional | ✅ GHCR/GCR |
 | Gateway (`noetl-gateway`) | `noetl/gateway` | ✅ `noetl-gateway` | Optional | Optional | Optional | ✅ GHCR/GCR |
 | Shared tools (`noetl-tools`) | `noetl/tools` | ✅ `noetl-tools` | n/a | n/a | n/a | n/a |
 
@@ -429,8 +429,8 @@ For fully automated release, configure:
 1. Publish library dependency first:
    - `noetl-tools`
 2. Publish executables:
-   - `worker-pool`
-   - `noetl-control-plane`
+   - `noetl-worker`
+   - `noetl-server`
    - `noetl-gateway`
    - `noetl` (CLI)
 3. Build and upload CLI release tarballs (must contain **both** `noetl` and `ntl` binaries).
