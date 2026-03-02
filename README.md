@@ -393,3 +393,89 @@ Common operations with the `noetl` CLI:
 | Reset K8s deployment | `noetl k8s reset` |
 | Start server | `noetl server start` |
 | Start worker | `noetl worker start` |
+
+## Release and Distribution Channels
+
+This repository (`cli`) is the release coordinator for all public distribution channels.
+
+### Channel Matrix
+
+| Component | Repo | Crates.io | GitHub Release Tarballs | Homebrew | APT | Container Image |
+|-----------|------|-----------|--------------------------|----------|-----|-----------------|
+| CLI (`noetl`, `ntl`) | `noetl/cli` | ✅ `noetl` | ✅ | ✅ `noetl/homebrew-tap` | ✅ `noetl/apt` | Optional |
+| Server (`noetl-control-plane`) | `noetl/server` | ✅ `noetl-control-plane` | Optional | Optional | Optional | ✅ GHCR/GCR |
+| Worker (`noetl-worker`) | `noetl/worker` | ✅ `worker-pool` | Optional | Optional | Optional | ✅ GHCR/GCR |
+| Gateway (`noetl-gateway`) | `noetl/gateway` | ✅ `noetl-gateway` | Optional | Optional | Optional | ✅ GHCR/GCR |
+| Shared tools (`noetl-tools`) | `noetl/tools` | ✅ `noetl-tools` | n/a | n/a | n/a | n/a |
+
+### Cloud Build vs Release Tarballs
+
+- **Use GitHub Actions + GitHub Releases** to produce and publish CLI tarballs.
+- **Use Cloud Build** for Kubernetes/deployment container images (GKE), not for Homebrew/APT artifact generation.
+
+### Required Tokens/Secrets
+
+For fully automated release, configure:
+
+- `CRATES_IO_TOKEN` (all crates: `cli`, `tools`, `server`, `worker`, `gateway`)
+- `HOMEBREW_TAP_PUSH_TOKEN` (push to `noetl/homebrew-tap`)
+- `APT_REPO_PUSH_TOKEN` (push to `noetl/apt`)
+- `GH_RELEASE_TOKEN` (if release upload does not use `GITHUB_TOKEN`)
+- `GHCR_TOKEN` / cloud registry credentials (for server/worker/gateway images)
+- `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` (if signing APT metadata)
+
+### Standard Release Order (vX.Y.Z)
+
+1. Publish library dependency first:
+   - `noetl-tools`
+2. Publish executables:
+   - `worker-pool`
+   - `noetl-control-plane`
+   - `noetl-gateway`
+   - `noetl` (CLI)
+3. Build and upload CLI release tarballs (must contain **both** `noetl` and `ntl` binaries).
+4. Update and push Homebrew formula in `noetl/homebrew-tap`.
+5. Append `.deb` packages to `noetl/apt` (do not delete old versions), regenerate metadata, sign, push.
+6. Build/push server, worker, gateway container images (Cloud Build or GH Actions), then deploy.
+
+### CLI Tarball Contract
+
+Each CLI release must ship archives containing both binaries:
+
+- `noetl`
+- `ntl`
+
+Verification examples:
+
+```bash
+cargo build --release --bins
+ls -l target/release/noetl target/release/ntl
+
+cargo package --list
+cargo publish --dry-run
+```
+
+### Homebrew Update Contract
+
+Homebrew tap repo: `https://github.com/noetl/homebrew-tap`
+
+- Formula path: `Formula/noetl.rb`
+- Use GitHub release source tarball URL (`https://github.com/noetl/cli/archive/refs/tags/vX.Y.Z.tar.gz`)
+- Update SHA256 and version, commit, push.
+
+### APT Update Contract
+
+APT repo: `https://github.com/noetl/apt`
+
+- Keep previously published `.deb` files in `pool/` (append-only).
+- Regenerate `Packages`, `Packages.gz`, `Release`, `InRelease`.
+- Sign repository metadata with release key.
+- Commit and push updated repo metadata.
+
+### Component Release Ownership
+
+- `cli` repo owns release orchestration and docs.
+- `server`, `worker`, and `gateway` repos each own:
+  - crate publish config (`Cargo.toml`),
+  - container image release path,
+  - per-repo release workflow.
