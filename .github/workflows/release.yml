@@ -71,7 +71,25 @@ jobs:
         if: ${{ env.CRATES_IO_TOKEN != '' && steps.crate_check.outputs.already_published != 'true' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ env.CRATES_IO_TOKEN }}
-        run: cargo publish
+        shell: bash
+        run: |
+          set +e
+          OUTPUT="$(cargo publish 2>&1)"
+          STATUS=$?
+          set -e
+
+          echo "${OUTPUT}"
+
+          if [[ ${STATUS} -eq 0 ]]; then
+            exit 0
+          fi
+
+          if echo "${OUTPUT}" | grep -Eqi "already uploaded|already exists"; then
+            echo "Crate version already published; continuing."
+            exit 0
+          fi
+
+          exit ${STATUS}
       - name: Skip publish (already exists)
         if: ${{ steps.crate_check.outputs.already_published == 'true' }}
         run: echo "Crate version already published; skipping cargo publish."
