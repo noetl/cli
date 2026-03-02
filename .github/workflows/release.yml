@@ -26,6 +26,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          INPUT_VERSION="${{ github.event.inputs.version }}"
           CARGO_VERSION=$(grep -E '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             TAG="${GITHUB_REF_NAME}"
@@ -34,10 +35,10 @@ jobs:
               echo "Tag version ${TAG_VERSION} does not match Cargo.toml version ${CARGO_VERSION}"
               exit 1
             fi
-          elif [[ -n "${{ inputs.version }}" ]]; then
-            TAG="v${{ inputs.version }}"
-            if [[ "${{ inputs.version }}" != "${CARGO_VERSION}" ]]; then
-              echo "Input version ${{ inputs.version }} does not match Cargo.toml version ${CARGO_VERSION}"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            TAG="v${INPUT_VERSION}"
+            if [[ "${INPUT_VERSION}" != "${CARGO_VERSION}" ]]; then
+              echo "Input version ${INPUT_VERSION} does not match Cargo.toml version ${CARGO_VERSION}"
               exit 1
             fi
           else
