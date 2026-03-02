@@ -7,10 +7,17 @@ NoETL workflow automation CLI - Execute playbooks locally or orchestrate distrib
 
 ## Installation
 
+`noetl` package installs **two equivalent commands**:
+
+- `noetl` (full name)
+- `ntl` (short alias)
+
+Both binaries run the same CLI and are interchangeable.
+
 ### Via Cargo
 
 ```bash
-cargo install noetl
+cargo install --bins noetl
 ```
 
 ### Via Homebrew (macOS)
@@ -26,6 +33,24 @@ brew install noetl
 echo 'deb [trusted=yes] https://noetl.github.io/apt jammy main' | sudo tee /etc/apt/sources.list.d/noetl.list
 sudo apt-get update
 sudo apt-get install noetl
+```
+
+### Via GitHub Release Tarball
+
+```bash
+# Example: Linux x86_64
+VERSION=2.8.7
+curl -L -o /tmp/noetl.tgz "https://github.com/noetl/cli/releases/download/v${VERSION}/noetl-v${VERSION}-linux-x86_64.tar.gz"
+tar -xzf /tmp/noetl.tgz -C /tmp
+sudo install -m 0755 /tmp/noetl /usr/local/bin/noetl
+sudo install -m 0755 /tmp/ntl /usr/local/bin/ntl
+```
+
+### Verify Install
+
+```bash
+noetl --version
+ntl --version
 ```
 
 ## Quick Start
