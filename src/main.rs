@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
-#[command(name = "noetl")]
+#[command(name = env!("CARGO_BIN_NAME"))]
 #[command(version, about = "NoETL Command Line Tool", long_about = None)]
 struct Cli {
     #[command(subcommand)]
