@@ -20,7 +20,7 @@ use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
     Client,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -406,6 +406,23 @@ enum ExecuteCommand {
         path: String,
 
         /// Path to JSON file with parameters
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+
+        /// Emit only the JSON response
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// Rerun a previous execution using the same playbook path/workload baseline.
+    /// Examples:
+    ///     noetl execute rerun 12345
+    ///     noetl execute rerun 12345 --input params.json --json
+    #[command(verbatim_doc_comment)]
+    Rerun {
+        /// Source execution ID to rerun
+        execution_id: String,
+
+        /// Optional JSON workload override file
         #[arg(short, long)]
         input: Option<PathBuf>,
 
@@ -1022,6 +1039,28 @@ struct RegisterRequest {
     resource_type: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ExecutionResourceKind {
+    Playbook,
+    Notebook,
+}
+
+#[derive(Serialize)]
+struct ExecuteApiRequest {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<i64>,
+    workload: serde_json::Value,
+    resource_kind: ExecutionResourceKind,
+}
+
+#[derive(Serialize)]
+struct RerunApiRequest {
+    workload: serde_json::Value,
+    resource_kind: ExecutionResourceKind,
+}
+
 /// Reference type for playbook execution
 #[derive(Debug)]
 enum RefType {
@@ -1581,6 +1620,7 @@ async fn main() -> Result<()> {
                         &path,
                         version.and_then(|v| v.parse().ok()),
                         request_payload,
+                        ExecutionResourceKind::Playbook,
                         json,
                     )
                     .await?;
@@ -1640,6 +1680,7 @@ async fn main() -> Result<()> {
                     &catalog_path,
                     None, // version
                     build_distributed_payload(None, payload.as_deref(), &variables)?,
+                    ExecutionResourceKind::Playbook,
                     false, // json output
                 )
                 .await?;
@@ -1745,6 +1786,23 @@ async fn main() -> Result<()> {
         Some(Commands::Execute { command }) => match command {
             ExecuteCommand::Playbook { path, input, json } => {
                 execute_playbook(&client, &base_url, use_gateway_proxy, &path, input, json).await?;
+            }
+            ExecuteCommand::Rerun {
+                execution_id,
+                input,
+                json,
+            } => {
+                let workload = build_distributed_payload(input.as_ref(), None, &[])?;
+                execute_rerun_distributed(
+                    &client,
+                    &base_url,
+                    use_gateway_proxy,
+                    &execution_id,
+                    workload,
+                    ExecutionResourceKind::Playbook,
+                    json,
+                )
+                .await?;
             }
             ExecuteCommand::Status { execution_id, json } => {
                 get_status(&client, &base_url, use_gateway_proxy, &execution_id, json).await?;
@@ -2421,19 +2479,17 @@ async fn execute_playbook_distributed(
     use_gateway_proxy: bool,
     path: &str,
     version: Option<i64>,
-    payload: serde_json::Value,
+    workload: serde_json::Value,
+    resource_kind: ExecutionResourceKind,
     json_only: bool,
 ) -> Result<()> {
-    // Build request with optional version
     let url = api_url(base_url, "execute", use_gateway_proxy);
-    let mut request_body = serde_json::json!({
-        "path": path,
-        "payload": payload
-    });
-
-    if let Some(v) = version {
-        request_body["version"] = serde_json::json!(v);
-    }
+    let request_body = ExecuteApiRequest {
+        path: path.to_string(),
+        version,
+        workload,
+        resource_kind,
+    };
 
     if !json_only {
         println!("Executing playbook on distributed server...");
@@ -2475,6 +2531,60 @@ async fn execute_playbook_distributed(
     Ok(())
 }
 
+async fn execute_rerun_distributed(
+    client: &Client,
+    base_url: &str,
+    use_gateway_proxy: bool,
+    execution_id: &str,
+    workload: serde_json::Value,
+    resource_kind: ExecutionResourceKind,
+    json_only: bool,
+) -> Result<()> {
+    let url = api_url(
+        base_url,
+        &format!("executions/{}/rerun", execution_id),
+        use_gateway_proxy,
+    );
+    let request_body = RerunApiRequest {
+        workload,
+        resource_kind,
+    };
+
+    if !json_only {
+        println!("Rerunning execution on distributed server...");
+        println!("  Source Execution: {}", execution_id);
+        println!("  Server: {}", base_url);
+    }
+
+    let response = client
+        .post(&url)
+        .json(&request_body)
+        .send()
+        .await
+        .context("Failed to send rerun request")?;
+
+    if response.status().is_success() {
+        let result: serde_json::Value = response.json().await?;
+        if json_only {
+            println!("{}", serde_json::to_string(&result)?);
+        } else {
+            println!("\nRerun started:");
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            if let Some(exec_id) = result.get("execution_id") {
+                println!("\nTo check status:");
+                println!("  noetl execute status {}", exec_id);
+            }
+        }
+    } else {
+        let status = response.status();
+        let text = response.text().await?;
+        eprintln!("Failed to rerun execution: {} - {}", status, text);
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
 async fn execute_playbook(
     client: &Client,
     base_url: &str,
@@ -2485,7 +2595,17 @@ async fn execute_playbook(
 ) -> Result<()> {
     // Legacy function - delegate to new one without version
     let payload = build_distributed_payload(input.as_ref(), None, &[])?;
-    execute_playbook_distributed(client, base_url, use_gateway_proxy, path, None, payload, json_only).await
+    execute_playbook_distributed(
+        client,
+        base_url,
+        use_gateway_proxy,
+        path,
+        None,
+        payload,
+        ExecutionResourceKind::Playbook,
+        json_only,
+    )
+    .await
 }
 
 async fn get_status(

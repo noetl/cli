@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "noetl"
-version = "2.8.7"
+version = "2.8.8"
 dependencies = [
  "anyhow",
  "base64",

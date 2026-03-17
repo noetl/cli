@@ -289,6 +289,11 @@ Execute a playbook:
 noetl execute playbook tests/fixtures/playbooks/regression_test/master_regression_test --json
 ```
 
+Rerun an existing execution:
+```bash
+noetl execute rerun 522107710393811426 --json
+```
+
 Get execution status:
 ```bash
 noetl execute status 522107710393811426 --json
@@ -350,12 +355,17 @@ noetl register playbook -f tests/fixtures/playbooks/api_integration/auth0/provis
 
 Execute a Playbook:
 ```bash
-noetl run playbook api_integration/auth0/provision_auth_schema
+noetl execute playbook api_integration/auth0/provision_auth_schema
+```
+
+Rerun a Playbook Execution:
+```bash
+noetl execute rerun <execution_id>
 ```
 
 Get Execution Status:
 ```bash
-noetl status <execution_id>
+noetl execute status <execution_id>
 ```
 
 List Resources:
