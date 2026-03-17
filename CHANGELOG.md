@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.8](https://github.com/noetl/cli/compare/v2.8.7...v2.8.8) (2026-03-17)
+
+### Bug Fixes
+
+* add execute rerun command and canonical payload contract ([a2f4ca5](https://github.com/noetl/cli/commit/a2f4ca5e9114145871fb52ed7ce463a676409fb6))
+
 ## 2.8.7 (2026-03-02)
 
 ### Bug Fixes
