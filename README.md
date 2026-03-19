@@ -263,6 +263,58 @@ Clear cached token:
 noetl auth logout
 ```
 
+#### End-to-End: Switch Context and Register via Gateway
+
+This is the recommended operator flow for switching between local, direct cluster, and gateway access.
+
+1. Create base contexts once:
+```bash
+# Local development (file-path playbooks, no server required)
+noetl context add local-dev \
+  --server-url http://localhost:8082 \
+  --runtime local \
+  --set-current
+
+# Direct NoETL API (kind/GKE API endpoint via port-forward or internal URL)
+noetl context add kind-cluster \
+  --server-url http://localhost:8082 \
+  --runtime distributed
+
+# Gateway entrypoint (public URL, authenticated /noetl/* proxy)
+noetl context add gateway-prod \
+  --server-url https://gateway.mestumre.dev \
+  --runtime distributed \
+  --auth0-domain mestumre-development.us.auth0.com
+```
+
+2. Switch to gateway context and authenticate:
+```bash
+noetl context use gateway-prod
+noetl auth login --auth0-callback-url 'https://mestumre.dev/login#id_token=...'
+```
+
+3. Register credentials and playbooks through gateway proxy:
+```bash
+noetl --gateway catalog register tests/fixtures/credentials/pg_k8s.json
+noetl --gateway catalog register tests/fixtures/playbooks/api_integration/amadeus_ai_api/amadeus_ai_api.yaml
+```
+
+4. Verify registration through the same gateway context:
+```bash
+noetl --gateway catalog list Credential --json
+noetl --gateway catalog list Playbook --json
+```
+
+5. Switch back when done:
+```bash
+noetl context use local-dev
+```
+
+References:
+- https://noetl.dev/docs/reference/noetl_cli_usage
+- https://noetl.dev/docs/cli/
+- https://noetl.dev/docs/gateway/
+
 ### CLI Mode
 
 #### Catalog Management
