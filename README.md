@@ -234,6 +234,8 @@ Token flow:
 noetl context add gateway \
   --server-url https://gateway.mestumre.dev \
   --auth0-domain mestumre-development.us.auth0.com \
+  --auth0-client-id '<AUTH0_CLIENT_ID>' \
+  --auth0-redirect-uri 'https://mestumre.dev/login' \
   --set-current
 ```
 
@@ -261,6 +263,33 @@ noetl --gateway --session-token '<gateway-session-token>' catalog list Playbook
 Clear cached token:
 ```bash
 noetl auth logout
+```
+
+### Console Mode (REPL)
+
+Run CLI commands without leaving a persistent prompt:
+
+```bash
+noetl console
+```
+
+Prompt format:
+- `noetl(<context>@<server>|api)>` for direct API calls
+- `noetl(<context>@<server>|gw)>` for gateway proxy mode
+
+Examples inside console:
+```bash
+context current
+context use gke-prod
+where
+--gateway catalog register tests/fixtures/playbooks/quantum_cudaq/quantum_cudaq.yaml
+exec tests/quantum/cudaq_ai_pipeline -r distributed
+status 123456789012345678 --json
+```
+
+Exit console:
+```bash
+exit
 ```
 
 #### End-to-End: Switch Context and Register via Gateway

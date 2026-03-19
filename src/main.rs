@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -163,6 +164,14 @@ enum Commands {
         #[command(subcommand)]
         command: ContextCommand,
     },
+    /// Interactive CLI console (REPL) with connection-aware prompt
+    ///
+    /// Examples:
+    ///     noetl console
+    ///     noetl --gateway console
+    ///     noetl --server-url https://gateway.example.com console
+    #[command(verbatim_doc_comment)]
+    Console,
     /// Gateway authentication management
     Auth {
         #[command(subcommand)]
@@ -1439,6 +1448,214 @@ fn api_url(base_url: &str, path: &str, use_gateway_proxy: bool) -> String {
     }
 }
 
+fn resolve_base_url(cli: &Cli, config: &Config) -> String {
+    if let Some(url) = cli.server_url.clone() {
+        url
+    } else if let (Some(host), Some(port)) = (cli.host.as_ref(), cli.port) {
+        format!("http://{}:{}", host, port)
+    } else {
+        config
+            .get_current_context()
+            .map(|(_, ctx)| ctx.server_url.clone())
+            .unwrap_or_else(|| "http://localhost:8082".to_string())
+    }
+}
+
+fn resolve_session_token(cli: &Cli, config: &Config) -> Option<String> {
+    let env_session_token = std::env::var("NOETL_SESSION_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let context_session_token = config
+        .get_current_context()
+        .and_then(|(_, ctx)| ctx.gateway_session_token.clone())
+        .filter(|v| !v.trim().is_empty());
+
+    cli.session_token
+        .clone()
+        .or(env_session_token)
+        .or(context_session_token)
+}
+
+fn display_endpoint(base_url: &str) -> String {
+    base_url
+        .trim()
+        .trim_end_matches('/')
+        .strip_prefix("https://")
+        .or_else(|| base_url.trim().trim_end_matches('/').strip_prefix("http://"))
+        .unwrap_or(base_url.trim().trim_end_matches('/'))
+        .to_string()
+}
+
+fn split_console_args(line: &str) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in line.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => {
+                escaped = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if in_single || in_double {
+        anyhow::bail!("Unterminated quote in command.");
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Ok(args)
+}
+
+fn inject_global_cli_overrides(mut command: Command, cli: &Cli) -> Command {
+    if let Some(host) = &cli.host {
+        command.arg("--host").arg(host);
+    }
+    if let Some(port) = cli.port {
+        command.arg("--port").arg(port.to_string());
+    }
+    if let Some(server_url) = &cli.server_url {
+        command.arg("--server-url").arg(server_url);
+    }
+    if cli.gateway {
+        command.arg("--gateway");
+    }
+    if let Some(token) = &cli.session_token {
+        command.arg("--session-token").arg(token);
+    }
+    command
+}
+
+fn print_console_help() {
+    println!("NoETL Console commands:");
+    println!("  <noetl subcommand>   Run any CLI command without leaving console");
+    println!("  help                 Show console help");
+    println!("  where                Show current context/server/proxy mode");
+    println!("  exit | quit          Leave console");
+    println!();
+    println!("Examples:");
+    println!("  context list");
+    println!("  context use gke-prod");
+    println!("  auth login --auth0-callback-url 'https://app/login#id_token=...'");
+    println!("  --gateway catalog register tests/fixtures/playbooks/foo.yaml");
+    println!("  exec tests/quantum/cudaq_ai_pipeline -r distributed");
+}
+
+fn print_console_where(cli: &Cli) -> Result<()> {
+    let config = Config::load()?;
+    let base_url = resolve_base_url(cli, &config);
+    let use_gateway_proxy = cli.gateway || env_flag("NOETL_USE_GATEWAY") || is_gateway_url(&base_url);
+    let context = config.current_context.clone().unwrap_or_else(|| "-".to_string());
+    let token = resolve_session_token(cli, &config);
+    println!("Context: {}", context);
+    println!("Server:  {}", base_url);
+    println!(
+        "Proxy:   {}",
+        if use_gateway_proxy {
+            "gateway (/noetl/*)"
+        } else {
+            "direct (/api/*)"
+        }
+    );
+    println!("Token:   {}", if token.is_some() { "available" } else { "not set" });
+    Ok(())
+}
+
+fn run_console(cli: &Cli) -> Result<()> {
+    println!("NoETL Console started. Type 'help' for commands, 'exit' to quit.");
+    loop {
+        let config = Config::load()?;
+        let base_url = resolve_base_url(cli, &config);
+        let use_gateway_proxy = cli.gateway || env_flag("NOETL_USE_GATEWAY") || is_gateway_url(&base_url);
+        let context_name = config.current_context.unwrap_or_else(|| "-".to_string());
+        let endpoint = display_endpoint(&base_url);
+        let mode = if use_gateway_proxy { "gw" } else { "api" };
+        let prompt = format!("noetl({}@{}|{})> ", context_name, endpoint, mode);
+
+        let line = prompt_input(&prompt)?;
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if matches!(input, "exit" | "quit") {
+            break;
+        }
+        if input == "help" {
+            print_console_help();
+            continue;
+        }
+        if input == "where" {
+            print_console_where(cli)?;
+            continue;
+        }
+
+        let mut args = split_console_args(input)?;
+        if args.is_empty() {
+            continue;
+        }
+
+        if args[0] == "noetl" || args[0] == "ntl" {
+            args.remove(0);
+        }
+        if args.is_empty() {
+            continue;
+        }
+        if args[0] == "console" {
+            eprintln!("Already in console. Use 'exit' to leave.");
+            continue;
+        }
+
+        // Allow one-line explicit gateway override:
+        //   --gateway <command ...>
+        let mut force_gateway = false;
+        if args[0] == "--gateway" {
+            force_gateway = true;
+            args.remove(0);
+            if args.is_empty() {
+                eprintln!("No command provided after --gateway.");
+                continue;
+            }
+        }
+
+        let exe = std::env::current_exe().context("Failed to resolve current executable path")?;
+        let mut child = inject_global_cli_overrides(Command::new(exe), cli);
+        if force_gateway {
+            child.arg("--gateway");
+        }
+        child.args(&args);
+
+        let status = child.status().context("Failed to execute command in console")?;
+        if !status.success() {
+            eprintln!("Command exited with status: {}", status);
+        }
+    }
+
+    Ok(())
+}
+
 fn build_http_client(session_token: Option<&str>) -> Result<Client> {
     if let Some(token) = session_token {
         let mut headers = HeaderMap::new();
@@ -1463,29 +1680,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut config = Config::load()?;
 
-    let base_url = if let Some(url) = cli.server_url.clone() {
-        url
-    } else if let (Some(host), Some(port)) = (cli.host.as_ref(), cli.port) {
-        format!("http://{}:{}", host, port)
-    } else {
-        config
-            .get_current_context()
-            .map(|(_, ctx)| ctx.server_url.clone())
-            .unwrap_or_else(|| "http://localhost:8082".to_string())
-    };
+    if matches!(cli.command, Some(Commands::Console)) {
+        return run_console(&cli);
+    }
 
-    let env_session_token = std::env::var("NOETL_SESSION_TOKEN")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
-    let context_session_token = config
-        .get_current_context()
-        .and_then(|(_, ctx)| ctx.gateway_session_token.clone())
-        .filter(|v| !v.trim().is_empty());
-    let session_token = cli
-        .session_token
-        .clone()
-        .or(env_session_token)
-        .or(context_session_token);
+    let base_url = resolve_base_url(&cli, &config);
+
+    let session_token = resolve_session_token(&cli, &config);
 
     let use_gateway_proxy = cli.gateway || env_flag("NOETL_USE_GATEWAY") || is_gateway_url(&base_url);
     let is_auth_login_command = matches!(
@@ -1507,6 +1708,7 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
+        Some(Commands::Console) => {}
         Some(Commands::Exec {
             reference,
             runtime,
@@ -1893,20 +2095,36 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
                 std::process::exit(1);
             }
 
-            config.contexts.insert(
-                name.clone(),
-                Context::new(server_url)
-                    .with_runtime(runtime)
-                    .with_gateway_auth0_domain(auth0_domain)
-                    .with_gateway_auth0_client_id(auth0_client_id)
-                    .with_gateway_auth0_redirect_uri(auth0_redirect_uri)
-                    .with_gateway_auth0_client_secret(auth0_client_secret),
-            );
+            // Upsert behavior:
+            // - Keep cached gateway session token for existing contexts.
+            // - Update only provided Auth0 fields; omitted fields stay as-is.
+            let mut context = config
+                .contexts
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| Context::new(server_url.clone()));
+
+            context.server_url = server_url;
+            context.runtime = runtime;
+            if let Some(domain) = auth0_domain {
+                context.gateway_auth0_domain = Some(domain);
+            }
+            if let Some(client_id) = auth0_client_id {
+                context.gateway_auth0_client_id = Some(client_id);
+            }
+            if let Some(redirect_uri) = auth0_redirect_uri {
+                context.gateway_auth0_redirect_uri = Some(redirect_uri);
+            }
+            if let Some(client_secret) = auth0_client_secret {
+                context.gateway_auth0_client_secret = Some(client_secret);
+            }
+
+            config.contexts.insert(name.clone(), context);
             if set_current || config.current_context.is_none() {
                 config.current_context = Some(name.clone());
             }
             config.save()?;
-            println!("Context '{}' added.", name);
+            println!("Context '{}' added/updated.", name);
             if config.current_context.as_ref() == Some(&name) {
                 println!("Context '{}' is now the current context.", name);
             }

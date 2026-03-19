@@ -43,31 +43,6 @@ impl Context {
             gateway_auth0_client_secret: None,
         }
     }
-
-    pub fn with_runtime(mut self, runtime: String) -> Self {
-        self.runtime = runtime;
-        self
-    }
-
-    pub fn with_gateway_auth0_domain(mut self, domain: Option<String>) -> Self {
-        self.gateway_auth0_domain = domain;
-        self
-    }
-
-    pub fn with_gateway_auth0_client_id(mut self, client_id: Option<String>) -> Self {
-        self.gateway_auth0_client_id = client_id;
-        self
-    }
-
-    pub fn with_gateway_auth0_redirect_uri(mut self, redirect_uri: Option<String>) -> Self {
-        self.gateway_auth0_redirect_uri = redirect_uri;
-        self
-    }
-
-    pub fn with_gateway_auth0_client_secret(mut self, client_secret: Option<String>) -> Self {
-        self.gateway_auth0_client_secret = client_secret;
-        self
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
