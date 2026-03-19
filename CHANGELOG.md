@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.9.0](https://github.com/noetl/cli/compare/v2.8.8...v2.9.0) (2026-03-19)
+
+### Features
+
+* add console REPL and preserve context auth state on updates ([6eb8840](https://github.com/noetl/cli/commit/6eb88407af4975e992d515cc18fd3de1b2d928d4))
+
 ## [2.8.8](https://github.com/noetl/cli/compare/v2.8.7...v2.8.8) (2026-03-17)
 
 ### Bug Fixes
