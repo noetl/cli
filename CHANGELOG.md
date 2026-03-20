@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.10.0](https://github.com/noetl/cli/compare/v2.9.0...v2.10.0) (2026-03-20)
+
+### Features
+
+* add browser device auth flow and optional auth0 secret ([3ef88b3](https://github.com/noetl/cli/commit/3ef88b39692ab271dc639b7ba7c1d14ec8b8ecfc))
+
 ## [2.9.0](https://github.com/noetl/cli/compare/v2.8.8...v2.9.0) (2026-03-19)
 
 ### Features
