@@ -246,6 +246,8 @@ noetl auth login --auth0-token '<ID_TOKEN_FROM_AUTH0>'
 noetl auth login --auth0-callback-url 'https://mestumre.dev/login#id_token=...'
 # or (email/login hint -> CLI prompts for callback URL/token once):
 noetl auth login --auth0 'akuksin@gmail.com'
+# or (gcloud-style browser/device flow, no callback copy/paste):
+noetl auth login --browser
 ```
 
 3. Run commands through gateway proxy:
@@ -263,6 +265,15 @@ noetl --gateway --session-token '<gateway-session-token>' catalog list Playbook
 Clear cached token:
 ```bash
 noetl auth logout
+```
+
+Password grant without storing secrets locally:
+```bash
+# one-time secret (not persisted in context)
+noetl auth login --auth0 'user@example.com' --password --auth0-client-secret "$AUTH0_CLIENT_SECRET"
+
+# or ephemeral env var
+NOETL_AUTH0_CLIENT_SECRET="$AUTH0_CLIENT_SECRET" noetl auth login --auth0 'user@example.com' --password
 ```
 
 ### Console Mode (REPL)

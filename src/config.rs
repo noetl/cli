@@ -22,6 +22,9 @@ pub struct Context {
     /// Auth0 redirect URI — the URL Auth0 sends the token to after login.
     #[serde(default)]
     pub gateway_auth0_redirect_uri: Option<String>,
+    /// Optional Auth0 audience for password grant.
+    #[serde(default)]
+    pub gateway_auth0_audience: Option<String>,
     /// Auth0 client_secret for password grant (stored locally, used by 'noetl auth login --password').
     #[serde(default)]
     pub gateway_auth0_client_secret: Option<String>,
@@ -40,6 +43,7 @@ impl Context {
             gateway_auth0_domain: None,
             gateway_auth0_client_id: None,
             gateway_auth0_redirect_uri: None,
+            gateway_auth0_audience: None,
             gateway_auth0_client_secret: None,
         }
     }

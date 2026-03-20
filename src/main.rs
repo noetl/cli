@@ -914,7 +914,7 @@ enum ContextCommand {
     ///     noetl context add local --server-url=http://localhost:8082
     ///     noetl context add local-dev --server-url=http://localhost:8082 --runtime=local
     ///     noetl context add prod --server-url=https://noetl.example.com --runtime=distributed
-    ///     noetl context add gateway --server-url=https://gateway.example.com --auth0-domain=tenant.auth0.com --auth0-client-id=abc123 --auth0-redirect-uri=https://app.example.com/login
+    ///     noetl context add gateway --server-url=https://gateway.example.com --auth0-domain=tenant.auth0.com --auth0-client-id=abc123 --auth0-redirect-uri=https://app.example.com/login --auth0-audience=https://api.example.com
     ///     noetl context add staging --server-url=http://staging:8082 --set-current
     #[command(verbatim_doc_comment)]
     Add {
@@ -935,6 +935,9 @@ enum ContextCommand {
         /// Auth0 redirect URI after browser login (e.g. https://app.example.com/login)
         #[arg(long)]
         auth0_redirect_uri: Option<String>,
+        /// Optional Auth0 audience for password grant token exchange
+        #[arg(long)]
+        auth0_audience: Option<String>,
         /// Auth0 client_secret for password grant login (stored locally)
         #[arg(long)]
         auth0_client_secret: Option<String>,
@@ -990,6 +993,9 @@ enum AuthCommand {
     ///     noetl auth login --auth0-callback-url 'https://app/login#id_token=...'
     ///     noetl auth login --auth0 user@example.com
     ///     noetl auth login --auth0 user@example.com --password
+    ///     noetl auth login --auth0 user@example.com --password --auth0-audience https://api.example.com
+    ///     noetl auth login --auth0 user@example.com --password --auth0-client-secret $AUTH0_CLIENT_SECRET
+    ///     noetl auth login --browser
     ///     noetl auth login --auth0-token <ID_TOKEN> --context gateway
     #[command(verbatim_doc_comment)]
     Login {
@@ -1009,6 +1015,22 @@ enum AuthCommand {
         /// Auth0 domain (defaults to context value, then gateway default)
         #[arg(long)]
         auth0_domain: Option<String>,
+
+        /// Optional Auth0 audience for password grant (overrides context value)
+        #[arg(long)]
+        auth0_audience: Option<String>,
+
+        /// Optional Auth0 client secret for password grant (overrides context and NOETL_AUTH0_CLIENT_SECRET)
+        #[arg(long)]
+        auth0_client_secret: Option<String>,
+
+        /// Browser/device login flow (gcloud-style) without callback copy/paste
+        #[arg(long, conflicts_with = "password")]
+        browser: bool,
+
+        /// Do not auto-open browser in --browser mode (print URL only)
+        #[arg(long)]
+        no_browser_open: bool,
 
         /// Use Auth0 password grant (prompts for password in terminal, no browser needed)
         #[arg(long)]
@@ -1695,8 +1717,12 @@ async fn main() -> Result<()> {
             command: AuthCommand::Login { .. }
         })
     );
+    let is_context_or_auth_command = matches!(
+        &cli.command,
+        Some(Commands::Context { .. }) | Some(Commands::Auth { .. })
+    );
 
-    if use_gateway_proxy && session_token.is_none() && !is_auth_login_command {
+    if use_gateway_proxy && session_token.is_none() && !is_auth_login_command && !is_context_or_auth_command {
         eprintln!("Warning: gateway mode enabled but no session token provided.");
         eprintln!("  Set --session-token <token> or NOETL_SESSION_TOKEN to authenticate gateway requests.");
     }
@@ -2086,6 +2112,7 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
             auth0_domain,
             auth0_client_id,
             auth0_redirect_uri,
+            auth0_audience,
             auth0_client_secret,
             set_current,
         } => {
@@ -2115,8 +2142,19 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
             if let Some(redirect_uri) = auth0_redirect_uri {
                 context.gateway_auth0_redirect_uri = Some(redirect_uri);
             }
+            if let Some(audience) = auth0_audience {
+                if audience.trim().is_empty() {
+                    context.gateway_auth0_audience = None;
+                } else {
+                    context.gateway_auth0_audience = Some(audience);
+                }
+            }
             if let Some(client_secret) = auth0_client_secret {
-                context.gateway_auth0_client_secret = Some(client_secret);
+                if client_secret.trim().is_empty() {
+                    context.gateway_auth0_client_secret = None;
+                } else {
+                    context.gateway_auth0_client_secret = Some(client_secret);
+                }
             }
 
             config.contexts.insert(name.clone(), context);
@@ -2206,6 +2244,10 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
                     ctx.gateway_auth0_domain.as_deref().unwrap_or("(gateway default)")
                 );
                 println!(
+                    "  Audience:   {}",
+                    ctx.gateway_auth0_audience.as_deref().unwrap_or("(none)")
+                );
+                println!(
                     "  Token:      {}",
                     if ctx.gateway_session_token.is_some() {
                         "cached"
@@ -2279,6 +2321,162 @@ fn mask_token(token: &str) -> String {
     format!("{}...{}", &token[..6], &token[token.len() - 4..])
 }
 
+fn open_browser(url: &str) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .context("Failed to launch browser with 'open'")?;
+        Ok(())
+    } else if cfg!(target_os = "linux") {
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .context("Failed to launch browser with 'xdg-open'")?;
+        Ok(())
+    } else if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .context("Failed to launch browser with 'start'")?;
+        Ok(())
+    } else {
+        anyhow::bail!("Automatic browser launch is not supported on this platform.")
+    }
+}
+
+async fn auth0_device_authorize(
+    domain: &str,
+    client_id: &str,
+    audience: Option<&str>,
+    open: bool,
+    json: bool,
+) -> Result<String> {
+    let http_client = Client::new();
+    let device_url = format!("https://{}/oauth/device/code", domain.trim());
+    let token_url = format!("https://{}/oauth/token", domain.trim());
+
+    let mut form: Vec<(String, String)> = vec![
+        ("client_id".to_string(), client_id.to_string()),
+        ("scope".to_string(), "openid profile email".to_string()),
+    ];
+    if let Some(aud) = audience {
+        if !aud.trim().is_empty() {
+            form.push(("audience".to_string(), aud.trim().to_string()));
+        }
+    }
+
+    let response = http_client
+        .post(&device_url)
+        .form(&form)
+        .send()
+        .await
+        .context("Failed to request Auth0 device code")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Auth0 device code request failed ({}): {}", status, body);
+    }
+
+    let device_json: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse Auth0 device code response")?;
+
+    let device_code = device_json
+        .get("device_code")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Auth0 device response missing device_code"))?
+        .to_string();
+
+    let verification_uri_complete = device_json
+        .get("verification_uri_complete")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let verification_uri = device_json
+        .get("verification_uri")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let user_code = device_json
+        .get("user_code")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let expires_in = device_json.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(600);
+    let mut interval = device_json.get("interval").and_then(|v| v.as_u64()).unwrap_or(5).max(1);
+
+    let login_url = verification_uri_complete
+        .or(verification_uri)
+        .ok_or_else(|| anyhow::anyhow!("Auth0 device response missing verification URL"))?;
+
+    if !json {
+        println!("Open this URL to authenticate:");
+        println!("  {}", login_url);
+        if let Some(code) = user_code.as_deref() {
+            println!("User code: {}", code);
+        }
+        if open {
+            match open_browser(&login_url) {
+                Ok(()) => println!("Opened browser for authentication."),
+                Err(err) => eprintln!("Could not open browser automatically: {}", err),
+            }
+        }
+        println!("Waiting for authentication confirmation...");
+    }
+
+    let started = Instant::now();
+    loop {
+        if started.elapsed() > Duration::from_secs(expires_in) {
+            anyhow::bail!("Auth0 device login timed out (device code expired).");
+        }
+
+        tokio::time::sleep(Duration::from_secs(interval)).await;
+
+        let response = http_client
+            .post(&token_url)
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", device_code.as_str()),
+                ("client_id", client_id),
+            ])
+            .send()
+            .await
+            .context("Failed to poll Auth0 device token endpoint")?;
+
+        if response.status().is_success() {
+            let token_json: serde_json::Value =
+                response.json().await.context("Failed to parse Auth0 token response")?;
+            if let Some(id_token) = token_json.get("id_token").and_then(|v| v.as_str()) {
+                return Ok(id_token.to_string());
+            }
+            if let Some(access_token) = token_json.get("access_token").and_then(|v| v.as_str()) {
+                return Ok(access_token.to_string());
+            }
+            anyhow::bail!("Auth0 token response missing id_token/access_token.");
+        }
+
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or_default();
+        let err = body.get("error").and_then(|v| v.as_str()).unwrap_or_default();
+        match err {
+            "authorization_pending" => continue,
+            "slow_down" => {
+                interval += 5;
+                continue;
+            }
+            "expired_token" => anyhow::bail!("Auth0 device code expired. Run login again."),
+            "access_denied" => anyhow::bail!("Auth0 login denied by user."),
+            _ => {
+                let desc = body
+                    .get("error_description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                anyhow::bail!("Auth0 device login failed ({}): {} {}", status, err, desc);
+            }
+        }
+    }
+}
+
 async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthCommand) -> Result<()> {
     match command {
         AuthCommand::Login {
@@ -2286,6 +2484,10 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
             auth0_token,
             auth0_callback_url,
             auth0_domain,
+            auth0_audience,
+            auth0_client_secret,
+            browser: use_browser_flow,
+            no_browser_open,
             password: use_password_grant,
             session_duration_hours,
             context,
@@ -2294,6 +2496,32 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
         } => {
             let mut token =
                 auth0_token.or_else(|| auth0_callback_url.as_deref().and_then(extract_token_from_callback_url));
+
+            if token.is_none() && use_browser_flow {
+                let ctx_name_ref = context.as_deref().or_else(|| config.current_context.as_deref());
+                let ctx_ref = ctx_name_ref.and_then(|n| config.contexts.get(n));
+                let domain = auth0_domain
+                    .as_deref()
+                    .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_domain.as_deref()))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Auth0 domain not set. Use 'noetl context add --auth0-domain <domain>' first.")
+                    })?;
+                let client_id = ctx_ref
+                    .and_then(|c| c.gateway_auth0_client_id.as_deref())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Auth0 client_id not set. Use 'noetl context add --auth0-client-id <id>' first."
+                        )
+                    })?;
+                let audience = auth0_audience
+                    .as_deref()
+                    .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_audience.as_deref()));
+                token = Some(
+                    auth0_device_authorize(domain, client_id, audience, !no_browser_open, json)
+                        .await
+                        .context("Auth0 browser/device login failed")?,
+                );
+            }
 
             if token.is_none() {
                 if let Some(auth0_input) = auth0 {
@@ -2308,8 +2536,18 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
                         let early_domain = auth0_domain
                             .as_deref()
                             .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_domain.as_deref()));
+                        let early_audience = auth0_audience
+                            .as_deref()
+                            .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_audience.as_deref()));
+                        let env_client_secret = std::env::var("NOETL_AUTH0_CLIENT_SECRET")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty());
                         let early_client_id = ctx_ref.and_then(|c| c.gateway_auth0_client_id.as_deref());
-                        let early_client_secret = ctx_ref.and_then(|c| c.gateway_auth0_client_secret.as_deref());
+                        let early_client_secret = auth0_client_secret
+                            .as_deref()
+                            .or_else(|| env_client_secret.as_deref())
+                            .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_client_secret.as_deref()))
+                            .filter(|s| !s.trim().is_empty());
                         let early_redirect_uri = ctx_ref.and_then(|c| c.gateway_auth0_redirect_uri.as_deref());
 
                         if use_password_grant || early_client_secret.is_some() {
@@ -2324,15 +2562,6 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
                                     "Auth0 client_id not set. Use 'noetl context add --auth0-client-id <id>' first."
                                 )
                             })?;
-                            let client_secret = match early_client_secret {
-                                Some(s) => s.to_string(),
-                                None => {
-                                    if !json {
-                                        eprint!("Auth0 client secret: ");
-                                    }
-                                    rpassword::read_password().context("Failed to read client secret")?
-                                }
-                            };
                             if !json {
                                 eprint!("Password for {}: ", auth0_input.trim());
                             }
@@ -2340,24 +2569,32 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
                             if pwd.is_empty() {
                                 anyhow::bail!("Password cannot be empty.");
                             }
-                            // Audience is always https://{domain}/me/ for Auth0 user tokens
-                            let audience = format!("https://{}/me/", domain);
                             let token_endpoint = format!("https://{}/oauth/token", domain);
                             if !json {
                                 println!("Authenticating with Auth0...");
                             }
                             let http_client = Client::new();
+                            let mut auth_payload = serde_json::json!({
+                                "grant_type": "password",
+                                "client_id": client_id,
+                                "username": auth0_input.trim(),
+                                "password": pwd,
+                                "scope": "openid profile email"
+                            });
+                            if let Some(secret) = early_client_secret {
+                                if !secret.trim().is_empty() {
+                                    auth_payload["client_secret"] =
+                                        serde_json::Value::String(secret.trim().to_string());
+                                }
+                            }
+                            if let Some(aud) = early_audience {
+                                if !aud.trim().is_empty() {
+                                    auth_payload["audience"] = serde_json::Value::String(aud.trim().to_string());
+                                }
+                            }
                             let resp = http_client
                                 .post(&token_endpoint)
-                                .json(&serde_json::json!({
-                                    "grant_type": "password",
-                                    "client_id": client_id,
-                                    "client_secret": client_secret,
-                                    "username": auth0_input.trim(),
-                                    "password": pwd,
-                                    "scope": "openid profile email",
-                                    "audience": audience
-                                }))
+                                .json(&auth_payload)
                                 .send()
                                 .await
                                 .context("Failed to reach Auth0 token endpoint")?;
