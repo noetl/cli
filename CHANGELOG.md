@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.11.0](https://github.com/noetl/cli/compare/v2.10.0...v2.11.0) (2026-03-20)
+
+### Features
+
+* add localhost PKCE browser login flow ([b49e9cf](https://github.com/noetl/cli/commit/b49e9cfc00cc8f71455fc74e7f025be0f56f9cf3))
+
 ## [2.10.0](https://github.com/noetl/cli/compare/v2.9.0...v2.10.0) (2026-03-20)
 
 ### Features
