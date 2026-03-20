@@ -248,6 +248,10 @@ noetl auth login --auth0-callback-url 'https://mestumre.dev/login#id_token=...'
 noetl auth login --auth0 'akuksin@gmail.com'
 # or (gcloud-style browser/device flow, no callback copy/paste):
 noetl auth login --browser
+# or (gcloud-style browser + localhost callback PKCE flow):
+noetl auth login --browser-pkce
+# with login hint and explicit callback port:
+noetl auth login --browser-pkce --auth0 user@example.com --pkce-port 8765
 ```
 
 3. Run commands through gateway proxy:
@@ -275,6 +279,11 @@ noetl auth login --auth0 'user@example.com' --password --auth0-client-secret "$A
 # or ephemeral env var
 NOETL_AUTH0_CLIENT_SECRET="$AUTH0_CLIENT_SECRET" noetl auth login --auth0 'user@example.com' --password
 ```
+
+PKCE callback notes:
+- `--browser-pkce` starts a temporary local callback listener (default: `http://127.0.0.1:8765/callback`).
+- Override callback URI with `--auth0-redirect-uri` (must be `localhost`/`127.0.0.1`).
+- If your Auth0 application is confidential, you may still pass `--auth0-client-secret` for token exchange.
 
 ### Console Mode (REPL)
 

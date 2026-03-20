@@ -10,6 +10,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use rand::{rngs::OsRng, RngCore};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
@@ -21,12 +22,16 @@ use reqwest::{
     Client,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use url::Url;
 
 #[derive(Parser)]
 #[command(name = env!("CARGO_BIN_NAME"))]
@@ -996,6 +1001,8 @@ enum AuthCommand {
     ///     noetl auth login --auth0 user@example.com --password --auth0-audience https://api.example.com
     ///     noetl auth login --auth0 user@example.com --password --auth0-client-secret $AUTH0_CLIENT_SECRET
     ///     noetl auth login --browser
+    ///     noetl auth login --browser-pkce
+    ///     noetl auth login --browser-pkce --pkce-port 8765 --auth0 user@example.com
     ///     noetl auth login --auth0-token <ID_TOKEN> --context gateway
     #[command(verbatim_doc_comment)]
     Login {
@@ -1016,6 +1023,10 @@ enum AuthCommand {
         #[arg(long)]
         auth0_domain: Option<String>,
 
+        /// Auth0 redirect URI for browser-pkce login (must be localhost/127.0.0.1 callback)
+        #[arg(long)]
+        auth0_redirect_uri: Option<String>,
+
         /// Optional Auth0 audience for password grant (overrides context value)
         #[arg(long)]
         auth0_audience: Option<String>,
@@ -1025,10 +1036,18 @@ enum AuthCommand {
         auth0_client_secret: Option<String>,
 
         /// Browser/device login flow (gcloud-style) without callback copy/paste
-        #[arg(long, conflicts_with = "password")]
+        #[arg(long, conflicts_with_all = ["password", "browser_pkce"])]
         browser: bool,
 
-        /// Do not auto-open browser in --browser mode (print URL only)
+        /// Browser PKCE login flow with localhost callback endpoint (gcloud login style)
+        #[arg(long, alias = "pkce", conflicts_with_all = ["password", "browser"])]
+        browser_pkce: bool,
+
+        /// Local callback port for --browser-pkce (default: 8765)
+        #[arg(long, default_value_t = 8765)]
+        pkce_port: u16,
+
+        /// Do not auto-open browser in --browser/--browser-pkce mode (print URL only)
         #[arg(long)]
         no_browser_open: bool,
 
@@ -1581,7 +1600,7 @@ fn print_console_help() {
     println!("Examples:");
     println!("  context list");
     println!("  context use gke-prod");
-    println!("  auth login --auth0-callback-url 'https://app/login#id_token=...'");
+    println!("  auth login --browser-pkce");
     println!("  --gateway catalog register tests/fixtures/playbooks/foo.yaml");
     println!("  exec tests/quantum/cudaq_ai_pipeline -r distributed");
 }
@@ -2345,6 +2364,308 @@ fn open_browser(url: &str) -> Result<()> {
     }
 }
 
+fn generate_random_urlsafe(bytes_len: usize) -> String {
+    let mut bytes = vec![0_u8; bytes_len];
+    OsRng.fill_bytes(&mut bytes);
+    BASE64_URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn build_pkce_code_verifier() -> String {
+    // RFC 7636: verifier length must be between 43 and 128 chars.
+    generate_random_urlsafe(64)
+}
+
+fn build_pkce_code_challenge(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    BASE64_URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn parse_loopback_redirect_uri(redirect_uri: &str) -> Result<Url> {
+    let redirect =
+        Url::parse(redirect_uri.trim()).with_context(|| format!("Invalid redirect URI: {}", redirect_uri.trim()))?;
+    let host = redirect
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Redirect URI must include host: {}", redirect_uri.trim()))?;
+    let is_loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1";
+    if !is_loopback {
+        anyhow::bail!(
+            "Redirect URI host must be localhost or 127.0.0.1 for PKCE callback flow: {}",
+            redirect_uri.trim()
+        );
+    }
+    if redirect.port().is_none() {
+        anyhow::bail!(
+            "Redirect URI must include an explicit port for PKCE callback flow: {}",
+            redirect_uri.trim()
+        );
+    }
+    Ok(redirect)
+}
+
+fn resolve_pkce_redirect_uri(
+    explicit_redirect_uri: Option<&str>,
+    context_redirect_uri: Option<&str>,
+    pkce_port: u16,
+) -> Result<String> {
+    if let Some(uri) = explicit_redirect_uri {
+        let trimmed = uri.trim();
+        if !trimmed.is_empty() {
+            parse_loopback_redirect_uri(trimmed)?;
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    if let Some(uri) = context_redirect_uri {
+        let trimmed = uri.trim();
+        if !trimmed.is_empty() && parse_loopback_redirect_uri(trimmed).is_ok() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    Ok(format!("http://127.0.0.1:{}/callback", pkce_port))
+}
+
+async fn write_callback_http_response(
+    socket: &mut tokio::net::TcpStream,
+    status_line: &str,
+    title: &str,
+    message: &str,
+) -> Result<()> {
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title></head><body><h1>{}</h1><p>{}</p></body></html>",
+        title, title, message
+    );
+    let response = format!(
+        "HTTP/1.1 {}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status_line,
+        body.as_bytes().len(),
+        body
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .context("Failed to write callback HTTP response")?;
+    Ok(())
+}
+
+async fn wait_for_pkce_callback(listener: &TcpListener, expected_path: &str, expected_state: &str) -> Result<String> {
+    let timeout_at = Instant::now() + Duration::from_secs(300);
+
+    loop {
+        let now = Instant::now();
+        if now >= timeout_at {
+            anyhow::bail!("Timed out waiting for Auth0 PKCE callback.");
+        }
+        let remaining = timeout_at.saturating_duration_since(now);
+
+        let (mut socket, _) = tokio::time::timeout(remaining, listener.accept())
+            .await
+            .context("Timed out waiting for callback connection")?
+            .context("Failed to accept callback connection")?;
+
+        let mut request_buf = vec![0_u8; 8192];
+        let bytes_read = tokio::time::timeout(Duration::from_secs(15), socket.read(&mut request_buf))
+            .await
+            .context("Timed out reading callback request")?
+            .context("Failed to read callback request")?;
+        if bytes_read == 0 {
+            continue;
+        }
+
+        let request_line = String::from_utf8_lossy(&request_buf[..bytes_read])
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default();
+        let target = parts.next().unwrap_or_default();
+
+        if method != "GET" || target.is_empty() {
+            let _ = write_callback_http_response(
+                &mut socket,
+                "405 Method Not Allowed",
+                "NoETL Login",
+                "Invalid callback request method.",
+            )
+            .await;
+            continue;
+        }
+
+        let callback_url = match Url::parse(&format!("http://localhost{}", target)) {
+            Ok(url) => url,
+            Err(_) => {
+                let _ = write_callback_http_response(
+                    &mut socket,
+                    "400 Bad Request",
+                    "NoETL Login",
+                    "Failed to parse callback URL.",
+                )
+                .await;
+                continue;
+            }
+        };
+
+        if callback_url.path() != expected_path {
+            let _ =
+                write_callback_http_response(&mut socket, "404 Not Found", "NoETL Login", "Unexpected callback path.")
+                    .await;
+            continue;
+        }
+
+        let params: HashMap<String, String> = callback_url.query_pairs().into_owned().collect();
+        if let Some(error) = params.get("error") {
+            let _ = write_callback_http_response(
+                &mut socket,
+                "400 Bad Request",
+                "NoETL Login Failed",
+                "Authentication failed. Return to the terminal for details.",
+            )
+            .await;
+            let description = params.get("error_description").cloned().unwrap_or_default();
+            anyhow::bail!("Auth0 callback error: {} {}", error, description);
+        }
+
+        let returned_state = params.get("state").map(String::as_str).unwrap_or_default();
+        if returned_state != expected_state {
+            let _ = write_callback_http_response(
+                &mut socket,
+                "400 Bad Request",
+                "NoETL Login Failed",
+                "State verification failed. Return to the terminal and retry.",
+            )
+            .await;
+            anyhow::bail!("PKCE callback state mismatch.");
+        }
+
+        let code = params
+            .get("code")
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Auth0 callback missing authorization code"))?;
+
+        write_callback_http_response(
+            &mut socket,
+            "200 OK",
+            "NoETL Login Successful",
+            "Authentication complete. You can close this window and return to the terminal.",
+        )
+        .await?;
+
+        return Ok(code);
+    }
+}
+
+async fn auth0_pkce_authorize(
+    domain: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    audience: Option<&str>,
+    client_secret: Option<&str>,
+    login_hint: Option<&str>,
+    open: bool,
+    json: bool,
+) -> Result<String> {
+    let redirect = parse_loopback_redirect_uri(redirect_uri)?;
+    let host = redirect.host_str().unwrap_or("127.0.0.1");
+    let bind_host = if host.eq_ignore_ascii_case("localhost") {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    let port = redirect
+        .port()
+        .ok_or_else(|| anyhow::anyhow!("Redirect URI must include an explicit port"))?;
+    let listener_addr = format!("{}:{}", bind_host, port);
+    let listener = TcpListener::bind(&listener_addr)
+        .await
+        .with_context(|| format!("Failed to bind local callback listener at {}", listener_addr))?;
+
+    let verifier = build_pkce_code_verifier();
+    let challenge = build_pkce_code_challenge(&verifier);
+    let state = generate_random_urlsafe(24);
+    let token_url = format!("https://{}/oauth/token", domain.trim());
+
+    let mut authorize_url =
+        Url::parse(&format!("https://{}/authorize", domain.trim())).context("Invalid Auth0 domain")?;
+    {
+        let mut query = authorize_url.query_pairs_mut();
+        query.append_pair("response_type", "code");
+        query.append_pair("client_id", client_id.trim());
+        query.append_pair("redirect_uri", redirect_uri.trim());
+        query.append_pair("scope", "openid profile email");
+        query.append_pair("code_challenge", &challenge);
+        query.append_pair("code_challenge_method", "S256");
+        query.append_pair("state", &state);
+        if let Some(aud) = audience {
+            if !aud.trim().is_empty() {
+                query.append_pair("audience", aud.trim());
+            }
+        }
+        if let Some(hint) = login_hint {
+            if !hint.trim().is_empty() {
+                query.append_pair("login_hint", hint.trim());
+            }
+        }
+    }
+    let authorize_url = authorize_url.to_string();
+
+    if !json {
+        println!("PKCE callback listener ready at {}", listener_addr);
+        println!("Open this URL to authenticate:");
+        println!("  {}", authorize_url);
+        if open {
+            match open_browser(&authorize_url) {
+                Ok(()) => println!("Opened browser for authentication."),
+                Err(err) => eprintln!("Could not open browser automatically: {}", err),
+            }
+        }
+        println!("Waiting for Auth0 callback...");
+    }
+
+    let code = wait_for_pkce_callback(&listener, redirect.path(), &state).await?;
+
+    let http_client = Client::new();
+    let mut form: Vec<(String, String)> = vec![
+        ("grant_type".to_string(), "authorization_code".to_string()),
+        ("client_id".to_string(), client_id.trim().to_string()),
+        ("code".to_string(), code),
+        ("code_verifier".to_string(), verifier),
+        ("redirect_uri".to_string(), redirect_uri.trim().to_string()),
+    ];
+    if let Some(secret) = client_secret {
+        if !secret.trim().is_empty() {
+            form.push(("client_secret".to_string(), secret.trim().to_string()));
+        }
+    }
+
+    let response = http_client
+        .post(&token_url)
+        .form(&form)
+        .send()
+        .await
+        .context("Failed to exchange Auth0 authorization code for tokens")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Auth0 PKCE token exchange failed ({}): {}", status, body);
+    }
+
+    let token_json: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse Auth0 PKCE token response")?;
+
+    if let Some(id_token) = token_json.get("id_token").and_then(|v| v.as_str()) {
+        return Ok(id_token.to_string());
+    }
+    if let Some(access_token) = token_json.get("access_token").and_then(|v| v.as_str()) {
+        return Ok(access_token.to_string());
+    }
+    anyhow::bail!("Auth0 PKCE response missing id_token/access_token.");
+}
+
 async fn auth0_device_authorize(
     domain: &str,
     client_id: &str,
@@ -2484,9 +2805,12 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
             auth0_token,
             auth0_callback_url,
             auth0_domain,
+            auth0_redirect_uri,
             auth0_audience,
             auth0_client_secret,
             browser: use_browser_flow,
+            browser_pkce: use_pkce_flow,
+            pkce_port,
             no_browser_open,
             password: use_password_grant,
             session_duration_hours,
@@ -2496,6 +2820,57 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
         } => {
             let mut token =
                 auth0_token.or_else(|| auth0_callback_url.as_deref().and_then(extract_token_from_callback_url));
+
+            if token.is_none() && use_pkce_flow {
+                if pkce_port == 0 {
+                    anyhow::bail!("--pkce-port cannot be 0.");
+                }
+                let ctx_name_ref = context.as_deref().or_else(|| config.current_context.as_deref());
+                let ctx_ref = ctx_name_ref.and_then(|n| config.contexts.get(n));
+                let domain = auth0_domain
+                    .as_deref()
+                    .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_domain.as_deref()))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Auth0 domain not set. Use 'noetl context add --auth0-domain <domain>' first.")
+                    })?;
+                let client_id = ctx_ref
+                    .and_then(|c| c.gateway_auth0_client_id.as_deref())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Auth0 client_id not set. Use 'noetl context add --auth0-client-id <id>' first."
+                        )
+                    })?;
+                let context_redirect_uri = ctx_ref.and_then(|c| c.gateway_auth0_redirect_uri.as_deref());
+                let redirect_uri =
+                    resolve_pkce_redirect_uri(auth0_redirect_uri.as_deref(), context_redirect_uri, pkce_port)?;
+                let audience = auth0_audience
+                    .as_deref()
+                    .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_audience.as_deref()));
+                let env_client_secret = std::env::var("NOETL_AUTH0_CLIENT_SECRET")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty());
+                let client_secret = auth0_client_secret
+                    .as_deref()
+                    .or_else(|| env_client_secret.as_deref())
+                    .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_client_secret.as_deref()))
+                    .filter(|s| !s.trim().is_empty());
+                let login_hint = auth0.as_deref().filter(|v| looks_like_email(v)).map(str::trim);
+
+                token = Some(
+                    auth0_pkce_authorize(
+                        domain,
+                        client_id,
+                        &redirect_uri,
+                        audience,
+                        client_secret,
+                        login_hint,
+                        !no_browser_open,
+                        json,
+                    )
+                    .await
+                    .context("Auth0 browser PKCE login failed")?,
+                );
+            }
 
             if token.is_none() && use_browser_flow {
                 let ctx_name_ref = context.as_deref().or_else(|| config.current_context.as_deref());
@@ -2655,7 +3030,7 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
 
             let token = token.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Missing Auth0 token. Use --auth0-token, --auth0-callback-url, or --auth0 <email|token|callback-url>."
+                    "Missing Auth0 token. Use --auth0-token, --auth0-callback-url, --browser, --browser-pkce, or --auth0 <email|token|callback-url>."
                 )
             })?;
 

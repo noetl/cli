@@ -45,3 +45,6 @@ shellexpand = "3.1"
 regex = "1.10"
 rhai = { version = "1.18", features = ["sync"] }
 rpassword = "3"
+rand = "0.8"
+sha2 = "0.10"
+url = "2.5"
