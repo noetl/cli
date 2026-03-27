@@ -177,6 +177,27 @@ enum Commands {
     ///     noetl --server-url https://gateway.example.com console
     #[command(verbatim_doc_comment)]
     Console,
+    /// Run Codex CLI under noetl with passthrough behavior
+    ///
+    /// Examples:
+    ///     noetl codex
+    ///     noetl codex exec "summarize this repo"
+    ///     noetl codex doctor
+    #[command(verbatim_doc_comment, trailing_var_arg = true, allow_hyphen_values = true)]
+    Codex {
+        /// Arguments forwarded to upstream codex CLI
+        args: Vec<String>,
+    },
+    /// Start NoETL AI mode (M1 scaffold)
+    ///
+    /// Examples:
+    ///     noetl ai
+    ///     noetl ai exec "inspect gateway status"
+    #[command(verbatim_doc_comment, trailing_var_arg = true, allow_hyphen_values = true)]
+    Ai {
+        /// Arguments forwarded to upstream codex CLI
+        args: Vec<String>,
+    },
     /// Gateway authentication management
     Auth {
         #[command(subcommand)]
@@ -1697,6 +1718,99 @@ fn run_console(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+enum CodexDispatch {
+    Doctor,
+    Passthrough(Vec<String>),
+}
+
+fn resolve_codex_dispatch(args: &[String]) -> CodexDispatch {
+    if args.len() == 1 && args[0] == "doctor" {
+        CodexDispatch::Doctor
+    } else {
+        CodexDispatch::Passthrough(args.to_vec())
+    }
+}
+
+fn run_codex_doctor() -> Result<()> {
+    let version = Command::new("codex")
+        .arg("--version")
+        .output()
+        .context("Failed to execute 'codex --version'. Is codex installed and on PATH?")?;
+
+    if !version.status.success() {
+        let stderr = String::from_utf8_lossy(&version.stderr);
+        anyhow::bail!("codex is installed but --version failed: {}", stderr.trim());
+    }
+
+    let version_out = String::from_utf8_lossy(&version.stdout).trim().to_string();
+    println!(
+        "codex: {}",
+        if version_out.is_empty() {
+            "installed"
+        } else {
+            &version_out
+        }
+    );
+
+    // Best-effort auth check (subcommand shape may vary by codex version).
+    let auth = Command::new("codex").args(["auth", "status"]).output();
+    match auth {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if text.trim().is_empty() {
+                println!("auth: ok");
+            } else {
+                println!("auth:\n{}", text.trim());
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let note = if stderr.trim().is_empty() {
+                "subcommand unavailable".to_string()
+            } else {
+                stderr.trim().to_string()
+            };
+            println!("auth: check unavailable ({})", note);
+        }
+        Err(_) => {
+            println!("auth: check unavailable");
+        }
+    }
+
+    println!("workspace: {}", std::env::current_dir()?.display());
+    Ok(())
+}
+
+fn run_codex_passthrough(args: &[String]) -> Result<()> {
+    let status = Command::new("codex")
+        .args(args)
+        .status()
+        .context("Failed to execute codex. Is codex installed and on PATH?")?;
+
+    if let Some(code) = status.code() {
+        std::process::exit(code);
+    }
+
+    anyhow::bail!("codex terminated by signal")
+}
+
+fn run_ai_mode(cli: &Cli, args: &[String]) -> Result<()> {
+    let config = Config::load()?;
+    let base_url = resolve_base_url(cli, &config);
+    let mode = if cli.gateway || env_flag("NOETL_USE_GATEWAY") || is_gateway_url(&base_url) {
+        "gateway"
+    } else {
+        "direct-api"
+    };
+
+    eprintln!("NoETL AI mode (M1 scaffold)");
+    eprintln!("  endpoint: {}", base_url);
+    eprintln!("  routing:  {}", mode);
+    eprintln!("  note: full NoETL tool bridge and retrieval are in progress.");
+
+    run_codex_passthrough(args)
+}
+
 fn build_http_client(session_token: Option<&str>) -> Result<Client> {
     if let Some(token) = session_token {
         let mut headers = HeaderMap::new();
@@ -1754,6 +1868,13 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Console) => {}
+        Some(Commands::Codex { args }) => match resolve_codex_dispatch(&args) {
+            CodexDispatch::Doctor => run_codex_doctor()?,
+            CodexDispatch::Passthrough(args) => run_codex_passthrough(&args)?,
+        },
+        Some(Commands::Ai { args }) => {
+            run_ai_mode(&cli, &args)?;
+        }
         Some(Commands::Exec {
             reference,
             runtime,
