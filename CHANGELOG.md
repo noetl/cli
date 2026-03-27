@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.0](https://github.com/noetl/cli/compare/v2.11.0...v2.12.0) (2026-03-27)
+
+### Features
+
+* **cli:** add codex passthrough, doctor check, and ai scaffold command ([1bf127e](https://github.com/noetl/cli/commit/1bf127eb60b71658d2bc9c9a947209213808e048))
+
 ## [2.11.0](https://github.com/noetl/cli/compare/v2.10.0...v2.11.0) (2026-03-20)
 
 ### Features
