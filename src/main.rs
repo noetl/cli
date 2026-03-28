@@ -1872,7 +1872,7 @@ async fn main() -> Result<()> {
             CodexDispatch::Doctor => run_codex_doctor()?,
             CodexDispatch::Passthrough(args) => run_codex_passthrough(&args)?,
         },
-        Some(Commands::Ai { args }) => {
+        Some(Commands::Ai { ref args }) => {
             run_ai_mode(&cli, &args)?;
         }
         Some(Commands::Exec {
