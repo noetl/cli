@@ -19,12 +19,12 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build the application
 COPY . .
-RUN cargo build --release --bin noetlctl
+RUN cargo build --release --bin noetl
 
 # Runtime stage
 FROM alpine:3.22.2 AS runtime
 WORKDIR /app
 RUN apk add --no-cache libgcc libxslt ca-certificates openssl
-COPY --from=builder /app/target/release/noetlctl ./noetlctl
+COPY --from=builder /app/target/release/noetl ./noetl
 
-ENTRYPOINT ["./noetlctl"]
+ENTRYPOINT ["./noetl"]
