@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.1](https://github.com/noetl/cli/compare/v2.12.0...v2.12.1) (2026-03-28)
+
+### Bug Fixes
+
+* **docker:** build and package noetl binary with clean context ([92ab3e7](https://github.com/noetl/cli/commit/92ab3e7cba6b05c1f76ad97677ccbeecd25bbe07))
+* **publish:** bump 2.12.1 and fix ai args borrow ([6fbf440](https://github.com/noetl/cli/commit/6fbf4409038ea7d832f0c0499dad8927fa1e6c5e))
+
 ## [2.12.0](https://github.com/noetl/cli/compare/v2.11.0...v2.12.0) (2026-03-27)
 
 ### Features
