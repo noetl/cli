@@ -151,6 +151,9 @@ struct Step {
     /// Step enablement guard - evaluated before step runs (canonical v2)
     #[serde(rename = "when")]
     when_guard: Option<String>,
+    /// Step-level input data for cross-boundary propagation (DSL v2)
+    #[serde(default)]
+    input: Option<HashMap<String, serde_yaml::Value>>,
     tool: Option<Tool>,
     /// Next transitions - raw YAML, parsed manually to support both v10 router and legacy formats
     #[serde(default)]
@@ -322,8 +325,12 @@ enum Tool {
     },
     Playbook {
         path: String,
+        /// Legacy args field (DSL v1) - deprecated in favor of input
         #[serde(default)]
         args: HashMap<String, String>,
+        /// Canonical input field (DSL v2) - takes precedence over args
+        #[serde(default)]
+        input: HashMap<String, serde_yaml::Value>,
     },
     #[serde(rename = "duckdb")]
     DuckDb {
@@ -694,6 +701,20 @@ impl PlaybookRunner {
         println!("\n🔹 Step: {}", step_name);
         if let Some(desc) = &step.desc {
             println!("   Description: {}", desc);
+        }
+
+        // DSL v2: Process step.input and merge into context as input.* variables
+        if let Some(input_map) = &step.input {
+            for (key, value_yaml) in input_map {
+                let template = match value_yaml {
+                    serde_yaml::Value::String(s) => s.clone(),
+                    serde_yaml::Value::Number(n) => n.to_string(),
+                    serde_yaml::Value::Bool(b) => b.to_string(),
+                    other => serde_yaml::to_string(other)?.trim().to_string(),
+                };
+                let value = self.render_template(&template, context)?;
+                context.set_variable(format!("input.{}", key), value);
+            }
         }
 
         // Execute the tool and capture result
@@ -1228,7 +1249,7 @@ impl PlaybookRunner {
 
                 Ok(Some(result))
             }
-            Tool::Playbook { path, args } => {
+            Tool::Playbook { path, args, input } => {
                 let rendered_path = self.render_template(path, context)?;
                 let playbook_path = self.resolve_playbook_path(&rendered_path)?;
 
@@ -1236,11 +1257,28 @@ impl PlaybookRunner {
                     println!("   Executing sub-playbook: {}", playbook_path.display());
                 }
 
-                // Merge context variables with args - prefix args with workload.
+                // DSL v2: Merge context variables with input (preferred) or args (legacy)
                 let mut sub_vars = context.variables.clone();
-                for (key, template) in args {
-                    let value = self.render_template(template, context)?;
-                    sub_vars.insert(format!("workload.{}", key), value);
+
+                // Use input if present (DSL v2), otherwise fall back to args (DSL v1)
+                if !input.is_empty() {
+                    // DSL v2: tool.input takes precedence - render and prefix with workload.
+                    for (key, value_yaml) in input {
+                        let template = match value_yaml {
+                            serde_yaml::Value::String(s) => s.clone(),
+                            serde_yaml::Value::Number(n) => n.to_string(),
+                            serde_yaml::Value::Bool(b) => b.to_string(),
+                            other => serde_yaml::to_string(other)?.trim().to_string(),
+                        };
+                        let value = self.render_template(&template, context)?;
+                        sub_vars.insert(format!("workload.{}", key), value);
+                    }
+                } else if !args.is_empty() {
+                    // DSL v1 legacy: args field - prefix with workload.
+                    for (key, template) in args {
+                        let value = self.render_template(template, context)?;
+                        sub_vars.insert(format!("workload.{}", key), value);
+                    }
                 }
 
                 let sub_runner = PlaybookRunner::new(playbook_path)
