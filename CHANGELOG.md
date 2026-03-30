@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.13.0](https://github.com/noetl/cli/compare/v2.12.1...v2.13.0) (2026-03-30)
+
+### Features
+
+* **dsl:** add DSL v2 input field support for playbook composition ([fd4c3ee](https://github.com/noetl/cli/commit/fd4c3ee2d2f07270b97df97f50ae1c0c9aacd146))
+
 ## [2.12.1](https://github.com/noetl/cli/compare/v2.12.0...v2.12.1) (2026-03-28)
 
 ### Bug Fixes
