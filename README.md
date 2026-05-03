@@ -494,7 +494,7 @@ The `noetl` binary is built into the Docker image using a multi-stage build:
 # Rust builder stage compiles the CLI
 FROM rust:1.75-slim as rust-builder
 WORKDIR /build
-COPY noetlctl/ ./
+COPY cli/ ./
 RUN cargo build --release
 
 # Production stage includes the binary
