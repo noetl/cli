@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.14.1](https://github.com/noetl/cli/compare/v2.14.0...v2.14.1) (2026-05-05)
+
+### Bug Fixes
+
+* **cli:** capture kind:shell stdout into step_results ([86d9a93](https://github.com/noetl/cli/commit/86d9a939486f9edfab36f75c840f83e76fa8db5b)), closes [cli#8](https://github.com/noetl/cli/issues/8)
+
 ## [2.14.0](https://github.com/noetl/cli/compare/v2.13.0...v2.14.0) (2026-05-05)
 
 ### Features
