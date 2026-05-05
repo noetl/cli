@@ -1948,10 +1948,23 @@ async fn main() -> Result<()> {
                     // Use CLI target if provided, otherwise use inferred target (from noetl.yaml pattern)
                     let effective_target = target.or(exec_ctx.inferred_target.clone());
 
+                    // The `--json` flag now does two things in local
+                    // runtime mode (previously a no-op): (1) suppress
+                    // human-readable progress on stdout — progress
+                    // already routes to stderr from PlaybookRunner — and
+                    // (2) emit a structured RunOutcome envelope on
+                    // stdout when the playbook completes. This is what
+                    // lets the agent bridge (and any other programmatic
+                    // consumer) get clean JSON to pipe into `jq`.
                     let runner = playbook_runner::PlaybookRunner::new(playbook_path)
                         .with_variables(vars)
                         .with_verbose(verbose)
-                        .with_target(effective_target);
+                        .with_target(effective_target)
+                        // When --json is set, suppress progress entirely
+                        // so stdout = ONLY the JSON envelope. The user
+                        // still sees errors via stderr.
+                        .with_quiet(json)
+                        .with_emit_json(json);
 
                     runner.run()?;
                 }
