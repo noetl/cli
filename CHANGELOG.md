@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.14.0](https://github.com/noetl/cli/compare/v2.13.0...v2.14.0) (2026-05-05)
+
+### Features
+
+* **cli:** --json on local runtime emits RunOutcome envelope ([f528781](https://github.com/noetl/cli/commit/f528781ab12ddc76ad0f246583548af05db25474))
+
 ## [2.13.0](https://github.com/noetl/cli/compare/v2.12.1...v2.13.0) (2026-03-30)
 
 ### Features
