@@ -444,12 +444,51 @@ struct LoopConfig {
     mode: Option<String>,
 }
 
+/// Structured outcome of a local playbook run.
+///
+/// Captures status, per-step results, timing, and the final result (last
+/// step's output). Designed to be serialized as JSON for programmatic
+/// consumers (the noetl ↔ Codex bridge being the canonical example —
+/// it pipes this envelope into a downstream `jq` filter and from there
+/// into Claude's read of `outbox/{id}.result.json`).
+///
+/// Two output modes:
+/// - **Human progress** is always written to *stderr* (eprintln) so it
+///   doesn't pollute the JSON-on-stdout pipe. With `--quiet` even those
+///   diagnostic lines are suppressed.
+/// - **Structured outcome** is written to *stdout* as JSON when
+///   `emit_json` is set. Without it, `run()` is silent on stdout.
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct RunOutcome {
+    pub status: String,         // "ok" | "error"
+    pub playbook_name: String,
+    pub playbook_path: String,
+    pub started_at: String,     // RFC3339 UTC
+    pub completed_at: String,
+    pub duration_seconds: f64,
+    pub executed_steps: Vec<String>,
+    pub step_results: std::collections::BTreeMap<String, String>,
+    pub final_result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 pub struct PlaybookRunner {
     playbook_path: PathBuf,
     variables: HashMap<String, String>,
     verbose: bool,
     target: Option<String>,
     merge: bool,
+    /// When true, suppress all human-readable progress output (even
+    /// stderr).  JSON output on stdout via `emit_json` is unaffected.
+    quiet: bool,
+    /// When true, after `run()` completes the runner serialises a
+    /// `RunOutcome` to stdout as JSON. Combined with `quiet=true` this
+    /// gives a pipeline-friendly invocation:
+    ///     noetl exec --runtime local foo.yaml --json
+    /// → progress on stderr (or nothing in --quiet), structured JSON
+    /// envelope on stdout.
+    emit_json: bool,
 }
 
 impl PlaybookRunner {
@@ -460,6 +499,8 @@ impl PlaybookRunner {
             verbose: false,
             target: None,
             merge: false,
+            quiet: false,
+            emit_json: false,
         }
     }
 
@@ -481,6 +522,24 @@ impl PlaybookRunner {
     pub fn with_target(mut self, target: Option<String>) -> Self {
         self.target = target;
         self
+    }
+
+    pub fn with_quiet(mut self, quiet: bool) -> Self {
+        self.quiet = quiet;
+        self
+    }
+
+    pub fn with_emit_json(mut self, emit_json: bool) -> Self {
+        self.emit_json = emit_json;
+        self
+    }
+
+    /// Print a progress line to stderr unless `quiet` is set. Used by
+    /// the runner itself; tool stdout/stderr is unaffected.
+    fn say(&self, args: std::fmt::Arguments) {
+        if !self.quiet {
+            eprintln!("{}", args);
+        }
     }
 
     /// Validate playbook requirements against local runtime capabilities
@@ -555,7 +614,12 @@ impl PlaybookRunner {
         Ok(())
     }
 
-    pub fn run(&self) -> Result<()> {
+    pub fn run(&self) -> Result<RunOutcome> {
+        // RFC3339 UTC timestamp for the outcome envelope. Manual format
+        // because chrono's `to_rfc3339_opts` is overkill for one line.
+        let started_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let started_instant = std::time::Instant::now();
+
         // Load and parse playbook
         let content = fs::read_to_string(&self.playbook_path).context("Failed to read playbook file")?;
 
@@ -564,13 +628,15 @@ impl PlaybookRunner {
         // Validate playbook against local runtime capabilities
         self.validate_capabilities(&playbook)?;
 
-        println!("📋 Running playbook: {}", playbook.metadata.name);
-        println!("   API Version: {}", playbook.api_version);
+        if !self.quiet {
+            eprintln!("📋 Running playbook: {}", playbook.metadata.name);
+            eprintln!("   API Version: {}", playbook.api_version);
+        }
 
         if let Some(executor) = &playbook.executor {
             if self.verbose {
-                println!("   Executor Profile: {}", executor.profile);
-                println!("   Executor Version: {}", executor.version);
+                eprintln!("   Executor Profile: {}", executor.profile);
+                eprintln!("   Executor Version: {}", executor.version);
             }
         }
 
@@ -640,7 +706,7 @@ impl PlaybookRunner {
         };
 
         if self.target.is_some() {
-            println!("🎯 Target: {}", starting_step);
+            eprintln!("🎯 Target: {}", starting_step);
         }
 
         // Track final_step for post-quiescence execution
@@ -657,17 +723,71 @@ impl PlaybookRunner {
         if let Some(final_step_name) = &final_step {
             if final_step_name != &starting_step {
                 if self.verbose {
-                    println!("\n📍 Running final step: {}", final_step_name);
+                    eprintln!("\n📍 Running final step: {}", final_step_name);
                 }
                 self.execute_step(&playbook, final_step_name, &mut context)?;
             }
         }
 
-        if self.verbose {
-            println!("✅ Playbook execution completed successfully");
+        if self.verbose && !self.quiet {
+            eprintln!("✅ Playbook execution completed successfully");
         }
 
-        Ok(())
+        // Build the structured outcome from the execution context.
+        let completed_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let duration = started_instant.elapsed().as_secs_f64();
+
+        // Snapshot the step results in the order they executed. The
+        // ExecutionContext's HashMap ordering isn't stable, so we
+        // also keep a separate Vec<String> of executed step names.
+        let executed_steps = context.executed_steps.clone();
+        let mut step_results: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for (name, value) in context.step_results.iter() {
+            step_results.insert(name.clone(), value.clone());
+        }
+
+        // The "final result" convention for the local runtime: take
+        // the last executed step's result, if any. Distributed runtime
+        // has a richer notion (the final_step's output, possibly
+        // transformed); local runtime keeps it simple.
+        let final_result = executed_steps
+            .last()
+            .and_then(|name| step_results.get(name).cloned());
+
+        let outcome = RunOutcome {
+            status: "ok".to_string(),
+            playbook_name: playbook.metadata.name.clone(),
+            playbook_path: self.playbook_path.display().to_string(),
+            started_at,
+            completed_at,
+            duration_seconds: duration,
+            executed_steps,
+            step_results,
+            final_result,
+            error: None,
+        };
+
+        if self.emit_json {
+            // Pretty-printed for human readability when piped through `jq`;
+            // structurally identical to compact form. stdout is reserved
+            // for this single envelope so the caller's `>` redirect captures
+            // exactly the JSON.
+            match serde_json::to_string_pretty(&outcome) {
+                Ok(json) => println!("{}", json),
+                Err(e) => {
+                    // Should never happen for our struct; fall back to
+                    // a minimal error envelope so callers always see JSON.
+                    eprintln!("Failed to serialise RunOutcome: {}", e);
+                    println!(
+                        r#"{{"status":"error","error":"failed to serialise RunOutcome: {}"}}"#,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(outcome)
     }
 
     fn execute_step(&self, playbook: &Playbook, step_name: &str, context: &mut ExecutionContext) -> Result<()> {
@@ -691,16 +811,16 @@ impl PlaybookRunner {
 
             if !is_enabled {
                 if self.verbose {
-                    println!("\n⏭️  Step '{}' skipped (when guard: {})", step_name, when_guard);
+                    eprintln!("\n⏭️  Step '{}' skipped (when guard: {})", step_name, when_guard);
                 }
                 // Step is disabled - do not execute, branch terminates here
                 return Ok(());
             }
         }
 
-        println!("\n🔹 Step: {}", step_name);
+        eprintln!("\n🔹 Step: {}", step_name);
         if let Some(desc) = &step.desc {
-            println!("   Description: {}", desc);
+            eprintln!("   Description: {}", desc);
         }
 
         // DSL v2: Process step.input and merge into context as input.* variables
@@ -751,7 +871,7 @@ impl PlaybookRunner {
         let mut case_matched = false;
         if let Some(cases) = &step.case {
             if self.verbose {
-                println!("   Evaluating {} case conditions...", cases.len());
+                eprintln!("   Evaluating {} case conditions...", cases.len());
             }
             for case in cases {
                 let (condition_result, condition_display) = match &case.when {
@@ -772,13 +892,13 @@ impl PlaybookRunner {
                 };
 
                 if self.verbose && !condition_result {
-                    println!("   ✗ {}", condition_display);
+                    eprintln!("   ✗ {}", condition_display);
                 }
 
                 if condition_result {
                     case_matched = true;
                     if self.verbose {
-                        println!("   ✓ Condition matched: {}", condition_display);
+                        eprintln!("   ✓ Condition matched: {}", condition_display);
                     }
 
                     // Execute then steps (potentially in parallel if multiple)
@@ -801,7 +921,7 @@ impl PlaybookRunner {
                             // For local CLI, we skip pipeline execution (requires distributed runtime)
                             if value.get("pipe").is_some() {
                                 if self.verbose {
-                                    println!("   ⚠ Pipeline blocks require distributed runtime, skipping");
+                                    eprintln!("   ⚠ Pipeline blocks require distributed runtime, skipping");
                                 }
                             }
                         }
@@ -809,7 +929,7 @@ impl PlaybookRunner {
                     break;
                 } else if let Some(else_steps) = &case.else_steps {
                     if self.verbose {
-                        println!("   ✗ Condition not matched, executing else branch");
+                        eprintln!("   ✗ Condition not matched, executing else branch");
                     }
                     self.execute_next_steps(playbook, else_steps, context)?;
                     break;
@@ -900,9 +1020,9 @@ impl PlaybookRunner {
                     if matches {
                         if self.verbose {
                             if let Some(cond) = when_condition {
-                                println!("   ✓ Route matched: {} ({})", step, cond);
+                                eprintln!("   ✓ Route matched: {} ({})", step, cond);
                             } else {
-                                println!("   ✓ Route: {} (default)", step);
+                                eprintln!("   ✓ Route: {} (default)", step);
                             }
                         }
 
@@ -915,7 +1035,7 @@ impl PlaybookRunner {
                         }
                     } else if self.verbose {
                         if let Some(cond) = when_condition {
-                            println!("   ✗ Route skipped: {} ({})", step, cond);
+                            eprintln!("   ✗ Route skipped: {} ({})", step, cond);
                         }
                     }
                 }
@@ -942,14 +1062,14 @@ impl PlaybookRunner {
         // Branch termination: no matches = branch ends
         if matched_steps.is_empty() {
             if self.verbose && !next_steps.is_empty() {
-                println!("   ⏹️  Branch terminated (no matching routes)");
+                eprintln!("   ⏹️  Branch terminated (no matching routes)");
             }
             return Ok(());
         }
 
         // Log fan-out in inclusive mode
         if matches!(next_mode, NextMode::Inclusive) && matched_steps.len() > 1 && self.verbose {
-            println!("   ⚡ Fan-out to {} steps: {:?}", matched_steps.len(), matched_steps);
+            eprintln!("   ⚡ Fan-out to {} steps: {:?}", matched_steps.len(), matched_steps);
         }
 
         // Execute matched steps
@@ -998,9 +1118,9 @@ impl PlaybookRunner {
             if matches {
                 if self.verbose {
                     if let Some(cond) = &arc.when_condition {
-                        println!("   ✓ Arc matched: {} ({})", arc.step, cond);
+                        eprintln!("   ✓ Arc matched: {} ({})", arc.step, cond);
                     } else {
-                        println!("   ✓ Arc: {} (default)", arc.step);
+                        eprintln!("   ✓ Arc: {} (default)", arc.step);
                     }
                 }
 
@@ -1013,7 +1133,7 @@ impl PlaybookRunner {
                 }
             } else if self.verbose {
                 if let Some(cond) = &arc.when_condition {
-                    println!("   ✗ Arc skipped: {} ({})", arc.step, cond);
+                    eprintln!("   ✗ Arc skipped: {} ({})", arc.step, cond);
                 }
             }
         }
@@ -1021,14 +1141,14 @@ impl PlaybookRunner {
         // Branch termination: no matches = branch ends
         if matched_steps.is_empty() {
             if self.verbose && !arcs.is_empty() {
-                println!("   ⏹️  Branch terminated (no matching arcs)");
+                eprintln!("   ⏹️  Branch terminated (no matching arcs)");
             }
             return Ok(());
         }
 
         // Log fan-out in inclusive mode
         if matches!(next_mode, NextMode::Inclusive) && matched_steps.len() > 1 && self.verbose {
-            println!("   ⚡ Fan-out to {} steps: {:?}", matched_steps.len(), matched_steps);
+            eprintln!("   ⚡ Fan-out to {} steps: {:?}", matched_steps.len(), matched_steps);
         }
 
         // Execute matched steps
@@ -1227,7 +1347,7 @@ impl PlaybookRunner {
                 let rendered_url = self.render_template(url, context)?;
 
                 if self.verbose {
-                    println!("   HTTP {} {}", method, rendered_url);
+                    eprintln!("   HTTP {} {}", method, rendered_url);
                 }
 
                 // Get auth token if auth config is provided
@@ -1254,7 +1374,7 @@ impl PlaybookRunner {
                 let playbook_path = self.resolve_playbook_path(&rendered_path)?;
 
                 if self.verbose {
-                    println!("   Executing sub-playbook: {}", playbook_path.display());
+                    eprintln!("   Executing sub-playbook: {}", playbook_path.display());
                 }
 
                 // DSL v2: Merge context variables with input (preferred) or args (legacy)
@@ -1281,10 +1401,16 @@ impl PlaybookRunner {
                     }
                 }
 
+                // Propagate quiet to sub-playbooks so they're consistently
+                // silent; deliberately do NOT propagate emit_json — we
+                // only want one structured envelope (the top-level run's)
+                // on stdout. Sub-playbook outcomes are folded into the
+                // parent's step_results via the caller's code below.
                 let sub_runner = PlaybookRunner::new(playbook_path)
                     .with_variables(sub_vars)
-                    .with_verbose(self.verbose);
-                sub_runner.run()?;
+                    .with_verbose(self.verbose)
+                    .with_quiet(self.quiet);
+                let _sub_outcome = sub_runner.run()?;
 
                 Ok(None)
             }
@@ -1293,7 +1419,7 @@ impl PlaybookRunner {
                 let db_path = self.resolve_duckdb_path(&rendered_db)?;
 
                 if self.verbose {
-                    println!("   DuckDB: {}", db_path.display());
+                    eprintln!("   DuckDB: {}", db_path.display());
                 }
 
                 if let Some(query_str) = query {
@@ -1315,7 +1441,7 @@ impl PlaybookRunner {
                 project,
             } => {
                 if self.verbose {
-                    println!("   Auth: provider={}", provider);
+                    eprintln!("   Auth: provider={}", provider);
                 }
 
                 // Set project in context if provided
@@ -1358,7 +1484,7 @@ impl PlaybookRunner {
                         let file_path = self.resolve_sink_path(&rendered_path)?;
 
                         if self.verbose {
-                            println!("   Sink to file: {}", file_path.display());
+                            eprintln!("   Sink to file: {}", file_path.display());
                         }
 
                         // Create parent directories if needed
@@ -1374,7 +1500,7 @@ impl PlaybookRunner {
                         let db_path = self.resolve_duckdb_path(&rendered_db)?;
 
                         if self.verbose {
-                            println!("   Sink to DuckDB: {} -> {}", db_path.display(), rendered_table);
+                            eprintln!("   Sink to DuckDB: {} -> {}", db_path.display(), rendered_table);
                         }
 
                         self.sink_to_duckdb(&db_path, &rendered_table, &data)?;
@@ -1386,7 +1512,7 @@ impl PlaybookRunner {
                         let gcs_uri = format!("gs://{}/{}", rendered_bucket, rendered_path);
 
                         if self.verbose {
-                            println!("   Sink to GCS: {}", gcs_uri);
+                            eprintln!("   Sink to GCS: {}", gcs_uri);
                         }
 
                         self.sink_to_gcs(&gcs_uri, &formatted_data)?;
@@ -1406,16 +1532,16 @@ impl PlaybookRunner {
                 let rendered_code = self.render_template(code, context)?;
 
                 if self.verbose {
-                    println!("   🦀 Executing Rhai script");
+                    eprintln!("   🦀 Executing Rhai script");
                 }
 
                 let result = self.execute_rhai_script(&rendered_code, &rendered_args, context)?;
                 Ok(Some(result))
             }
             Tool::Unsupported => {
-                println!("   Tool not supported in local execution mode");
-                println!("   Supported tools: shell, http, playbook, duckdb, auth, sink");
-                println!("   For other tools (postgres, python, iterator, etc.), use distributed execution");
+                eprintln!("   Tool not supported in local execution mode");
+                eprintln!("   Supported tools: shell, http, playbook, duckdb, auth, sink");
+                eprintln!("   For other tools (postgres, python, iterator, etc.), use distributed execution");
                 Ok(None)
             }
         }
@@ -1423,7 +1549,7 @@ impl PlaybookRunner {
 
     fn execute_shell_command(&self, command: &str) -> Result<String> {
         if self.verbose {
-            println!("   🔧 Executing: {}", command);
+            eprintln!("   🔧 Executing: {}", command);
         }
 
         let mut binding = Command::new("bash");
@@ -1447,7 +1573,7 @@ impl PlaybookRunner {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    println!("{}", line);
+                    eprintln!("{}", line);
                 }
             }
         });
@@ -1456,7 +1582,7 @@ impl PlaybookRunner {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    println!("{}", line);
+                    eprintln!("{}", line);
                 }
             }
         });
@@ -1489,14 +1615,14 @@ impl PlaybookRunner {
 
         // Register log/print function
         engine.register_fn("log", move |msg: &str| {
-            println!("{}", msg);
+            eprintln!("{}", msg);
             if let Ok(mut buf) = output_clone.lock() {
                 buf.push(msg.to_string());
             }
         });
 
         engine.register_fn("print", |msg: &str| {
-            println!("{}", msg);
+            eprintln!("{}", msg);
         });
 
         // Register timestamp function
@@ -1823,7 +1949,7 @@ impl PlaybookRunner {
                     }
                 })
                 .collect();
-            println!("   curl {}", redacted_args.join(" "));
+            eprintln!("   curl {}", redacted_args.join(" "));
         }
 
         let output = Command::new("curl")
@@ -1853,7 +1979,7 @@ impl PlaybookRunner {
         }).to_string();
 
         if self.verbose {
-            println!(
+            eprintln!(
                 "   Response: {}",
                 if response.len() > 200 {
                     format!("{}... ({} bytes)", &response[..200], response.len())
@@ -1912,7 +2038,7 @@ impl PlaybookRunner {
         let conn = Connection::open(db_path).context("Failed to open DuckDB database")?;
 
         if self.verbose {
-            println!("   Query: {}", query);
+            eprintln!("   Query: {}", query);
         }
 
         // Check if it's a SELECT query or a modification query
@@ -2269,6 +2395,11 @@ impl PlaybookRunner {
 struct ExecutionContext {
     variables: HashMap<String, String>,
     step_results: HashMap<String, String>,
+    /// Insertion-ordered list of step names that have been executed.
+    /// `step_results` is a HashMap (no stable order); this Vec gives
+    /// the runner outcome a deterministic "what ran, in what order"
+    /// for the JSON envelope's `executed_steps` field.
+    executed_steps: Vec<String>,
 }
 
 impl ExecutionContext {
@@ -2276,6 +2407,7 @@ impl ExecutionContext {
         Self {
             variables: HashMap::new(),
             step_results: HashMap::new(),
+            executed_steps: Vec::new(),
         }
     }
 
@@ -2284,6 +2416,13 @@ impl ExecutionContext {
     }
 
     fn set_step_result(&mut self, step_name: String, result: String) {
+        // Track the first-time execution of this step. set_step_result
+        // is called per-step at most once in normal flow; if it gets
+        // re-called (re-entry, fan-in fan-out edge case) we keep the
+        // first occurrence for the outcome's executed_steps order.
+        if !self.executed_steps.iter().any(|s| s == &step_name) {
+            self.executed_steps.push(step_name.clone());
+        }
         self.step_results.insert(step_name.clone(), result.clone());
         // Also set as variable for easy access
         self.variables.insert(format!("{}.result", step_name), result);
