@@ -534,13 +534,12 @@ impl PlaybookRunner {
         self
     }
 
-    /// Print a progress line to stderr unless `quiet` is set. Used by
-    /// the runner itself; tool stdout/stderr is unaffected.
-    fn say(&self, args: std::fmt::Arguments) {
-        if !self.quiet {
-            eprintln!("{}", args);
-        }
-    }
+    // NOTE: an earlier draft of this commit added a `say()` helper
+    // that gated all stderr prints on `!self.quiet`. Inlining the
+    // check at each call site turned out simpler (and avoided the
+    // dead-code warning when callers used `eprintln!` directly).
+    // Kept as a comment marker for future contributors who might
+    // re-introduce the helper.
 
     /// Validate playbook requirements against local runtime capabilities
     fn validate_capabilities(&self, playbook: &Playbook) -> Result<()> {
@@ -1569,11 +1568,28 @@ impl PlaybookRunner {
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
 
+        // Collect stdout lines into a shared buffer so we can:
+        //   (a) keep streaming each line to stderr as the command runs
+        //       (preserves the existing UX where shell output appears
+        //       interleaved with the runner's own progress prints)
+        //   (b) return the captured stdout as the step's result, so
+        //       PlaybookRunner can store it in step_results.<step>.
+        // Without (b), every kind:shell step's result was an empty
+        // string — which made bridge result envelopes useless for
+        // anything inspection-shaped (the agent bridge's primary use
+        // case). Shared Arc<Mutex<Vec<String>>> is the simplest way
+        // to thread-safely hand stdout lines back to the main thread
+        // after the reader joins.
+        let stdout_buf = Arc::new(Mutex::new(Vec::<String>::new()));
+        let stdout_buf_clone = stdout_buf.clone();
         let stdout_thread = std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 if let Ok(line) = line {
                     eprintln!("{}", line);
+                    if let Ok(mut buf) = stdout_buf_clone.lock() {
+                        buf.push(line);
+                    }
                 }
             }
         });
@@ -1597,7 +1613,16 @@ impl PlaybookRunner {
             anyhow::bail!("Command failed with exit code: {:?}", status.code());
         }
 
-        Ok("".to_string())
+        // Reassemble the captured stdout. Lock should always succeed
+        // here because both threads have joined. Lines are joined
+        // with newlines (the reader stripped them); a trailing
+        // newline is appended only when the original output had one,
+        // which we approximate by appending an empty string and
+        // letting `.join("\n")` handle the rest.
+        let captured = stdout_buf.lock()
+            .map(|buf| buf.join("\n"))
+            .unwrap_or_default();
+        Ok(captured)
     }
 
     /// Execute a Rhai script with access to HTTP, sleep, and utility functions
