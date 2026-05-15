@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.14.2](https://github.com/noetl/cli/compare/v2.14.1...v2.14.2) (2026-05-15)
+
+### Bug Fixes
+
+* publish cli release assets after semantic release ([d708e74](https://github.com/noetl/cli/commit/d708e747e08f0654445343b3a032a3175f06ed3d))
+* skip optional package publishers without usable tokens ([8897369](https://github.com/noetl/cli/commit/889736920c2cba821efc75cef6eb30960d07625c))
+
 ## [2.14.1](https://github.com/noetl/cli/compare/v2.14.0...v2.14.1) (2026-05-05)
 
 ### Bug Fixes
