@@ -98,11 +98,20 @@ jobs:
         run: echo "CRATES_IO_TOKEN is not set; skipping crate publish."
 
   build-release-assets:
-    runs-on: ${{ matrix.os }}
     needs: verify-version
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_os: linux
+            artifact_arch: x86_64
+          - os: ubuntu-24.04-arm
+            artifact_os: linux
+            artifact_arch: aarch64
+          - os: macos-latest
+            artifact_os: darwin
+            artifact_arch: arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -113,13 +122,13 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ needs.verify-version.outputs.version }}"
-          OS="$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')"
-          ARCH="$(uname -m)"
           mkdir -p dist
-          tar -C target/release -czf "dist/noetl-v${VERSION}-${OS}-${ARCH}.tar.gz" noetl ntl
+          tar -C target/release -czf \
+            "dist/noetl-v${VERSION}-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}.tar.gz" \
+            noetl ntl
       - uses: actions/upload-artifact@v4
         with:
-          name: bins-${{ matrix.os }}
+          name: bins-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}
           path: dist/*.tar.gz
 
   build-deb:
@@ -183,22 +192,28 @@ jobs:
     steps:
       - name: Check Homebrew token
         id: homebrew_token
+        env:
+          GH_TOKEN: ${{ env.HOMEBREW_TAP_PUSH_TOKEN }}
         shell: bash
         run: |
           if [[ -n "${HOMEBREW_TAP_PUSH_TOKEN}" ]]; then
-            echo "present=true" >> "${GITHUB_OUTPUT}"
+            if gh api repos/noetl/homebrew-tap >/dev/null 2>&1; then
+              echo "usable=true" >> "${GITHUB_OUTPUT}"
+            else
+              echo "usable=false" >> "${GITHUB_OUTPUT}"
+            fi
           else
-            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "usable=false" >> "${GITHUB_OUTPUT}"
           fi
       - name: Checkout tap repo
-        if: ${{ steps.homebrew_token.outputs.present == 'true' }}
+        if: ${{ steps.homebrew_token.outputs.usable == 'true' }}
         uses: actions/checkout@v4
         with:
           repository: noetl/homebrew-tap
           token: ${{ env.HOMEBREW_TAP_PUSH_TOKEN }}
           path: tap
       - name: Update formula
-        if: ${{ steps.homebrew_token.outputs.present == 'true' }}
+        if: ${{ steps.homebrew_token.outputs.usable == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -226,7 +241,7 @@ jobs:
           end
           EOF
       - name: Commit and push
-        if: ${{ steps.homebrew_token.outputs.present == 'true' }}
+        if: ${{ steps.homebrew_token.outputs.usable == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -236,9 +251,9 @@ jobs:
           git add Formula/noetl.rb
           git commit -m "noetl ${{ needs.verify-version.outputs.version }}" || exit 0
           git push origin HEAD:main
-      - name: Skip tap publish (no token)
-        if: ${{ steps.homebrew_token.outputs.present == 'false' }}
-        run: echo "HOMEBREW_TAP_PUSH_TOKEN is not set; skipping Homebrew tap update."
+      - name: Skip tap publish
+        if: ${{ steps.homebrew_token.outputs.usable == 'false' }}
+        run: echo "HOMEBREW_TAP_PUSH_TOKEN is not set or cannot access noetl/homebrew-tap; skipping Homebrew tap update."
 
   update-apt-repo:
     runs-on: ubuntu-latest
@@ -248,30 +263,36 @@ jobs:
     steps:
       - name: Check APT token
         id: apt_token
+        env:
+          GH_TOKEN: ${{ env.APT_REPO_PUSH_TOKEN }}
         shell: bash
         run: |
           if [[ -n "${APT_REPO_PUSH_TOKEN}" ]]; then
-            echo "present=true" >> "${GITHUB_OUTPUT}"
+            if gh api repos/noetl/apt >/dev/null 2>&1; then
+              echo "usable=true" >> "${GITHUB_OUTPUT}"
+            else
+              echo "usable=false" >> "${GITHUB_OUTPUT}"
+            fi
           else
-            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "usable=false" >> "${GITHUB_OUTPUT}"
           fi
       - uses: actions/download-artifact@v4
-        if: ${{ steps.apt_token.outputs.present == 'true' }}
+        if: ${{ steps.apt_token.outputs.usable == 'true' }}
         with:
           name: deb-amd64
           path: dist
       - name: Install apt tooling
-        if: ${{ steps.apt_token.outputs.present == 'true' }}
+        if: ${{ steps.apt_token.outputs.usable == 'true' }}
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils
       - name: Checkout apt repo
-        if: ${{ steps.apt_token.outputs.present == 'true' }}
+        if: ${{ steps.apt_token.outputs.usable == 'true' }}
         uses: actions/checkout@v4
         with:
           repository: noetl/apt
           token: ${{ env.APT_REPO_PUSH_TOKEN }}
           path: apt
       - name: Update apt metadata
-        if: ${{ steps.apt_token.outputs.present == 'true' }}
+        if: ${{ steps.apt_token.outputs.usable == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -282,7 +303,7 @@ jobs:
           gzip -9c dists/jammy/main/binary-amd64/Packages > dists/jammy/main/binary-amd64/Packages.gz
           apt-ftparchive release dists/jammy > dists/jammy/Release
       - name: Commit and push
-        if: ${{ steps.apt_token.outputs.present == 'true' }}
+        if: ${{ steps.apt_token.outputs.usable == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -292,6 +313,6 @@ jobs:
           git add pool dists
           git commit -m "noetl ${{ needs.verify-version.outputs.version }}" || exit 0
           git push origin HEAD:main
-      - name: Skip APT publish (no token)
-        if: ${{ steps.apt_token.outputs.present == 'false' }}
-        run: echo "APT_REPO_PUSH_TOKEN is not set; skipping APT repo update."
+      - name: Skip APT publish
+        if: ${{ steps.apt_token.outputs.usable == 'false' }}
+        run: echo "APT_REPO_PUSH_TOKEN is not set or cannot access noetl/apt; skipping APT repo update."

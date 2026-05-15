@@ -6,6 +6,7 @@ on:
       - main
 
 permissions:
+  actions: write
   contents: write
   issues: write
   pull-requests: write
@@ -21,6 +22,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Release
+        id: semantic
         uses: cycjimmy/semantic-release-action@v4
         with:
           semantic_version: 24.2.3
@@ -31,3 +33,12 @@ jobs:
             conventional-changelog-conventionalcommits@8.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and upload release assets
+        if: ${{ steps.semantic.outputs.new_release_published == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -E '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
+          gh workflow run release.yml --ref main -f version="${VERSION}"
