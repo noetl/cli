@@ -98,11 +98,20 @@ jobs:
         run: echo "CRATES_IO_TOKEN is not set; skipping crate publish."
 
   build-release-assets:
-    runs-on: ${{ matrix.os }}
     needs: verify-version
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_os: linux
+            artifact_arch: x86_64
+          - os: ubuntu-24.04-arm
+            artifact_os: linux
+            artifact_arch: aarch64
+          - os: macos-latest
+            artifact_os: darwin
+            artifact_arch: arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -113,13 +122,13 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ needs.verify-version.outputs.version }}"
-          OS="$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')"
-          ARCH="$(uname -m)"
           mkdir -p dist
-          tar -C target/release -czf "dist/noetl-v${VERSION}-${OS}-${ARCH}.tar.gz" noetl ntl
+          tar -C target/release -czf \
+            "dist/noetl-v${VERSION}-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}.tar.gz" \
+            noetl ntl
       - uses: actions/upload-artifact@v4
         with:
-          name: bins-${{ matrix.os }}
+          name: bins-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}
           path: dist/*.tar.gz
 
   build-deb:
