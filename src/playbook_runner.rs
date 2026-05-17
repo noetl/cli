@@ -116,7 +116,7 @@ pub struct ExecutorSpec {
     pub final_step: Option<String>,
     /// Treat "no next match" as error (default: false = branch terminates)
     #[serde(default)]
-    pub _no_next_is_error: Option<bool>,
+    pub no_next_is_error: Option<bool>,
 }
 
 fn default_profile() -> String {
