@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.14.3](https://github.com/noetl/cli/compare/v2.14.2...v2.14.3) (2026-05-18)
+
+### Bug Fixes
+
+* **exec:** normalize distributed workload overrides ([22065cc](https://github.com/noetl/cli/commit/22065cc251733798d3f0ab303c6df4f6b09c76c1))
+
 ## [2.14.2](https://github.com/noetl/cli/compare/v2.14.1...v2.14.2) (2026-05-15)
 
 ### Bug Fixes
