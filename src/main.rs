@@ -1388,14 +1388,47 @@ fn build_distributed_payload(
             continue;
         }
 
-        let key = parts[0].to_string();
+        let key = parts[0].strip_prefix("workload.").unwrap_or(parts[0]);
         let raw = parts[1];
         let value = serde_json::from_str::<serde_json::Value>(raw)
             .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()));
-        merged.insert(key, value);
+        insert_json_path(&mut merged, key, value);
     }
 
     Ok(serde_json::Value::Object(merged))
+}
+
+fn insert_json_path(map: &mut serde_json::Map<String, serde_json::Value>, key: &str, value: serde_json::Value) {
+    let mut parts = key.split('.').filter(|part| !part.is_empty()).peekable();
+    let Some(first) = parts.next() else {
+        return;
+    };
+
+    if parts.peek().is_none() {
+        map.insert(first.to_string(), value);
+        return;
+    }
+
+    let mut current = map
+        .entry(first.to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    while let Some(part) = parts.next() {
+        let is_leaf = parts.peek().is_none();
+        if !current.is_object() {
+            *current = serde_json::Value::Object(serde_json::Map::new());
+        }
+
+        let object = current.as_object_mut().expect("current value forced to object");
+        if is_leaf {
+            object.insert(part.to_string(), value);
+            return;
+        }
+
+        current = object
+            .entry(part.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    }
 }
 
 /// Resolve playbook file path and optional target step
@@ -6433,4 +6466,49 @@ fn parse_variables(variables: &[String]) -> Result<std::collections::HashMap<Str
 fn get_state_db_path() -> Result<PathBuf> {
     let path = PathBuf::from(".noetl/state.duckdb");
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distributed_payload_accepts_workload_prefixed_overrides() {
+        let variables = vec![
+            "workload.num_facilities=1".to_string(),
+            "workload.patients_per_facility=10".to_string(),
+            "workload.enabled=true".to_string(),
+        ];
+
+        let payload = build_distributed_payload(None, None, &variables).unwrap();
+
+        assert_eq!(payload["num_facilities"], serde_json::json!(1));
+        assert_eq!(payload["patients_per_facility"], serde_json::json!(10));
+        assert_eq!(payload["enabled"], serde_json::json!(true));
+        assert!(payload.get("workload.num_facilities").is_none());
+    }
+
+    #[test]
+    fn distributed_payload_keeps_direct_payload_overrides() {
+        let variables = vec!["num_facilities=2".to_string()];
+
+        let payload =
+            build_distributed_payload(None, Some(r#"{"num_facilities": 1, "page_size": 50}"#), &variables).unwrap();
+
+        assert_eq!(payload["num_facilities"], serde_json::json!(2));
+        assert_eq!(payload["page_size"], serde_json::json!(50));
+    }
+
+    #[test]
+    fn distributed_payload_supports_nested_override_paths() {
+        let variables = vec![
+            "limits.http.concurrency=8".to_string(),
+            "limits.http.window=\"30s\"".to_string(),
+        ];
+
+        let payload = build_distributed_payload(None, None, &variables).unwrap();
+
+        assert_eq!(payload["limits"]["http"]["concurrency"], serde_json::json!(8));
+        assert_eq!(payload["limits"]["http"]["window"], serde_json::json!("30s"));
+    }
 }
