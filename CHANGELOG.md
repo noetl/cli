@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.15.0](https://github.com/noetl/cli/compare/v2.14.3...v2.15.0) (2026-05-28)
+
+### Features
+
+* **cli:** context update + gateway 401 + PKCE callback URL hints ([e64b127](https://github.com/noetl/cli/commit/e64b12721048695241790fb2e353dfcfe5d786a5))
+* **cli:** noetl context port-forward — managed kubectl tunnel ([1e7f69a](https://github.com/noetl/cli/commit/1e7f69ac3583e66fa7930f5a4544b79349ccf4ac)), closes [#13](https://github.com/noetl/cli/issues/13) [#13](https://github.com/noetl/cli/issues/13) [#13](https://github.com/noetl/cli/issues/13)
+
 ## [2.14.3](https://github.com/noetl/cli/compare/v2.14.2...v2.14.3) (2026-05-18)
 
 ### Bug Fixes
