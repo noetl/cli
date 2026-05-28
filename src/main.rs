@@ -63,6 +63,22 @@ struct Cli {
     /// Gateway session token (or set NOETL_SESSION_TOKEN env var)
     #[arg(long)]
     session_token: Option<String>,
+
+    /// Use this named context for one command, without changing the
+    /// current context.  Matches the UX of ``kubectl --context`` and
+    /// ``gcloud --account``.  When set, the named context's
+    /// ``server_url``, ``runtime``, Auth0 settings, and cached
+    /// session token are used in place of the current context.
+    ///
+    /// Errors if the named context doesn't exist (use
+    /// ``noetl context list`` to see configured contexts).
+    ///
+    /// Examples:
+    ///     noetl --context gke-pf catalog list Playbook
+    ///     noetl --context gke-prod register credential -f cred.json
+    ///     noetl --context smoke-test exec ./playbooks/foo.yaml
+    #[arg(long, value_name = "NAME", global = true)]
+    context: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1658,14 +1674,58 @@ fn api_url(base_url: &str, path: &str, use_gateway_proxy: bool) -> String {
     }
 }
 
+/// Resolve which named context to use for this invocation, honouring
+/// the ``--context <name>`` global flag.  When the flag is set and
+/// the named context doesn't exist, fail fast with a clear error —
+/// silently falling back to the current context would mask the
+/// typo and run the command against the wrong cluster.
+///
+/// Takes the override as ``Option<&str>`` (rather than ``&Cli``) so
+/// callers can use it inside ``match`` arms that have already
+/// destructured ``cli``.
+///
+/// Returns ``Some((name, context))`` when ``--context`` is honoured,
+/// or ``None`` when the caller should fall back to
+/// ``Config::get_current_context``.
+fn resolve_named_context<'a>(
+    requested: Option<&str>,
+    config: &'a Config,
+) -> Option<(&'a String, &'a Context)> {
+    let requested = requested?;
+    match config.contexts.get_key_value(requested) {
+        Some((name, ctx)) => Some((name, ctx)),
+        None => {
+            eprintln!(
+                "Context '{}' (from --context flag) not found.",
+                requested
+            );
+            eprintln!("  Configured contexts:  noetl context list");
+            eprintln!(
+                "  Create it:            noetl context add {} --server-url=...",
+                requested
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Effective context for this invocation — ``--context <name>`` if
+/// passed (validated by ``resolve_named_context``), otherwise
+/// whatever ``Config`` reports as current.
+fn effective_context<'a>(
+    requested: Option<&str>,
+    config: &'a Config,
+) -> Option<(&'a String, &'a Context)> {
+    resolve_named_context(requested, config).or_else(|| config.get_current_context())
+}
+
 fn resolve_base_url(cli: &Cli, config: &Config) -> String {
     if let Some(url) = cli.server_url.clone() {
         url
     } else if let (Some(host), Some(port)) = (cli.host.as_ref(), cli.port) {
         format!("http://{}:{}", host, port)
     } else {
-        config
-            .get_current_context()
+        effective_context(cli.context.as_deref(), config)
             .map(|(_, ctx)| ctx.server_url.clone())
             .unwrap_or_else(|| "http://localhost:8082".to_string())
     }
@@ -1675,8 +1735,7 @@ fn resolve_session_token(cli: &Cli, config: &Config) -> Option<String> {
     let env_session_token = std::env::var("NOETL_SESSION_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty());
-    let context_session_token = config
-        .get_current_context()
+    let context_session_token = effective_context(cli.context.as_deref(), config)
         .and_then(|(_, ctx)| ctx.gateway_session_token.clone())
         .filter(|v| !v.trim().is_empty());
 
@@ -2034,6 +2093,13 @@ async fn main() -> Result<()> {
 
     let session_token = resolve_session_token(&cli, &config);
 
+    // Capture the ``--context <name>`` override as an owned Option<String>
+    // before the match below destructures fields out of ``cli``.  Without
+    // this binding, sites inside the match arms that want to call
+    // ``effective_context(...)`` for runtime preference can't borrow
+    // ``cli`` because some fields have been partially moved.
+    let context_override: Option<String> = cli.context.clone();
+
     let use_gateway_proxy = cli.gateway || env_flag("NOETL_USE_GATEWAY") || is_gateway_url(&base_url);
     let is_auth_login_command = matches!(
         &cli.command,
@@ -2079,8 +2145,8 @@ async fn main() -> Result<()> {
             dry_run,
             json,
         }) => {
-            // Get context runtime preference
-            let context_runtime = config.get_current_context().map(|(_, ctx)| ctx.runtime.as_str());
+            // Get context runtime preference (honours --context override).
+            let context_runtime = effective_context(context_override.as_deref(), &config).map(|(_, ctx)| ctx.runtime.as_str());
 
             // Parse the reference to determine type and resolve runtime
             let exec_ctx = parse_exec_reference(&reference, version.as_deref())?;
@@ -2215,8 +2281,8 @@ async fn main() -> Result<()> {
             merge,
             verbose,
         }) => {
-            // Get context runtime preference
-            let context_runtime = config.get_current_context().map(|(_, ctx)| ctx.runtime.as_str());
+            // Get context runtime preference (honours --context override).
+            let context_runtime = effective_context(context_override.as_deref(), &config).map(|(_, ctx)| ctx.runtime.as_str());
 
             // Determine effective runtime (context takes precedence for "auto")
             let effective_runtime = if runtime == "auto" {
@@ -3051,7 +3117,8 @@ fn handle_port_forward(
         }
     };
 
-    // Refuse to start a duplicate detached forward.
+    // Refuse to start a duplicate detached forward (our own PID file
+    // says one is alive).
     if detach {
         if let Some(existing) = read_pid_file(&pid_path)? {
             if pid_is_running(existing) {
@@ -3064,6 +3131,47 @@ fn handle_port_forward(
             }
             // Stale pid file — clean it up and continue.
             let _ = std::fs::remove_file(&pid_path);
+        }
+    }
+
+    // Refuse to start the kubectl tunnel when the local port is
+    // already bound by ANY process (the existing PID-file check
+    // above only catches *our own* prior daemons).  Without this,
+    // a stray kubectl from a different session would happily let
+    // ``--detach`` "succeed" — the new kubectl spawns, sees the
+    // port-in-use error a few hundred ms later, and exits 1,
+    // leaving an orphan PID file pointing at a dead process.
+    // ``--status`` then reports "stale pid file" with no hint why.
+    //
+    // Probe by attempting to bind a TcpListener to the same loopback
+    // port.  If bind succeeds, we drop the listener immediately —
+    // there's a tiny race window between this check and kubectl
+    // claiming the port, but it's vastly better than no check at
+    // all.  We probe ``127.0.0.1`` since that's what kubectl binds.
+    {
+        use std::net::TcpListener;
+        let probe_addr = format!("127.0.0.1:{}", local_port);
+        match TcpListener::bind(&probe_addr) {
+            Ok(_) => {
+                // Free.  Listener drops here, releasing the port.
+            }
+            Err(err) => {
+                eprintln!(
+                    "Local port {} is already in use (bind probe failed: {}).",
+                    local_port, err
+                );
+                eprintln!("  Identify the process:");
+                eprintln!("    lsof -i :{}                 # macOS / Linux", local_port);
+                eprintln!("    fuser {}/tcp                # Linux", local_port);
+                eprintln!();
+                eprintln!("  If it's a stray ``kubectl port-forward`` from another shell:");
+                eprintln!("    pkill -f 'port-forward svc/noetl'");
+                eprintln!();
+                eprintln!(
+                    "  If it's another noetl-managed daemon: ``noetl context port-forward <other> --stop``."
+                );
+                std::process::exit(1);
+            }
         }
     }
 
@@ -7561,5 +7669,47 @@ mod tests {
         assert_eq!(normalise_gateway_url("  https://gateway.mestumre.dev/  "), "https://gateway.mestumre.dev");
         assert_eq!(normalise_gateway_url("http://127.0.0.1:18082/"), "http://127.0.0.1:18082");
         assert_eq!(normalise_gateway_url(""), "");
+    }
+
+    #[test]
+    fn effective_context_returns_named_context_when_override_set() {
+        // ``--context <name>`` resolves against config.contexts, returning
+        // the named context regardless of which one is current.
+        let mut config = Config::default();
+        let mut prod_ctx = Context::new("https://gateway.prod.example.com".to_string());
+        prod_ctx.runtime = "distributed".to_string();
+        let mut pf_ctx = Context::new("http://127.0.0.1:18082".to_string());
+        pf_ctx.runtime = "auto".to_string();
+        config.contexts.insert("gke-prod".to_string(), prod_ctx);
+        config.contexts.insert("gke-pf".to_string(), pf_ctx);
+        config.current_context = Some("gke-prod".to_string());
+
+        // Without --context: current_context wins.
+        let (name, ctx) = effective_context(None, &config).unwrap();
+        assert_eq!(name, "gke-prod");
+        assert_eq!(ctx.server_url, "https://gateway.prod.example.com");
+
+        // With --context=gke-pf: override wins.
+        let (name, ctx) = effective_context(Some("gke-pf"), &config).unwrap();
+        assert_eq!(name, "gke-pf");
+        assert_eq!(ctx.server_url, "http://127.0.0.1:18082");
+    }
+
+    #[test]
+    fn effective_context_falls_back_to_current_when_override_is_none() {
+        let mut config = Config::default();
+        config
+            .contexts
+            .insert("only".to_string(), Context::new("http://localhost:8082".to_string()));
+        config.current_context = Some("only".to_string());
+
+        let (name, _ctx) = effective_context(None, &config).unwrap();
+        assert_eq!(name, "only");
+    }
+
+    #[test]
+    fn effective_context_returns_none_when_no_current_and_no_override() {
+        let config = Config::default();
+        assert!(effective_context(None, &config).is_none());
     }
 }
