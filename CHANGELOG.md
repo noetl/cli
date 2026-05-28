@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.16.0](https://github.com/noetl/cli/compare/v2.15.0...v2.16.0) (2026-05-28)
+
+### Features
+
+* **cli:** noetl context init --from-gateway ([16b46e5](https://github.com/noetl/cli/commit/16b46e576dd80bd8a6b754b1578cae32dc4fc9b8)), closes [#16](https://github.com/noetl/cli/issues/16) [#13](https://github.com/noetl/cli/issues/13) [#14](https://github.com/noetl/cli/issues/14) [#16](https://github.com/noetl/cli/issues/16) [#124](https://github.com/noetl/cli/issues/124)
+
 ## [2.15.0](https://github.com/noetl/cli/compare/v2.14.3...v2.15.0) (2026-05-28)
 
 ### Features
