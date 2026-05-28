@@ -984,6 +984,35 @@ enum ContextCommand {
         #[arg(long)]
         set_current: bool,
     },
+    /// Bootstrap a context by reading the gateway's runtime contract.
+    /// GETs ``<from-gateway>/api/runtime/contract``, parses any
+    /// ``auth0`` block, prompts the operator to confirm the
+    /// discovered Auth0 settings, and writes the context.  When the
+    /// gateway doesn't carry an ``auth0`` block (older gateway image
+    /// or non-Auth0 deployment) the context is created with
+    /// ``server_url`` only and a warning is printed.
+    ///
+    /// Examples:
+    ///     noetl context init gke-prod --from-gateway https://gateway.mestumre.dev
+    ///     noetl context init gke-prod --from-gateway https://gateway.mestumre.dev --yes
+    ///     noetl context init gke-prod --from-gateway https://gateway.mestumre.dev --set-current
+    #[command(verbatim_doc_comment)]
+    Init {
+        /// Context name to create (replaces any existing entry with the same name)
+        name: String,
+        /// Gateway URL to discover Auth0 + server config from
+        #[arg(long)]
+        from_gateway: String,
+        /// Skip the confirmation prompt (useful for scripts / CI)
+        #[arg(long = "yes", visible_alias = "non-interactive")]
+        non_interactive: bool,
+        /// Default runtime mode for the new context: local, distributed, or auto
+        #[arg(long, default_value = "distributed")]
+        runtime: String,
+        /// Set as current context after writing
+        #[arg(long)]
+        set_current: bool,
+    },
     /// Update an existing context's settings in place.  All flags are
     /// optional; unspecified fields are preserved.  Refuses if the
     /// context does not exist (suggests ``context add``).
@@ -2253,7 +2282,7 @@ async fn main() -> Result<()> {
             }
         }
         Some(Commands::Context { command }) => {
-            handle_context_command(&mut config, command)?;
+            handle_context_command(&mut config, command).await?;
         }
         Some(Commands::Auth { command }) => {
             handle_auth_command(&mut config, &base_url, command).await?;
@@ -2418,7 +2447,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle_context_command(config: &mut Config, command: ContextCommand) -> Result<()> {
+async fn handle_context_command(config: &mut Config, command: ContextCommand) -> Result<()> {
     match command {
         ContextCommand::Add {
             name,
@@ -2555,6 +2584,16 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
                 eprintln!("No current context set. Use 'noetl context use <name>' first.");
                 std::process::exit(1);
             }
+        }
+        ContextCommand::Init {
+            name,
+            from_gateway,
+            non_interactive,
+            runtime,
+            set_current,
+        } => {
+            handle_context_init(config, &name, &from_gateway, &runtime, non_interactive, set_current)
+                .await?;
         }
         ContextCommand::Update {
             name,
@@ -2743,6 +2782,191 @@ fn parse_local_port_from_server_url(url: &str) -> Option<u16> {
         return None;
     }
     parsed.port()
+}
+
+/// Pure helper: parse the ``auth0`` block from a runtime contract
+/// response into ``(domain, client_id, redirect_uri, audience)``.
+/// Returns ``None`` when no usable ``auth0`` block is present
+/// (older gateway image, or deployment without Auth0).  Empty
+/// fields are normalised to empty strings — the caller decides
+/// whether to clear or skip each one.
+///
+/// Split from the HTTP-fetching wrapper so it can be unit-tested
+/// without a live gateway.
+fn parse_auth0_block_from_contract(
+    contract: &serde_json::Value,
+) -> Option<(String, String, String, String)> {
+    let auth0 = contract.get("auth0")?.as_object()?;
+    let domain = auth0
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if domain.is_empty() {
+        return None;
+    }
+    let client_id = auth0
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let redirect_uri = auth0
+        .get("redirect_uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let audience = auth0
+        .get("audience")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Some((domain, client_id, redirect_uri, audience))
+}
+
+/// Normalise the gateway URL so the runtime-contract fetch and the
+/// stored ``server_url`` are consistent: trim whitespace, drop a
+/// trailing slash.  Returns an owned ``String``.
+fn normalise_gateway_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
+async fn handle_context_init(
+    config: &mut Config,
+    name: &str,
+    from_gateway: &str,
+    runtime: &str,
+    non_interactive: bool,
+    set_current: bool,
+) -> Result<()> {
+    if !["local", "distributed", "auto"].contains(&runtime) {
+        eprintln!("Invalid runtime '{}'. Use: local, distributed, or auto", runtime);
+        std::process::exit(1);
+    }
+
+    let gateway_url = normalise_gateway_url(from_gateway);
+    if gateway_url.is_empty() {
+        eprintln!("--from-gateway cannot be empty.");
+        std::process::exit(1);
+    }
+    let contract_url = format!("{}/api/runtime/contract", gateway_url);
+
+    println!("Fetching runtime contract from {} ...", contract_url);
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&contract_url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to GET {}", contract_url))?;
+
+    if !response.status().is_success() {
+        eprintln!(
+            "Gateway returned {} from {}.  Cannot bootstrap context.",
+            response.status(),
+            contract_url
+        );
+        std::process::exit(1);
+    }
+
+    let contract: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse runtime contract as JSON")?;
+
+    let auth0 = parse_auth0_block_from_contract(&contract);
+
+    // Show the operator what we're about to write before we touch
+    // the config.  Even with ``--yes`` the table prints — it doubles
+    // as the post-hoc "what got written" log line.
+    println!();
+    println!("About to write context '{}':", name);
+    println!("  server_url:           {}", gateway_url);
+    println!("  runtime:              {}", runtime);
+    if let Some((domain, client_id, redirect_uri, audience)) = auth0.clone() {
+        println!("  auth0_domain:         {}", domain);
+        println!(
+            "  auth0_client_id:      {}",
+            if client_id.is_empty() { "(none)" } else { &client_id }
+        );
+        println!(
+            "  auth0_redirect_uri:   {}",
+            if redirect_uri.is_empty() { "(none)" } else { &redirect_uri }
+        );
+        println!(
+            "  auth0_audience:       {}",
+            if audience.is_empty() { "(none)" } else { &audience }
+        );
+    } else {
+        println!("  auth0:                (not exposed by this gateway — see warning below)");
+    }
+    if set_current {
+        println!("  set as current:       yes");
+    }
+    println!();
+
+    if !non_interactive {
+        print!("Proceed? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .context("Failed to read confirmation from stdin")?;
+        let answer = answer.trim().to_lowercase();
+        if !matches!(answer.as_str(), "y" | "yes") {
+            println!("Aborted.  No context changes written.");
+            return Ok(());
+        }
+    }
+
+    if auth0.is_none() {
+        eprintln!(
+            "Warning: gateway runtime contract does not carry an ``auth0`` block."
+        );
+        eprintln!(
+            "  Either the gateway image is older than v2.10 (no Auth0 exposure)"
+        );
+        eprintln!("  or the deployment is configured without Auth0.  Context will be");
+        eprintln!("  created with ``server_url`` only.  Add Auth0 fields manually if needed:");
+        eprintln!(
+            "    noetl context update {} --auth0-domain=... --auth0-client-id=...",
+            name
+        );
+    }
+
+    // Apply directly — Init replaces any existing context with the
+    // same name (it's a bootstrap command; the operator's intent is
+    // a clean slate from the gateway's perspective).
+    let mut context = Context::new(gateway_url.clone());
+    context.runtime = runtime.to_string();
+    if let Some((domain, client_id, redirect_uri, audience)) = auth0 {
+        context.gateway_auth0_domain = Some(domain);
+        if !client_id.is_empty() {
+            context.gateway_auth0_client_id = Some(client_id);
+        }
+        if !redirect_uri.is_empty() {
+            context.gateway_auth0_redirect_uri = Some(redirect_uri);
+        }
+        if !audience.is_empty() {
+            context.gateway_auth0_audience = Some(audience);
+        }
+    }
+
+    config.contexts.insert(name.to_string(), context);
+    if set_current {
+        config.current_context = Some(name.to_string());
+    }
+    config.save()?;
+    println!("Context '{}' written.", name);
+    if set_current {
+        println!("Context '{}' is now the current context.", name);
+    }
+    println!();
+    println!("Next step:  noetl auth login --browser-pkce --context {}", name);
+    Ok(())
 }
 
 fn handle_port_forward(
@@ -7270,5 +7494,72 @@ mod tests {
         let path = port_forward_pid_path("gke-pf").expect("home dir resolves");
         let p = path.to_string_lossy();
         assert!(p.ends_with(".noetl/port-forwards/gke-pf.pid"), "got {}", p);
+    }
+
+    #[test]
+    fn auth0_parses_from_runtime_contract() {
+        // Full auth0 block — every field populated.
+        let contract = serde_json::json!({
+            "gateway_version": "2.10.0",
+            "auth0": {
+                "domain": "acme.auth0.com",
+                "client_id": "abc123",
+                "redirect_uri": "https://app.example.com/login",
+                "audience": "https://api.example.com"
+            }
+        });
+        let (domain, client_id, redirect_uri, audience) =
+            parse_auth0_block_from_contract(&contract).expect("auth0 present");
+        assert_eq!(domain, "acme.auth0.com");
+        assert_eq!(client_id, "abc123");
+        assert_eq!(redirect_uri, "https://app.example.com/login");
+        assert_eq!(audience, "https://api.example.com");
+    }
+
+    #[test]
+    fn auth0_parses_partial_block_with_only_domain_and_client_id() {
+        // Audience often omitted (this tenant uses ID tokens, not
+        // audience-scoped access tokens).  Missing fields ⇒ empty
+        // strings; caller decides whether to skip or clear.
+        let contract = serde_json::json!({
+            "auth0": {
+                "domain": "mestumre-development.us.auth0.com",
+                "client_id": "Jqop7YoaiZalLHdBRo5ScNQ1RJhbhbDN"
+            }
+        });
+        let (domain, client_id, redirect_uri, audience) =
+            parse_auth0_block_from_contract(&contract).unwrap();
+        assert_eq!(domain, "mestumre-development.us.auth0.com");
+        assert_eq!(client_id, "Jqop7YoaiZalLHdBRo5ScNQ1RJhbhbDN");
+        assert_eq!(redirect_uri, "");
+        assert_eq!(audience, "");
+    }
+
+    #[test]
+    fn auth0_missing_or_empty_block_returns_none() {
+        // Older gateway image (no auth0 block at all).
+        let contract = serde_json::json!({"gateway_version":"2.9.0"});
+        assert!(parse_auth0_block_from_contract(&contract).is_none());
+
+        // Empty auth0 object.
+        let contract = serde_json::json!({"auth0":{}});
+        assert!(parse_auth0_block_from_contract(&contract).is_none());
+
+        // Auth0 block with explicitly-empty domain — treated as absent.
+        let contract = serde_json::json!({"auth0":{"domain":"   "}});
+        assert!(parse_auth0_block_from_contract(&contract).is_none());
+
+        // Auth0 block where ``auth0`` is the wrong type.
+        let contract = serde_json::json!({"auth0":"acme.auth0.com"});
+        assert!(parse_auth0_block_from_contract(&contract).is_none());
+    }
+
+    #[test]
+    fn gateway_url_normalisation_strips_trailing_slash_and_whitespace() {
+        assert_eq!(normalise_gateway_url("https://gateway.mestumre.dev"), "https://gateway.mestumre.dev");
+        assert_eq!(normalise_gateway_url("https://gateway.mestumre.dev/"), "https://gateway.mestumre.dev");
+        assert_eq!(normalise_gateway_url("  https://gateway.mestumre.dev/  "), "https://gateway.mestumre.dev");
+        assert_eq!(normalise_gateway_url("http://127.0.0.1:18082/"), "http://127.0.0.1:18082");
+        assert_eq!(normalise_gateway_url(""), "");
     }
 }
