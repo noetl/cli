@@ -967,6 +967,19 @@ enum ContextCommand {
         /// Auth0 client_secret for password grant login (stored locally)
         #[arg(long)]
         auth0_client_secret: Option<String>,
+        /// Kubernetes context name for ``noetl context port-forward``
+        /// (e.g. ``gke_my-project_us-central1_my-cluster``)
+        #[arg(long)]
+        kube_context: Option<String>,
+        /// Kubernetes namespace for ``noetl context port-forward``
+        #[arg(long)]
+        kube_namespace: Option<String>,
+        /// Kubernetes service name (default ``noetl``)
+        #[arg(long)]
+        kube_service: Option<String>,
+        /// In-cluster port for the service (default 8082)
+        #[arg(long)]
+        kube_remote_port: Option<u16>,
         /// Set as current context
         #[arg(long)]
         set_current: bool,
@@ -1004,6 +1017,19 @@ enum ContextCommand {
         /// New Auth0 client_secret (empty string clears)
         #[arg(long)]
         auth0_client_secret: Option<String>,
+        /// New Kubernetes context name for ``noetl context port-forward``
+        /// (empty string clears).
+        #[arg(long)]
+        kube_context: Option<String>,
+        /// New Kubernetes namespace (empty string clears).
+        #[arg(long)]
+        kube_namespace: Option<String>,
+        /// New Kubernetes service name (empty string clears, defaults to ``noetl``).
+        #[arg(long)]
+        kube_service: Option<String>,
+        /// New in-cluster port (0 clears, defaults to 8082).
+        #[arg(long)]
+        kube_remote_port: Option<u16>,
     },
     /// List all configured contexts
     /// Example:
@@ -1043,6 +1069,32 @@ enum ContextCommand {
     ///     noetl context current
     #[command(verbatim_doc_comment)]
     Current,
+    /// Start, stop, or check a ``kubectl port-forward`` managed by noetl
+    /// for the named context.  Requires the context to have
+    /// ``kube_context`` + ``kube_namespace`` set first via
+    /// ``noetl context update <name> --kube-context=... --kube-namespace=...``.
+    /// Examples:
+    ///     noetl context port-forward gke-pf             # foreground, exits on Ctrl-C
+    ///     noetl context port-forward gke-pf --detach    # background daemon, writes PID file
+    ///     noetl context port-forward gke-pf --stop      # kill the daemon
+    ///     noetl context port-forward gke-pf --status    # show daemon PID + liveness
+    #[command(verbatim_doc_comment)]
+    PortForward {
+        /// Context name (must already exist with ``kube_context`` + ``kube_namespace`` set)
+        name: String,
+        /// Spawn the port-forward as a background daemon.  Writes the PID
+        /// to ``~/.config/noetl/port-forwards/<context>.pid`` so a later
+        /// ``--stop`` can find it.
+        #[arg(long, conflicts_with_all = ["stop", "status"])]
+        detach: bool,
+        /// Stop a previously-detached port-forward by reading the PID file
+        /// and sending SIGTERM, then SIGKILL after a short grace.
+        #[arg(long, conflicts_with_all = ["detach", "status"])]
+        stop: bool,
+        /// Report whether a detached port-forward exists + its PID.
+        #[arg(long, conflicts_with_all = ["detach", "stop"])]
+        status: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2377,6 +2429,10 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
             auth0_redirect_uri,
             auth0_audience,
             auth0_client_secret,
+            kube_context,
+            kube_namespace,
+            kube_service,
+            kube_remote_port,
             set_current,
         } => {
             // Validate runtime value
@@ -2418,6 +2474,21 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
                 } else {
                     context.gateway_auth0_client_secret = Some(client_secret);
                 }
+            }
+            if let Some(value) = kube_context {
+                context.kube_context =
+                    if value.trim().is_empty() { None } else { Some(value) };
+            }
+            if let Some(value) = kube_namespace {
+                context.kube_namespace =
+                    if value.trim().is_empty() { None } else { Some(value) };
+            }
+            if let Some(value) = kube_service {
+                context.kube_service =
+                    if value.trim().is_empty() { None } else { Some(value) };
+            }
+            if let Some(port) = kube_remote_port {
+                context.kube_remote_port = if port == 0 { None } else { Some(port) };
             }
 
             config.contexts.insert(name.clone(), context);
@@ -2494,6 +2565,10 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
             auth0_redirect_uri,
             auth0_audience,
             auth0_client_secret,
+            kube_context,
+            kube_namespace,
+            kube_service,
+            kube_remote_port,
         } => {
             // Update only patches fields that were explicitly passed.
             // It refuses to create a missing context — the operator
@@ -2554,6 +2629,22 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
                 ctx.gateway_auth0_client_secret =
                     if value.trim().is_empty() { None } else { Some(value) };
             }
+            // Kubernetes fields (paired with ``noetl context port-forward``).
+            if let Some(value) = kube_context {
+                ctx.kube_context =
+                    if value.trim().is_empty() { None } else { Some(value) };
+            }
+            if let Some(value) = kube_namespace {
+                ctx.kube_namespace =
+                    if value.trim().is_empty() { None } else { Some(value) };
+            }
+            if let Some(value) = kube_service {
+                ctx.kube_service =
+                    if value.trim().is_empty() { None } else { Some(value) };
+            }
+            if let Some(port) = kube_remote_port {
+                ctx.kube_remote_port = if port == 0 { None } else { Some(port) };
+            }
 
             config.save()?;
             println!("Context '{}' updated.", name);
@@ -2591,12 +2682,301 @@ fn handle_context_command(config: &mut Config, command: ContextCommand) -> Resul
                         "not cached"
                     }
                 );
+                if let Some(kc) = &ctx.kube_context {
+                    println!("  Kube ctx:   {}", kc);
+                }
+                if let Some(ns) = &ctx.kube_namespace {
+                    println!("  Kube ns:    {}", ns);
+                }
             } else {
                 println!("No current context set.");
             }
         }
+        ContextCommand::PortForward {
+            name,
+            detach,
+            stop,
+            status,
+        } => {
+            handle_port_forward(config, &name, detach, stop, status)?;
+        }
     }
     Ok(())
+}
+
+/// PID-file location for a context's detached ``kubectl port-forward``.
+/// ``~/.config/noetl/port-forwards/<context>.pid``.  The directory is
+/// created lazily on first ``--detach``.
+fn port_forward_pid_path(context_name: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    let dir = home.join(".noetl").join("port-forwards");
+    Ok(dir.join(format!("{}.pid", context_name)))
+}
+
+/// Effective port-forward target for a context.  Returns
+/// ``(kube_context, kube_namespace, service, local_port, remote_port)``
+/// or ``None`` if the context lacks the required ``kube_context`` /
+/// ``kube_namespace`` fields.  ``service`` defaults to ``noetl`` and
+/// ``remote_port`` defaults to 8082 when unset.  ``local_port`` is
+/// derived from the context's ``server_url`` (we forward to whatever
+/// port the operator already configured the CLI to call).
+fn port_forward_target(ctx: &Context) -> Option<(String, String, String, u16, u16)> {
+    let kube_context = ctx.kube_context.clone()?;
+    let kube_namespace = ctx.kube_namespace.clone()?;
+    let service = ctx
+        .kube_service
+        .clone()
+        .unwrap_or_else(|| "noetl".to_string());
+    let remote_port = ctx.kube_remote_port.unwrap_or(8082);
+    let local_port = parse_local_port_from_server_url(&ctx.server_url)?;
+    Some((kube_context, kube_namespace, service, local_port, remote_port))
+}
+
+/// Extract the localhost port from a server URL like
+/// ``http://127.0.0.1:18082`` or ``http://localhost:8082``.  Returns
+/// ``None`` for non-localhost URLs — those don't make sense as
+/// port-forward targets.
+fn parse_local_port_from_server_url(url: &str) -> Option<u16> {
+    let parsed = Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    if !matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return None;
+    }
+    parsed.port()
+}
+
+fn handle_port_forward(
+    config: &Config,
+    name: &str,
+    detach: bool,
+    stop: bool,
+    status: bool,
+) -> Result<()> {
+    let ctx = match config.contexts.get(name) {
+        Some(c) => c,
+        None => {
+            eprintln!("Context '{}' not found.", name);
+            std::process::exit(1);
+        }
+    };
+
+    let pid_path = port_forward_pid_path(name)?;
+
+    if status {
+        match read_pid_file(&pid_path)? {
+            Some(pid) if pid_is_running(pid) => {
+                println!("Port-forward for context '{}' running, pid {}.", name, pid);
+            }
+            Some(pid) => {
+                println!(
+                    "Port-forward for context '{}' has stale pid file (pid {} not running).",
+                    name, pid
+                );
+                println!("  PID file: {}", pid_path.display());
+                println!("  Remove with: noetl context port-forward {} --stop", name);
+            }
+            None => {
+                println!("No detached port-forward registered for context '{}'.", name);
+            }
+        }
+        return Ok(());
+    }
+
+    if stop {
+        match read_pid_file(&pid_path)? {
+            Some(pid) => {
+                if pid_is_running(pid) {
+                    kill_pid_with_grace(pid);
+                    println!("Stopped port-forward for context '{}' (pid {}).", name, pid);
+                } else {
+                    println!(
+                        "Port-forward for context '{}' was not running (pid {} dead).",
+                        name, pid
+                    );
+                }
+                let _ = std::fs::remove_file(&pid_path);
+            }
+            None => {
+                println!("No detached port-forward registered for context '{}'.", name);
+            }
+        }
+        return Ok(());
+    }
+
+    // start (foreground or detached)
+    let (kube_ctx, kube_ns, service, local_port, remote_port) = match port_forward_target(ctx) {
+        Some(t) => t,
+        None => {
+            eprintln!(
+                "Context '{}' is missing port-forward configuration.  Set the kube fields first:",
+                name
+            );
+            eprintln!();
+            eprintln!(
+                "  noetl context update {} \\\\\n      --kube-context=<gke-or-kind-context> \\\\\n      --kube-namespace=<namespace> \\\\\n      [--kube-service=<service-name>] \\\\\n      [--kube-remote-port=<in-cluster-port>]",
+                name
+            );
+            eprintln!();
+            eprintln!(
+                "The local port is derived from the context's ``server_url`` (must be a"
+            );
+            eprintln!(
+                "loopback URL like http://127.0.0.1:18082 or http://localhost:8082)."
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // Refuse to start a duplicate detached forward.
+    if detach {
+        if let Some(existing) = read_pid_file(&pid_path)? {
+            if pid_is_running(existing) {
+                eprintln!(
+                    "A detached port-forward for context '{}' is already running (pid {}).",
+                    name, existing
+                );
+                eprintln!("  Stop it first:  noetl context port-forward {} --stop", name);
+                std::process::exit(1);
+            }
+            // Stale pid file — clean it up and continue.
+            let _ = std::fs::remove_file(&pid_path);
+        }
+    }
+
+    let local_port_str = local_port.to_string();
+    let port_arg = format!("{}:{}", local_port, remote_port);
+    let svc_arg = format!("svc/{}", service);
+    let kubectl_args = vec![
+        "--context".to_string(),
+        kube_ctx.clone(),
+        "-n".to_string(),
+        kube_ns.clone(),
+        "port-forward".to_string(),
+        svc_arg.clone(),
+        port_arg.clone(),
+    ];
+
+    if !detach {
+        println!(
+            "Starting kubectl port-forward (foreground) for context '{}':",
+            name
+        );
+        println!(
+            "  kubectl --context {} -n {} port-forward {} {}",
+            kube_ctx, kube_ns, svc_arg, port_arg
+        );
+        println!("  Local port: {}", local_port_str);
+        println!("  Press Ctrl-C to stop.");
+        let status = std::process::Command::new("kubectl")
+            .args(&kubectl_args)
+            .status()
+            .context("Failed to spawn kubectl.  Is it installed and on PATH?")?;
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        return Ok(());
+    }
+
+    // Detached path — fork via std::process::Command with stdio detached.
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("Failed to create port-forward PID directory: {}", parent.display())
+        })?;
+    }
+    let child = std::process::Command::new("kubectl")
+        .args(&kubectl_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("Failed to spawn kubectl port-forward as daemon")?;
+    let pid = child.id();
+    std::fs::write(&pid_path, pid.to_string())
+        .with_context(|| format!("Failed to write PID file: {}", pid_path.display()))?;
+
+    // Quick sanity check — give kubectl ~250ms to fail fast (e.g. bind
+    // error from a port already in use).  If it died, surface that.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    if !pid_is_running(pid) {
+        let _ = std::fs::remove_file(&pid_path);
+        eprintln!(
+            "kubectl port-forward exited immediately (pid {} no longer running).",
+            pid
+        );
+        eprintln!(
+            "  Common causes: local port {} already in use, kube_context not in kubeconfig, namespace/service not found.",
+            local_port_str
+        );
+        eprintln!(
+            "  Try running in foreground for full error output: noetl context port-forward {}",
+            name
+        );
+        std::process::exit(1);
+    }
+
+    println!(
+        "Detached kubectl port-forward for context '{}' (pid {}).",
+        name, pid
+    );
+    println!("  Local:  http://127.0.0.1:{}", local_port_str);
+    println!("  Remote: {}/{} port {}", kube_ns, service, remote_port);
+    println!("  PID:    {}", pid_path.display());
+    println!("  Stop:   noetl context port-forward {} --stop", name);
+    Ok(())
+}
+
+fn read_pid_file(path: &PathBuf) -> Result<Option<u32>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read PID file: {}", path.display()))?;
+    let pid: u32 = content
+        .trim()
+        .parse()
+        .with_context(|| format!("PID file is corrupt: {}", path.display()))?;
+    Ok(Some(pid))
+}
+
+/// POSIX ``kill -0`` style liveness probe via the ``nix`` crate
+/// (already a CLI dependency).  On non-Unix platforms this is a
+/// best-effort: we can't reliably detect dead processes, so we
+/// return ``true`` and let the caller's spawn-or-stop logic
+/// recover from the resulting error.
+#[cfg(unix)]
+fn pid_is_running(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    kill(Pid::from_raw(pid as i32), None).is_ok()
+}
+
+#[cfg(not(unix))]
+fn pid_is_running(_pid: u32) -> bool {
+    // Best-effort fallback for non-Unix platforms.  The detached
+    // ``noetl context port-forward`` path is documented as
+    // Unix-only in the README; this branch keeps the code
+    // compilable on Windows for testing the rest of the CLI.
+    true
+}
+
+/// Send SIGTERM and, after a short grace, SIGKILL.  POSIX-only —
+/// the daemon path requires Unix per the same caveat as
+/// ``pid_is_running``.
+#[cfg(unix)]
+fn kill_pid_with_grace(pid: u32) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    let target = Pid::from_raw(pid as i32);
+    let _ = kill(target, Signal::SIGTERM);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    if pid_is_running(pid) {
+        let _ = kill(target, Signal::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_pid_with_grace(_pid: u32) {
+    // No-op on non-Unix — see ``pid_is_running`` for the rationale.
 }
 
 fn extract_token_from_callback_url(url: &str) -> Option<String> {
@@ -6819,5 +7199,76 @@ mod tests {
         // scripts can branch on it (``[ $? -eq 77 ] && noetl auth
         // login``).  Don't change it without a deliberate plan.
         assert_eq!(GATEWAY_AUTH_EXPIRED_EXIT_CODE, 77);
+    }
+
+    #[test]
+    fn local_port_parses_from_loopback_server_urls() {
+        // Standard kubectl-port-forward target shapes.  IPv4 only —
+        // kubectl always binds to the IPv4 loopback even on dual-stack
+        // hosts, so the IPv6 case isn't relevant in practice.
+        assert_eq!(parse_local_port_from_server_url("http://127.0.0.1:18082"), Some(18082));
+        assert_eq!(parse_local_port_from_server_url("http://localhost:8082"), Some(8082));
+    }
+
+    #[test]
+    fn local_port_rejects_non_loopback_urls() {
+        // Non-loopback URLs don't make sense as port-forward targets —
+        // the kubectl tunnel always lands on localhost.
+        assert_eq!(parse_local_port_from_server_url("https://gateway.mestumre.dev"), None);
+        assert_eq!(parse_local_port_from_server_url("http://example.com:8082"), None);
+        assert_eq!(parse_local_port_from_server_url("http://10.0.0.5:8082"), None);
+    }
+
+    #[test]
+    fn local_port_returns_none_for_missing_port() {
+        // URLs without an explicit port are also invalid — kubectl
+        // needs a concrete port to bind locally.
+        assert_eq!(parse_local_port_from_server_url("http://localhost"), None);
+        assert_eq!(parse_local_port_from_server_url("not-a-url"), None);
+    }
+
+    #[test]
+    fn port_forward_target_requires_kube_fields() {
+        // Without ``kube_context`` and ``kube_namespace``, the helper
+        // returns None so the caller can print the configuration hint.
+        let mut ctx = Context::new("http://127.0.0.1:18082".to_string());
+        assert!(port_forward_target(&ctx).is_none());
+
+        ctx.kube_context = Some("gke_my-project_us-central1_my-cluster".to_string());
+        assert!(port_forward_target(&ctx).is_none(), "namespace still missing");
+
+        ctx.kube_namespace = Some("noetl".to_string());
+        let target = port_forward_target(&ctx).expect("all required fields set");
+        assert_eq!(target.0, "gke_my-project_us-central1_my-cluster");
+        assert_eq!(target.1, "noetl");
+        // Defaults applied for optional fields.
+        assert_eq!(target.2, "noetl"); // service
+        assert_eq!(target.3, 18082); // local port from server_url
+        assert_eq!(target.4, 8082); // remote port default
+    }
+
+    #[test]
+    fn port_forward_target_honours_explicit_service_and_remote_port() {
+        let mut ctx = Context::new("http://localhost:30090".to_string());
+        ctx.kube_context = Some("kind-noetl".to_string());
+        ctx.kube_namespace = Some("gateway".to_string());
+        ctx.kube_service = Some("noetl-gateway".to_string());
+        ctx.kube_remote_port = Some(8090);
+        let (kctx, ns, svc, local, remote) = port_forward_target(&ctx).unwrap();
+        assert_eq!(kctx, "kind-noetl");
+        assert_eq!(ns, "gateway");
+        assert_eq!(svc, "noetl-gateway");
+        assert_eq!(local, 30090);
+        assert_eq!(remote, 8090);
+    }
+
+    #[test]
+    fn port_forward_pid_path_is_under_dot_noetl() {
+        // The PID file path is part of the operational surface — `noetl
+        // context port-forward --stop` reads it.  Pin the layout so a
+        // refactor doesn't silently move it and leave stale daemons.
+        let path = port_forward_pid_path("gke-pf").expect("home dir resolves");
+        let p = path.to_string_lossy();
+        assert!(p.ends_with(".noetl/port-forwards/gke-pf.pid"), "got {}", p);
     }
 }
