@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.17.0](https://github.com/noetl/cli/compare/v2.16.0...v2.17.0) (2026-05-28)
+
+### Features
+
+* **cli:** port-forward port-conflict probe + global --context flag ([afe03e9](https://github.com/noetl/cli/commit/afe03e9d86e38743235a5a38a8e035a1ea8675c9))
+
 ## [2.16.0](https://github.com/noetl/cli/compare/v2.15.0...v2.16.0) (2026-05-28)
 
 ### Features
