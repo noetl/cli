@@ -28,6 +28,26 @@ pub struct Context {
     /// Auth0 client_secret for password grant (stored locally, used by 'noetl auth login --password').
     #[serde(default)]
     pub gateway_auth0_client_secret: Option<String>,
+    /// Kubernetes context name to use for ``noetl context port-forward``.
+    /// Pairs with ``kube_namespace`` + ``kube_service`` + ``kube_remote_port``
+    /// to let the CLI spawn + manage a ``kubectl port-forward`` daemon
+    /// against the cluster that backs this NoETL context.  When unset,
+    /// ``noetl context port-forward`` refuses with a hint to either run
+    /// the kubectl command manually or to ``noetl context update`` the
+    /// kube fields.
+    #[serde(default)]
+    pub kube_context: Option<String>,
+    /// Kubernetes namespace for ``noetl context port-forward``.
+    #[serde(default)]
+    pub kube_namespace: Option<String>,
+    /// Kubernetes service name for ``noetl context port-forward``.
+    /// Defaults to ``noetl`` when applied by the port-forward handler.
+    #[serde(default)]
+    pub kube_service: Option<String>,
+    /// In-cluster port for the ``kubectl port-forward`` target.
+    /// Defaults to 8082 when applied by the port-forward handler.
+    #[serde(default)]
+    pub kube_remote_port: Option<u16>,
 }
 
 fn default_runtime() -> String {
@@ -45,6 +65,10 @@ impl Context {
             gateway_auth0_redirect_uri: None,
             gateway_auth0_audience: None,
             gateway_auth0_client_secret: None,
+            kube_context: None,
+            kube_namespace: None,
+            kube_service: None,
+            kube_remote_port: None,
         }
     }
 }
