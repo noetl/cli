@@ -3479,20 +3479,73 @@ async fn write_callback_http_response(
 
 /// Extract the Auth0 tenant slug from an Auth0 domain like
 /// ``mestumre-development.us.auth0.com`` ⇒ ``mestumre-development``.
-/// Used to construct the dashboard management URL the user clicks
-/// when the PKCE callback URL isn't in the application's allowed
-/// list.  Returns ``None`` for custom domains (CNAMEd) where the
-/// tenant slug can't be derived from the domain alone.
+/// Used (with the optional region label) to construct the dashboard
+/// management URL the user clicks when the PKCE callback URL isn't
+/// in the application's allowed list.  Returns ``None`` for custom
+/// domains (CNAMEd) where the tenant slug can't be derived from the
+/// domain alone.
 fn extract_auth0_tenant_from_domain(domain: &str) -> Option<String> {
+    extract_auth0_tenant_and_region(domain).map(|(tenant, _)| tenant)
+}
+
+/// Extract both the tenant slug and the optional region label from
+/// an Auth0 domain.  Standard Auth0 domain shapes:
+///
+/// - ``<tenant>.auth0.com``               ⇒ ``(tenant, None)``
+/// - ``<tenant>.<region>.auth0.com``      ⇒ ``(tenant, Some(region))``
+///   where ``region`` is one of ``us`` / ``eu`` / ``au`` / ``jp``.
+///
+/// Auth0's management dashboard URL embeds the region for regional
+/// tenants, so callers building dashboard URLs need both pieces.
+/// See [``build_auth0_dashboard_url``].
+fn extract_auth0_tenant_and_region(domain: &str) -> Option<(String, Option<String>)> {
     let trimmed = domain.trim().trim_end_matches('/').to_lowercase();
-    // Standard Auth0 domain shapes:
-    //   <tenant>.auth0.com
-    //   <tenant>.<region>.auth0.com   (eu, au, us, jp regions)
-    // We accept both and pull the first label.
     if !trimmed.ends_with(".auth0.com") {
         return None;
     }
-    trimmed.split('.').next().map(|s| s.to_string())
+    let labels: Vec<&str> = trimmed.split('.').collect();
+    // Layout is at least [tenant, "auth0", "com"]; with a region it's
+    // [tenant, region, "auth0", "com"].  Anything else (e.g. extra
+    // sub-domains we don't recognise) returns None — better to fall
+    // back to the ``<tenant>`` placeholder than to construct a wrong
+    // URL.
+    match labels.as_slice() {
+        [tenant, "auth0", "com"] => Some(((*tenant).to_string(), None)),
+        [tenant, region, "auth0", "com"]
+            if matches!(*region, "us" | "eu" | "au" | "jp") =>
+        {
+            Some(((*tenant).to_string(), Some((*region).to_string())))
+        }
+        _ => None,
+    }
+}
+
+/// Build the Auth0 management dashboard URL for a given application
+/// in a tenant.  Auth0's dashboard URL format is:
+///
+/// - Default region (US, no region label in domain):
+///   ``https://manage.auth0.com/dashboard/<tenant>/applications/<client_id>/settings``
+/// - Regional tenants (``us`` / ``eu`` / ``au`` / ``jp`` label in
+///   domain):
+///   ``https://manage.auth0.com/dashboard/<region>/<tenant>/applications/<client_id>/settings``
+///
+/// Returns ``None`` when the domain isn't a recognised Auth0 shape
+/// (e.g. CNAMEd custom domains) — callers should fall back to a
+/// ``<tenant>`` placeholder in their hint output.
+fn build_auth0_dashboard_url(domain: &str, client_id: &str) -> Option<String> {
+    let (tenant, region) = extract_auth0_tenant_and_region(domain)?;
+    let client_id_trimmed = client_id.trim();
+    let url = match region {
+        Some(region) => format!(
+            "https://manage.auth0.com/dashboard/{}/{}/applications/{}/settings",
+            region, tenant, client_id_trimmed
+        ),
+        None => format!(
+            "https://manage.auth0.com/dashboard/{}/applications/{}/settings",
+            tenant, client_id_trimmed
+        ),
+    };
+    Some(url)
 }
 
 /// Wrapper around ``wait_for_pkce_callback`` that turns the bare
@@ -3520,8 +3573,13 @@ async fn wait_for_pkce_callback_with_hint(
             // ``anyhow`` chain root for log surfaces that want it,
             // but the human-facing hint is prepended to the
             // displayed bail message.
-            let tenant = extract_auth0_tenant_from_domain(domain)
-                .unwrap_or_else(|| "<tenant>".to_string());
+            let dashboard_url = build_auth0_dashboard_url(domain, client_id)
+                .unwrap_or_else(|| {
+                    format!(
+                        "https://manage.auth0.com/dashboard/<tenant>/applications/{}/settings",
+                        client_id.trim()
+                    )
+                });
             eprintln!();
             eprintln!(
                 "PKCE callback did not arrive in time.  The most common cause is that"
@@ -3536,10 +3594,7 @@ async fn wait_for_pkce_callback_with_hint(
             eprintln!("Open the Auth0 application settings and add the URI above to");
             eprintln!("\"Allowed Callback URLs\":");
             eprintln!();
-            eprintln!(
-                "  https://manage.auth0.com/dashboard/{}/applications/{}/settings",
-                tenant, client_id
-            );
+            eprintln!("  {}", dashboard_url);
             eprintln!();
             eprintln!(
                 "Then retry the login.  If the URI was already allowed, the timeout"
@@ -3728,9 +3783,11 @@ async fn auth0_pkce_authorize(
         println!("        will hang until timeout.  Manage Allowed");
         println!("        Callback URLs at:");
         println!(
-            "        https://manage.auth0.com/dashboard/{}/applications/{}/settings",
-            extract_auth0_tenant_from_domain(domain).unwrap_or("<tenant>".to_string()),
-            client_id.trim()
+            "        {}",
+            build_auth0_dashboard_url(domain, client_id).unwrap_or_else(|| format!(
+                "https://manage.auth0.com/dashboard/<tenant>/applications/{}/settings",
+                client_id.trim()
+            ))
         );
         println!("Open this URL to authenticate:");
         println!("  {}", authorize_url);
@@ -7522,6 +7579,113 @@ mod tests {
         assert_eq!(
             extract_auth0_tenant_from_domain("acme.auth0.com/"),
             Some("acme".to_string())
+        );
+    }
+
+    #[test]
+    fn auth0_tenant_and_region_extracts_both_pieces() {
+        assert_eq!(
+            extract_auth0_tenant_and_region("acme.auth0.com"),
+            Some(("acme".to_string(), None))
+        );
+        assert_eq!(
+            extract_auth0_tenant_and_region("mestumre-development.us.auth0.com"),
+            Some(("mestumre-development".to_string(), Some("us".to_string())))
+        );
+        assert_eq!(
+            extract_auth0_tenant_and_region("acme.eu.auth0.com"),
+            Some(("acme".to_string(), Some("eu".to_string())))
+        );
+        assert_eq!(
+            extract_auth0_tenant_and_region("acme.au.auth0.com"),
+            Some(("acme".to_string(), Some("au".to_string())))
+        );
+        assert_eq!(
+            extract_auth0_tenant_and_region("acme.jp.auth0.com"),
+            Some(("acme".to_string(), Some("jp".to_string())))
+        );
+    }
+
+    #[test]
+    fn auth0_tenant_and_region_rejects_unknown_region_label() {
+        // Defensive: an unrecognised middle label is more likely a
+        // misconfigured domain than a new Auth0 region we just
+        // haven't heard of.  Returning None forces the dashboard-URL
+        // builder to fall back to the ``<tenant>`` placeholder
+        // rather than constructing a URL Auth0 won't recognise.
+        assert_eq!(
+            extract_auth0_tenant_and_region("acme.xx.auth0.com"),
+            None
+        );
+        assert_eq!(
+            extract_auth0_tenant_and_region("a.b.c.auth0.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn auth0_tenant_and_region_handles_non_auth0_domains() {
+        assert_eq!(extract_auth0_tenant_and_region("login.example.com"), None);
+        assert_eq!(extract_auth0_tenant_and_region(""), None);
+    }
+
+    #[test]
+    fn build_auth0_dashboard_url_default_region() {
+        // ``<tenant>.auth0.com`` — no region label in domain ⇒ no
+        // region in dashboard URL.
+        assert_eq!(
+            build_auth0_dashboard_url("acme.auth0.com", "Abc123"),
+            Some(
+                "https://manage.auth0.com/dashboard/acme/applications/Abc123/settings"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn build_auth0_dashboard_url_regional_tenant() {
+        // Regression for noetl/ai-meta#18 — the previously printed
+        // URL was ``dashboard/mestumre-development/applications/...``
+        // (missing the ``us`` region segment) and 404'd in the
+        // browser.  Auth0's actual format is
+        // ``dashboard/<region>/<tenant>/applications/...``.
+        assert_eq!(
+            build_auth0_dashboard_url(
+                "mestumre-development.us.auth0.com",
+                "Jqop7YoaiZalLHdBRo5ScNQ1RJhbhbDN"
+            ),
+            Some(
+                "https://manage.auth0.com/dashboard/us/mestumre-development/applications/Jqop7YoaiZalLHdBRo5ScNQ1RJhbhbDN/settings"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            build_auth0_dashboard_url("acme.eu.auth0.com", "EuClientId"),
+            Some(
+                "https://manage.auth0.com/dashboard/eu/acme/applications/EuClientId/settings"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn build_auth0_dashboard_url_returns_none_for_custom_domain() {
+        // CNAMEd custom domains can't be parsed for tenant/region.
+        // Caller falls back to a ``<tenant>`` placeholder URL.
+        assert_eq!(
+            build_auth0_dashboard_url("login.example.com", "anything"),
+            None
+        );
+    }
+
+    #[test]
+    fn build_auth0_dashboard_url_trims_whitespace_in_client_id() {
+        assert_eq!(
+            build_auth0_dashboard_url("acme.auth0.com", "  Abc123  "),
+            Some(
+                "https://manage.auth0.com/dashboard/acme/applications/Abc123/settings"
+                    .to_string()
+            )
         );
     }
 
