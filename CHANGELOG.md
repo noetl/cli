@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.17.1](https://github.com/noetl/cli/compare/v2.17.0...v2.17.1) (2026-05-29)
+
+### Bug Fixes
+
+* **auth:** include region segment in Auth0 dashboard URL for regional tenants ([7330815](https://github.com/noetl/cli/commit/733081583371622817917dc4397b85a44b33f2bc)), closes [noetl/ai-meta#18](https://github.com/noetl/ai-meta/issues/18) [noetl/ai-meta#18](https://github.com/noetl/ai-meta/issues/18)
+
 ## [2.17.0](https://github.com/noetl/cli/compare/v2.16.0...v2.17.0) (2026-05-28)
 
 ### Features
