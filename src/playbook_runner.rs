@@ -953,6 +953,19 @@ impl PlaybookRunner {
                 Ok(None)
             }
             Tool::DuckDb { db, query, params } => {
+                // R-1.1 PR-2c-6: dispatch through the noetl-tools
+                // bridge instead of CLI's inline execute_duckdb_query.
+                //
+                // The CLI keeps owning:
+                //  - playbook-relative path resolution
+                //    (`resolve_duckdb_path`), and
+                //  - the parent-directory `mkdir -p` step that the
+                //    bridge does NOT replicate (noetl-tools' DuckdbTool
+                //    just opens the path as-given).
+                //
+                // The bridge owns the query execution + result
+                // reshape so the CLI's SELECT/non-SELECT envelope
+                // shape is preserved.
                 let rendered_db = self.render_template(db, context)?;
                 let db_path = self.resolve_duckdb_path(&rendered_db)?;
 
@@ -960,18 +973,50 @@ impl PlaybookRunner {
                     eprintln!("   DuckDB: {}", db_path.display());
                 }
 
-                if let Some(query_str) = query {
-                    let rendered_query = self.render_template(query_str, context)?;
-                    let rendered_params: Vec<String> = params
-                        .iter()
-                        .map(|p| self.render_template(p, context))
-                        .collect::<Result<Vec<_>>>()?;
+                let query_str = match query {
+                    Some(q) => q,
+                    None => return Ok(None),
+                };
+                let rendered_query = self.render_template(query_str, context)?;
+                let rendered_params: Vec<String> = params
+                    .iter()
+                    .map(|p| self.render_template(p, context))
+                    .collect::<Result<Vec<_>>>()?;
 
-                    let result = self.execute_duckdb_query(&db_path, &rendered_query, &rendered_params)?;
-                    Ok(Some(result))
-                } else {
-                    Ok(None)
+                // Ensure parent directory exists — matches the CLI's
+                // pre-PR-2c-6 behaviour where `execute_duckdb_query`
+                // ran `fs::create_dir_all(parent)` before opening
+                // the connection.
+                if let Some(parent) = db_path.parent() {
+                    fs::create_dir_all(parent)?;
                 }
+
+                let db_path_str = db_path
+                    .to_str()
+                    .context("DuckDB path is not valid UTF-8")?
+                    .to_string();
+                let rendered_tool = Tool::DuckDb {
+                    db: db_path_str,
+                    query: Some(rendered_query),
+                    params: rendered_params,
+                };
+                let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
+                    execution_id: 0,
+                    step: "<cli-local>",
+                    variables: &context.variables,
+                    server_url: String::new(),
+                    worker_id: None,
+                    command_id: None,
+                };
+                let outcome = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                        noetl_executor::tools_bridge::dispatch_via_registry(
+                            &rendered_tool,
+                            &bridge_ctx,
+                        ),
+                    )
+                })?;
+                Ok(outcome.result)
             }
             Tool::Auth {
                 provider,
@@ -1139,62 +1184,14 @@ impl PlaybookRunner {
     // `noetl_tools::auth::GcpAuth` (gcp_auth crate) respectively.
     // See the Tool::Http arm of `execute_tool` above for the wiring.
 
-    /// Execute a DuckDB query and return results as JSON
-    fn execute_duckdb_query(&self, db_path: &PathBuf, query: &str, _params: &[String]) -> Result<String> {
-        // Ensure parent directory exists
-        if let Some(parent) = db_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let conn = Connection::open(db_path).context("Failed to open DuckDB database")?;
-
-        if self.verbose {
-            eprintln!("   Query: {}", query);
-        }
-
-        // Check if it's a SELECT query or a modification query
-        let query_upper = query.trim().to_uppercase();
-        if query_upper.starts_with("SELECT") || query_upper.starts_with("WITH") {
-            let mut stmt = conn.prepare(query).context("Failed to prepare query")?;
-            let column_count = stmt.column_count();
-            let column_names: Vec<String> = (0..column_count)
-                .map(|i| stmt.column_name(i).map_or("?".to_string(), |v| v.to_string()))
-                .collect();
-
-            let rows = stmt.query_map(params![], |row| {
-                let mut row_map = serde_json::Map::new();
-                for (i, col_name) in column_names.iter().enumerate() {
-                    let value: duckdb::types::Value = row.get(i)?;
-                    let json_value = match value {
-                        duckdb::types::Value::Null => serde_json::Value::Null,
-                        duckdb::types::Value::Boolean(b) => serde_json::Value::Bool(b),
-                        duckdb::types::Value::TinyInt(n) => serde_json::Value::Number(n.into()),
-                        duckdb::types::Value::SmallInt(n) => serde_json::Value::Number(n.into()),
-                        duckdb::types::Value::Int(n) => serde_json::Value::Number(n.into()),
-                        duckdb::types::Value::BigInt(n) => serde_json::Value::Number(n.into()),
-                        duckdb::types::Value::Float(f) => serde_json::Number::from_f64(f as f64)
-                            .map(serde_json::Value::Number)
-                            .unwrap_or(serde_json::Value::Null),
-                        duckdb::types::Value::Double(f) => serde_json::Number::from_f64(f)
-                            .map(serde_json::Value::Number)
-                            .unwrap_or(serde_json::Value::Null),
-                        duckdb::types::Value::Text(s) => serde_json::Value::String(s),
-                        _ => serde_json::Value::String(format!("{:?}", value)),
-                    };
-                    row_map.insert(col_name.clone(), json_value);
-                }
-                Ok(serde_json::Value::Object(row_map))
-            })?;
-
-            let results: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
-            let json = serde_json::to_string_pretty(&results)?;
-            Ok(json)
-        } else {
-            // Execute non-SELECT query (CREATE, INSERT, UPDATE, DELETE)
-            conn.execute(query, params![]).context("Failed to execute query")?;
-            Ok(r#"{"status": "ok"}"#.to_string())
-        }
-    }
+    // R-1.1 PR-2c-6: `execute_duckdb_query` was replaced with a
+    // call into `noetl_executor::tools_bridge::dispatch_via_registry`
+    // which routes through `noetl_tools::tools::DuckdbTool`.  The
+    // bridge's `reshape_duckdb_result` preserves the CLI's
+    // SELECT-rows-array / `{"status": "ok"}` envelope shape.  Path
+    // resolution + `mkdir -p` stay at the CLI call site because the
+    // bridge has no knowledge of the playbook directory.  See the
+    // Tool::DuckDb arm of `execute_tool` above for the wiring.
 
     /// Resolve DuckDB path relative to playbook or as absolute
     fn resolve_duckdb_path(&self, db_path: &str) -> Result<PathBuf> {

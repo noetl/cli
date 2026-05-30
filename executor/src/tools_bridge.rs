@@ -46,7 +46,7 @@ use noetl_tools::auth::GcpAuth;
 use noetl_tools::context::ExecutionContext as ToolsExecutionContext;
 use noetl_tools::registry::{Tool as ToolsRegistryTool, ToolConfig};
 use noetl_tools::result::{ToolResult, ToolStatus};
-use noetl_tools::tools::{HttpTool, RhaiTool, ShellTool};
+use noetl_tools::tools::{DuckdbTool, HttpTool, RhaiTool, ShellTool};
 
 use crate::playbook::{AuthConfig as CliAuthConfig, CmdsList, Tool};
 
@@ -276,11 +276,30 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             }),
         ),
         Tool::DuckDb { db, query, params } => (
+            // noetl-tools' DuckdbConfig schema uses `db_path` (not
+            // `db`), `query` is required (so we substitute an empty
+            // string when the CLI doesn't carry one — the dispatch
+            // arm short-circuits in that case), and params are
+            // `Vec<serde_json::Value>` rather than `Vec<String>`.
+            // Conversion is faithful: a CLI string param becomes a
+            // JSON string value bound at the `?` placeholder by
+            // noetl-tools' DuckdbTool.
+            //
+            // Compatibility note: the CLI's pre-PR-2c-6
+            // `execute_duckdb_query` accepted but **ignored** the
+            // `params` field (signature was `_params: &[String]`).
+            // The bridge now binds them, which is a feature gain
+            // documented in the PR body and on the executor-crate-
+            // architecture wiki page.
             "duckdb",
             serde_json::json!({
-                "db": db,
-                "query": query,
-                "params": params,
+                "db_path": db,
+                "query": query.clone().unwrap_or_default(),
+                "params": params
+                    .iter()
+                    .map(|p| serde_json::Value::String(p.clone()))
+                    .collect::<Vec<_>>(),
+                "as_objects": true,
             }),
         ),
         Tool::Rhai { code, args } => (
@@ -455,6 +474,90 @@ fn reshape_http_result(result: ToolResult) -> Result<BridgeOutcome> {
     // No data — fall back to the generic from_tools_result path so
     // we surface whatever error / stdout the tool emitted.
     from_tools_result(result)
+}
+
+/// Build a [`ToolConfig`] for a DuckDB query.
+///
+/// Used by the `Tool::DuckDb` dispatch arm.  Path resolution
+/// (playbook-relative vs absolute) and `mkdir -p` of the parent
+/// directory are handled at the CLI call site BEFORE the bridge is
+/// invoked, so this helper receives an already-resolved absolute
+/// path string (or `:memory:` for in-memory mode).
+fn duckdb_tool_config(
+    db_path: &str,
+    query: &str,
+    params: &[String],
+) -> ToolConfig {
+    ToolConfig {
+        kind: "duckdb".to_string(),
+        config: serde_json::json!({
+            "db_path": db_path,
+            "query": query,
+            "params": params
+                .iter()
+                .map(|p| serde_json::Value::String(p.clone()))
+                .collect::<Vec<_>>(),
+            // CLI's pre-PR-2c-6 SELECT result shape was an array of
+            // JSON objects keyed by column name; `as_objects: true`
+            // matches that.  `reshape_duckdb_result` then unwraps
+            // the noetl-tools envelope back to the raw array.
+            "as_objects": true,
+        }),
+        timeout: None,
+        retry: None,
+        auth: None,
+    }
+}
+
+/// Reshape noetl-tools' DuckDB result envelope back to the CLI's
+/// pre-PR-2c-6 shape.
+///
+/// noetl-tools' DuckdbTool returns:
+/// - SELECT / WITH: `data: {"columns": [...], "rows": [{...}, ...],
+///   "row_count": N}`
+/// - non-SELECT:    `data: {"affected_rows": N}`
+///
+/// The CLI's `execute_duckdb_query` returned:
+/// - SELECT / WITH: a JSON array of objects (pretty-printed)
+/// - non-SELECT:    the literal string `{"status": "ok"}`
+///
+/// `reshape_duckdb_result` maps the former onto the latter so
+/// playbook steps that read `<step>.result[0].col_name` keep
+/// working.  `affected_rows` from the noetl-tools envelope is
+/// dropped on purpose — the CLI never exposed it.
+fn reshape_duckdb_result(result: ToolResult) -> Result<BridgeOutcome> {
+    let data = match result.data {
+        Some(d) => d,
+        None => return from_tools_result(result),
+    };
+
+    if let Some(rows) = data.get("rows").and_then(|v| v.as_array()) {
+        // SELECT path.  Return the rows array as a pretty-printed
+        // JSON string — matches the CLI's
+        // `serde_json::to_string_pretty(&results)`.
+        let pretty = serde_json::to_string_pretty(rows)?;
+        return Ok(BridgeOutcome { result: Some(pretty) });
+    }
+
+    if data.get("affected_rows").is_some() {
+        // Non-SELECT path.  CLI emitted the literal `{"status":
+        // "ok"}` here; preserve that.
+        return Ok(BridgeOutcome {
+            result: Some(r#"{"status": "ok"}"#.to_string()),
+        });
+    }
+
+    // Unknown shape — fall back to the generic from_tools_result
+    // path so we still surface whatever the tool emitted.
+    from_tools_result(ToolResult {
+        status: result.status,
+        data: Some(data),
+        error: result.error,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        duration_ms: result.duration_ms,
+    })
 }
 
 fn target_to_value(target: &crate::playbook::SinkTarget) -> serde_json::Value {
@@ -658,9 +761,44 @@ pub async fn dispatch_via_registry(
                 .map_err(|e| anyhow::anyhow!("http dispatch failed: {}", e))?;
             reshape_http_result(result)
         }
-        Tool::DuckDb { .. } => {
-            // PR-2c-6 fills this in.
-            Ok(BridgeOutcome::empty())
+        Tool::DuckDb { db, query, params } => {
+            // PR-2c-6: dispatch through noetl_tools::DuckdbTool.
+            //
+            // CLI semantics preserved:
+            // - The CLI's call site already resolved playbook-
+            //   relative paths (`resolve_duckdb_path`) and ran
+            //   `mkdir -p` on the parent directory before invoking
+            //   the bridge, so `db` here is an absolute path
+            //   string ready to hand to DuckDB.
+            // - SELECT / WITH queries return a JSON array of
+            //   objects (pretty-printed).
+            // - Non-SELECT queries return the literal envelope
+            //   `{"status": "ok"}` (CLI never exposed
+            //   noetl-tools' `affected_rows`).
+            // - Empty / missing query short-circuits to an empty
+            //   outcome, matching the CLI arm's
+            //   `if let Some(query_str) = query` guard.
+            //
+            // Feature gain: CLI's pre-PR-2c-6 inline impl took a
+            // `_params: &[String]` and silently ignored it.  The
+            // bridge now binds those params as JSON values at
+            // `?` placeholders.  Playbooks that had a stale
+            // `params:` list under a query without `?` placeholders
+            // continue to work (DuckDB ignores extra params); any
+            // playbook that *intended* the params would now see
+            // them applied — documented in the PR body.
+            let query = match query {
+                Some(q) if !q.trim().is_empty() => q,
+                _ => return Ok(BridgeOutcome::empty()),
+            };
+            let config = duckdb_tool_config(db, query, params);
+            let duckdb_tool = DuckdbTool::new();
+            let ctx = to_tools_context(bridge);
+            let result = duckdb_tool
+                .execute(&config, &ctx)
+                .await
+                .map_err(|e| anyhow::anyhow!("duckdb dispatch failed: {}", e))?;
+            reshape_duckdb_result(result)
         }
         Tool::Playbook { .. } => {
             // PR-2c-7 fills this in.
@@ -896,6 +1034,142 @@ mod tests {
         assert!(err.to_string().contains("unsupported auth provider"));
     }
 
+    // ---- PR-2c-6 — Tool::DuckDb bridge integration -------------------
+
+    #[test]
+    fn duckdb_tool_config_emits_noetl_tools_schema() {
+        let cfg = duckdb_tool_config(
+            ":memory:",
+            "SELECT 1",
+            &["arg1".to_string()],
+        );
+        assert_eq!(cfg.kind, "duckdb");
+        assert_eq!(cfg.config["db_path"], ":memory:");
+        assert_eq!(cfg.config["query"], "SELECT 1");
+        assert_eq!(cfg.config["as_objects"], true);
+        assert_eq!(
+            cfg.config["params"],
+            serde_json::json!([serde_json::Value::String("arg1".into())])
+        );
+    }
+
+    #[test]
+    fn to_tools_config_duckdb_carries_path_and_query() {
+        let tool = Tool::DuckDb {
+            db: "warehouse.db".into(),
+            query: Some("SELECT count(*) FROM orders".into()),
+            params: vec![],
+        };
+        let cfg = to_tools_config(&tool);
+        assert_eq!(cfg.kind, "duckdb");
+        assert_eq!(cfg.config["db_path"], "warehouse.db");
+        assert_eq!(cfg.config["query"], "SELECT count(*) FROM orders");
+        assert_eq!(cfg.config["as_objects"], true);
+    }
+
+    #[test]
+    fn to_tools_config_duckdb_missing_query_becomes_empty_string() {
+        let tool = Tool::DuckDb {
+            db: ":memory:".into(),
+            query: None,
+            params: vec![],
+        };
+        let cfg = to_tools_config(&tool);
+        assert_eq!(cfg.config["query"], "");
+    }
+
+    #[test]
+    fn reshape_duckdb_result_select_returns_rows_array() {
+        let result = ToolResult::success(serde_json::json!({
+            "columns": ["id", "name"],
+            "rows": [
+                {"id": 1, "name": "alice"},
+                {"id": 2, "name": "bob"},
+            ],
+            "row_count": 2
+        }));
+        let outcome = reshape_duckdb_result(result).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        let arr = parsed.as_array().expect("result is an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], 1);
+        assert_eq!(arr[0]["name"], "alice");
+        assert_eq!(arr[1]["name"], "bob");
+    }
+
+    #[test]
+    fn reshape_duckdb_result_select_empty_returns_empty_array() {
+        let result = ToolResult::success(serde_json::json!({
+            "columns": ["id"],
+            "rows": [],
+            "row_count": 0
+        }));
+        let outcome = reshape_duckdb_result(result).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn reshape_duckdb_result_non_select_returns_status_envelope() {
+        let result = ToolResult::success(serde_json::json!({
+            "affected_rows": 3
+        }));
+        let outcome = reshape_duckdb_result(result).unwrap();
+        // CLI returned the literal `{"status": "ok"}` string for
+        // non-SELECT queries; `affected_rows` is intentionally
+        // dropped (CLI never exposed it, so playbooks can't depend
+        // on it).
+        assert_eq!(outcome.result.as_deref(), Some(r#"{"status": "ok"}"#));
+    }
+
+    #[tokio::test]
+    async fn dispatch_duckdb_select_returns_rows_array() {
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::DuckDb {
+            db: ":memory:".into(),
+            query: Some("SELECT 1 AS num, 'hello' AS msg".into()),
+            params: vec![],
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        let arr = parsed.as_array().expect("result is an array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["num"], 1);
+        assert_eq!(arr[0]["msg"], "hello");
+    }
+
+    #[tokio::test]
+    async fn dispatch_duckdb_missing_query_returns_empty_outcome() {
+        // Mirrors the CLI arm's `if let Some(query_str) = query` guard:
+        // a Tool::DuckDb with no query falls through to None.
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::DuckDb {
+            db: ":memory:".into(),
+            query: None,
+            params: vec![],
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        assert!(outcome.result.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_duckdb_empty_query_returns_empty_outcome() {
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::DuckDb {
+            db: ":memory:".into(),
+            query: Some("   ".into()), // whitespace only
+            params: vec![],
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        assert!(outcome.result.is_none());
+    }
+
     #[test]
     fn to_tools_config_rhai_carries_code() {
         let tool = Tool::Rhai {
@@ -955,15 +1229,16 @@ mod tests {
     #[tokio::test]
     async fn dispatch_via_registry_returns_empty_for_unwired_kind() {
         // PR-2c-3 wired `Tool::Rhai`; PR-2c-4 wired `Tool::Shell`;
-        // PR-2c-5 wired `Tool::Http`.  The remaining stub kinds
-        // (DuckDb, Playbook, Auth, Sink) still return empty.  Use
-        // `Tool::DuckDb` here — PR-2c-6 fills it in next.
+        // PR-2c-5 wired `Tool::Http`; PR-2c-6 wired `Tool::DuckDb`.
+        // The remaining stub kinds (Playbook, Auth, Sink) still
+        // return empty.  Use `Tool::Playbook` here — PR-2c-7 fills
+        // it in next.
         let vars = empty_vars();
         let bridge = bridge_ctx(&vars);
-        let tool = Tool::DuckDb {
-            db: ":memory:".into(),
-            query: Some("SELECT 1".into()),
-            params: vec![],
+        let tool = Tool::Playbook {
+            path: "non-existent.yaml".into(),
+            args: HashMap::new(),
+            input: HashMap::new(),
         };
         let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
         assert!(outcome.result.is_none());
