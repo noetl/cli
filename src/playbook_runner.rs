@@ -1021,22 +1021,27 @@ impl PlaybookRunner {
                 scopes,
                 project,
             } => {
+                // R-1.1 PR-2c-5: token resolution moved onto
+                // `resolve_auth_to_bearer` (shared with Tool::Http).
+                // R-1.1 PR-2c-8: the context-update side-effects
+                // (setting `auth.project`, `auth.token`,
+                // `auth.provider`) moved onto `auth_context_updates`
+                // so the CLI and any future caller agree on which
+                // keys to set and in what order.
+                //
+                // `Tool::Auth` intentionally does NOT dispatch
+                // through `dispatch_via_registry` — the bridge's
+                // dispatch arm bails to make misuse loud.  See the
+                // executor-crate-architecture wiki page for the
+                // architectural rationale.
                 if self.verbose {
                     eprintln!("   Auth: provider={}", provider);
                 }
 
-                // Set project in context if provided
-                if let Some(proj) = project {
-                    let rendered_project = self.render_template(proj, context)?;
-                    context.set_variable("auth.project".to_string(), rendered_project);
-                }
-
-                // R-1.1 PR-2c-5: resolve via the same bridge helper
-                // Tool::Http uses, so both paths share the
-                // noetl-tools GcpAuth provider (gcloud shellout →
-                // gcp_auth crate).  PR-2c-8 will move Tool::Auth's
-                // full dispatch through the registry; for now we
-                // unify just the credential resolution step.
+                let rendered_project = match project {
+                    Some(proj) => Some(self.render_template(proj, context)?),
+                    None => None,
+                };
                 let auth_cfg = noetl_executor::playbook::AuthConfig {
                     provider: provider.clone(),
                     scopes: scopes.clone(),
@@ -1047,31 +1052,35 @@ impl PlaybookRunner {
                     )
                 })?;
 
-                // Store token in context for subsequent HTTP calls
-                context.set_variable("auth.token".to_string(), token.clone());
-                context.set_variable("auth.provider".to_string(), provider.clone());
+                for (key, value) in noetl_executor::tools_bridge::auth_context_updates(
+                    provider,
+                    &token,
+                    rendered_project.as_deref(),
+                ) {
+                    context.set_variable(key, value);
+                }
 
                 Ok(Some(token))
             }
             Tool::Sink { target, format } => {
-                // Get the last step result to sink
+                // R-1.1 PR-2c-8: format conversion + CSV emission
+                // moved onto `format_sink_payload` (which delegates
+                // to `json_to_csv` for the CSV path) so the CLI's
+                // pre-PR-2c-8 behaviour is preserved verbatim and
+                // the logic is independently testable.
+                //
+                // Each sink target (File, DuckDb, Gcs) stays inline:
+                // - File: one-line `fs::write`.
+                // - DuckDb: complex `INSERT FROM read_json_auto`
+                //   with a single-object fallback (no noetl-tools
+                //   equivalent; § H.10-style finding).
+                // - Gcs: gsutil shellout (no noetl-tools equivalent
+                //   for cloud-storage targets; follow-up to migrate
+                //   to `object_store` per § H.4 is tracked
+                //   separately).
                 let data = context.step_results.values().last().cloned().unwrap_or_default();
-
-                let formatted_data = match format {
-                    SinkFormat::Json => data.clone(),
-                    SinkFormat::Yaml => {
-                        // Convert JSON to YAML if possible
-                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&data) {
-                            serde_yaml::to_string(&json_val).unwrap_or(data.clone())
-                        } else {
-                            data.clone()
-                        }
-                    }
-                    SinkFormat::Csv => {
-                        // Basic JSON array to CSV conversion
-                        self.json_to_csv(&data)?
-                    }
-                };
+                let formatted_data =
+                    noetl_executor::tools_bridge::format_sink_payload(format, &data)?;
 
                 match target {
                     SinkTarget::File { path } => {
@@ -1222,49 +1231,10 @@ impl PlaybookRunner {
     }
 
     /// Convert JSON array to CSV format
-    fn json_to_csv(&self, json_str: &str) -> Result<String> {
-        let value: serde_json::Value =
-            serde_json::from_str(json_str).unwrap_or(serde_json::Value::String(json_str.to_string()));
-
-        match value {
-            serde_json::Value::Array(arr) if !arr.is_empty() => {
-                // Get headers from first object
-                let headers: Vec<String> = if let Some(serde_json::Value::Object(obj)) = arr.first() {
-                    obj.keys().cloned().collect()
-                } else {
-                    return Ok(json_str.to_string());
-                };
-
-                let mut csv = headers.join(",") + "\n";
-
-                for item in &arr {
-                    if let serde_json::Value::Object(obj) = item {
-                        let row: Vec<String> = headers
-                            .iter()
-                            .map(|h| {
-                                obj.get(h)
-                                    .map(|v| match v {
-                                        serde_json::Value::String(s) => {
-                                            if s.contains(',') || s.contains('"') {
-                                                format!("\"{}\"", s.replace('"', "\"\""))
-                                            } else {
-                                                s.clone()
-                                            }
-                                        }
-                                        _ => v.to_string(),
-                                    })
-                                    .unwrap_or_default()
-                            })
-                            .collect();
-                        csv.push_str(&row.join(","));
-                        csv.push('\n');
-                    }
-                }
-                Ok(csv)
-            }
-            _ => Ok(json_str.to_string()),
-        }
-    }
+    // R-1.1 PR-2c-8: `json_to_csv` moved to
+    // `noetl_executor::tools_bridge::json_to_csv` (callable via
+    // `format_sink_payload` or directly).  The CLI's call site
+    // in the Tool::Sink arm now goes through `format_sink_payload`.
 
     /// Sink data to DuckDB table
     fn sink_to_duckdb(&self, db_path: &PathBuf, table: &str, json_data: &str) -> Result<()> {
