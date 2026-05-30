@@ -16,8 +16,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Identifies one playbook execution end-to-end.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ExecutionId(pub String);
+///
+/// R-1.2 PR-2a: aliased to `i64` to match the Python `noetl.event` /
+/// `noetl.command` table columns (bigint), the CLI's
+/// `BridgeContext.execution_id` (i64), `noetl_tools::context::
+/// ExecutionContext.execution_id` (i64), and the worker's
+/// `CommandNotification.execution_id` (i64).  The `pub struct
+/// ExecutionId(pub String)` newtype in 0.1.x was a placeholder while
+/// nothing crossed the boundary; R-1.2 starts cross-binary work so
+/// the type alignment matters.
+pub type ExecutionId = i64;
 
 /// Trait for resolving keychain credential aliases at step-execution
 /// time.  Mirrors the Python-side `noetl.core.credential_refs`

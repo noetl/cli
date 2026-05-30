@@ -28,7 +28,11 @@ pub struct Command {
     pub command_id: String,
 
     /// Execution this command belongs to.
-    pub execution_id: String,
+    ///
+    /// R-1.2 PR-2a: aligned to `i64` to match the worker's
+    /// `CommandNotification.execution_id` and the Python
+    /// `noetl.command.execution_id` bigint column.
+    pub execution_id: i64,
 
     /// Step name from the playbook (e.g. `"fetch_calendar"`).
     pub step: String,
