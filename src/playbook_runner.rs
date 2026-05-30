@@ -833,30 +833,79 @@ impl PlaybookRunner {
                 body,
                 auth,
             } => {
+                // R-1.1 PR-2c-5: dispatch through the noetl-tools
+                // bridge instead of CLI's inline execute_http_request.
+                // The bridge:
+                //   - resolves CLI's `AuthConfig` to a Bearer token
+                //     via noetl-tools' `GcpAuth` (replaces the
+                //     `gcloud auth print-access-token` shellout);
+                //   - issues the HTTP request via `reqwest` (replaces
+                //     the `curl` subprocess);
+                //   - reshapes noetl-tools' `{status_code, headers,
+                //     body}` envelope to the CLI's pre-PR-2c-5
+                //     `{status, body}` shape so playbook steps can
+                //     keep branching on `<step>.body.status`.
+                //
+                // Templates (url, headers, params, body) are rendered
+                // here against the CLI's HashMap<String, String>
+                // context BEFORE handing the rendered tool to the
+                // bridge, so the bridge dispatches against fully
+                // expanded values.
                 let rendered_url = self.render_template(url, context)?;
 
                 if self.verbose {
                     eprintln!("   HTTP {} {}", method, rendered_url);
                 }
 
-                // Get auth token if auth config is provided
-                let auth_token = if let Some(auth_config) = auth {
-                    Some(self.get_auth_token(&auth_config.provider, &auth_config.scopes, context)?)
+                let mut rendered_headers = HashMap::with_capacity(headers.len());
+                for (k, v) in headers {
+                    rendered_headers.insert(k.clone(), self.render_template(v, context)?);
+                }
+                let mut rendered_params = HashMap::with_capacity(params.len());
+                for (k, v) in params {
+                    rendered_params.insert(k.clone(), self.render_template(v, context)?);
+                }
+                let rendered_body = if let Some(b) = body {
+                    Some(self.render_template(b, context)?)
                 } else {
                     None
                 };
 
-                let result = self.execute_http_request(
-                    method,
-                    &rendered_url,
-                    Some(headers),
-                    Some(params),
-                    body.as_deref(),
-                    auth_token.as_deref(),
-                    context,
-                )?;
-
-                Ok(Some(result))
+                let rendered_tool = Tool::Http {
+                    method: method.clone(),
+                    url: rendered_url,
+                    headers: rendered_headers,
+                    params: rendered_params,
+                    body: rendered_body,
+                    auth: auth.clone(),
+                };
+                let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
+                    execution_id: 0,
+                    step: "<cli-local>",
+                    variables: &context.variables,
+                    server_url: String::new(),
+                    worker_id: None,
+                    command_id: None,
+                };
+                let outcome = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                        noetl_executor::tools_bridge::dispatch_via_registry(
+                            &rendered_tool,
+                            &bridge_ctx,
+                        ),
+                    )
+                })?;
+                if self.verbose {
+                    if let Some(ref r) = outcome.result {
+                        let preview = if r.len() > 200 {
+                            format!("{}... ({} bytes)", &r[..200], r.len())
+                        } else {
+                            r.clone()
+                        };
+                        eprintln!("   Response: {}", preview);
+                    }
+                }
+                Ok(outcome.result)
             }
             Tool::Playbook { path, args, input } => {
                 let rendered_path = self.render_template(path, context)?;
@@ -939,7 +988,21 @@ impl PlaybookRunner {
                     context.set_variable("auth.project".to_string(), rendered_project);
                 }
 
-                let token = self.get_auth_token(provider, scopes, context)?;
+                // R-1.1 PR-2c-5: resolve via the same bridge helper
+                // Tool::Http uses, so both paths share the
+                // noetl-tools GcpAuth provider (gcloud shellout →
+                // gcp_auth crate).  PR-2c-8 will move Tool::Auth's
+                // full dispatch through the registry; for now we
+                // unify just the credential resolution step.
+                let auth_cfg = noetl_executor::playbook::AuthConfig {
+                    provider: provider.clone(),
+                    scopes: scopes.clone(),
+                };
+                let token = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                        noetl_executor::tools_bridge::resolve_auth_to_bearer(&auth_cfg),
+                    )
+                })?;
 
                 // Store token in context for subsequent HTTP calls
                 context.set_variable("auth.token".to_string(), token.clone());
@@ -1068,154 +1131,13 @@ impl PlaybookRunner {
     // rhai_to_json_string} remain available for any future caller
     // that needs them.
 
-    fn execute_http_request(
-        &self,
-        method: &str,
-        url: &str,
-        headers: Option<&HashMap<String, String>>,
-        params: Option<&HashMap<String, String>>,
-        body: Option<&str>,
-        auth_token: Option<&str>,
-        context: &ExecutionContext,
-    ) -> Result<String> {
-        // Build curl command with status code output
-        let mut curl_args = vec![
-            "-s".to_string(),             // Silent mode
-            "-w".to_string(),             // Write format
-            "\n%{http_code}".to_string(), // Append HTTP status code
-        ];
-
-        // Add method
-        curl_args.push("-X".to_string());
-        curl_args.push(method.to_string());
-
-        // Add Authorization header if token provided
-        if let Some(token) = auth_token {
-            curl_args.push("-H".to_string());
-            curl_args.push(format!("Authorization: Bearer {}", token));
-        }
-
-        // Add headers
-        if let Some(hdrs) = headers {
-            for (key, value) in hdrs {
-                let rendered_value = self.render_template(value, context)?;
-                curl_args.push("-H".to_string());
-                curl_args.push(format!("{}: {}", key, rendered_value));
-            }
-        }
-
-        // Add body
-        if let Some(body_str) = body {
-            let rendered_body = self.render_template(body_str, context)?;
-            curl_args.push("-d".to_string());
-            curl_args.push(rendered_body);
-        }
-
-        // Build URL with params
-        let mut final_url = url.to_string();
-        if let Some(prms) = params {
-            let mut query_parts = vec![];
-            for (key, value) in prms {
-                let rendered_value = self.render_template(value, context)?;
-                query_parts.push(format!("{}={}", key, rendered_value));
-            }
-            if !query_parts.is_empty() {
-                final_url = format!("{}?{}", url, query_parts.join("&"));
-            }
-        }
-
-        curl_args.push(final_url);
-
-        if self.verbose {
-            // Redact bearer tokens in output for security
-            let redacted_args: Vec<String> = curl_args
-                .iter()
-                .map(|arg| {
-                    if arg.starts_with("Authorization: Bearer ") {
-                        "Authorization: Bearer [REDACTED]".to_string()
-                    } else {
-                        arg.clone()
-                    }
-                })
-                .collect();
-            eprintln!("   curl {}", redacted_args.join(" "));
-        }
-
-        let output = Command::new("curl")
-            .args(&curl_args)
-            .output()
-            .context("Failed to execute HTTP request (curl not available?)")?;
-
-        if !output.status.success() {
-            anyhow::bail!("HTTP request failed with exit code: {:?}", output.status.code());
-        }
-
-        let full_output = String::from_utf8_lossy(&output.stdout).to_string();
-
-        // Parse the output - body is everything before the last newline, status code is after
-        let (body_part, status_code) = if let Some(pos) = full_output.rfind('\n') {
-            let body = full_output[..pos].to_string();
-            let status = full_output[pos + 1..].trim().to_string();
-            (body, status)
-        } else {
-            (full_output.clone(), "0".to_string())
-        };
-
-        // Wrap response with status for playbook access
-        let response = serde_json::json!({
-            "status": status_code.parse::<i32>().unwrap_or(0),
-            "body": serde_json::from_str::<serde_json::Value>(&body_part).unwrap_or(serde_json::Value::String(body_part.clone()))
-        }).to_string();
-
-        if self.verbose {
-            eprintln!(
-                "   Response: {}",
-                if response.len() > 200 {
-                    format!("{}... ({} bytes)", &response[..200], response.len())
-                } else {
-                    response.clone()
-                }
-            );
-        }
-
-        Ok(response)
-    }
-
-    /// Get authentication token from the specified provider
-    fn get_auth_token(&self, provider: &str, scopes: &[String], _context: &ExecutionContext) -> Result<String> {
-        match provider {
-            "gcp" | "google" | "adc" => {
-                // Use gcloud to get access token
-                let mut args = vec!["auth", "print-access-token"];
-
-                // Add scopes if specified
-                let scopes_str = if !scopes.is_empty() {
-                    scopes.join(",")
-                } else {
-                    String::new()
-                };
-
-                if !scopes_str.is_empty() {
-                    args.push("--scopes");
-                    // Need to keep scopes_str alive
-                }
-
-                let output = Command::new("gcloud")
-                    .args(&args)
-                    .output()
-                    .context("Failed to get GCP access token (gcloud CLI not available?)")?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    anyhow::bail!("Failed to get GCP access token: {}", stderr);
-                }
-
-                let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                Ok(token)
-            }
-            _ => anyhow::bail!("Unsupported auth provider: {}. Supported: gcp, google, adc", provider),
-        }
-    }
+    // R-1.1 PR-2c-5: `execute_http_request` (curl subprocess) and
+    // `get_auth_token` (`gcloud auth print-access-token` shellout)
+    // were replaced with a call into
+    // `noetl_executor::tools_bridge::dispatch_via_registry` which
+    // routes through `noetl_tools::HttpTool` (reqwest) and
+    // `noetl_tools::auth::GcpAuth` (gcp_auth crate) respectively.
+    // See the Tool::Http arm of `execute_tool` above for the wiring.
 
     /// Execute a DuckDB query and return results as JSON
     fn execute_duckdb_query(&self, db_path: &PathBuf, query: &str, _params: &[String]) -> Result<String> {

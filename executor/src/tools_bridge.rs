@@ -42,12 +42,13 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use noetl_tools::auth::GcpAuth;
 use noetl_tools::context::ExecutionContext as ToolsExecutionContext;
 use noetl_tools::registry::{Tool as ToolsRegistryTool, ToolConfig};
 use noetl_tools::result::{ToolResult, ToolStatus};
-use noetl_tools::tools::{RhaiTool, ShellTool};
+use noetl_tools::tools::{HttpTool, RhaiTool, ShellTool};
 
-use crate::playbook::{CmdsList, Tool};
+use crate::playbook::{AuthConfig as CliAuthConfig, CmdsList, Tool};
 
 // ---------------------------------------------------------------------------
 // Bridge outcome — what the dispatch returns back to the caller.
@@ -248,15 +249,22 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             headers,
             params,
             body,
-            auth: _, // CLI's AuthConfig handled at credential-resolver layer; PR-2c-5 decides whether to inline-pass.
+            auth: _, // resolved at dispatch time into a Bearer header; not threaded through ToolConfig.auth (see PR-2c-5)
         } => (
             "http",
+            // noetl-tools' HttpConfig deserializes the method via
+            // `#[serde(rename_all = "UPPERCASE")]`, so we emit the
+            // uppercased CLI string here.  The body is wrapped as a
+            // JSON Value: if the CLI's body parses as JSON we pass the
+            // parsed Value (so reqwest serialises it as JSON with the
+            // right Content-Type); otherwise we pass it as a JSON
+            // string which noetl-tools sends verbatim as the body.
             serde_json::json!({
-                "method": method,
+                "method": method.to_uppercase(),
                 "url": url,
                 "headers": headers,
                 "params": params,
-                "body": body,
+                "body": body.as_deref().map(http_body_value),
             }),
         ),
         Tool::Playbook { path, args, input } => (
@@ -325,6 +333,128 @@ fn shell_command_config(command: &str) -> ToolConfig {
         retry: None,
         auth: None,
     }
+}
+
+/// Convert a CLI HTTP body string into a JSON [`serde_json::Value`]
+/// suitable for noetl-tools' `HttpConfig.body` field.  If the body
+/// parses as JSON, the parsed value is returned (and `reqwest` sends
+/// it with `Content-Type: application/json`).  Otherwise the body
+/// is wrapped as a [`Value::String`] which `reqwest` writes
+/// verbatim as the request body.
+fn http_body_value(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or_else(|_| serde_json::Value::String(body.to_string()))
+}
+
+/// Resolve a CLI [`AuthConfig`] to a Bearer token using noetl-tools'
+/// [`GcpAuth`] provider.
+///
+/// CLI providers `"gcp"`, `"google"`, and `"adc"` all map to GCP
+/// Application Default Credentials.  Any other provider value
+/// returns an error matching the CLI's pre-PR-2c-5 behaviour.
+///
+/// This replaces the CLI's inline `get_auth_token` (which shelled
+/// out to `gcloud auth print-access-token`).  See semantic
+/// divergence row on the executor-crate-architecture wiki page.
+pub async fn resolve_auth_to_bearer(cfg: &CliAuthConfig) -> Result<String> {
+    match cfg.provider.as_str() {
+        "gcp" | "google" | "adc" => {
+            let gcp = GcpAuth::new();
+            let scopes: Vec<&str> = cfg.scopes.iter().map(|s| s.as_str()).collect();
+            let token = if scopes.is_empty() {
+                gcp.get_default_token()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("failed to get GCP access token: {}", e))?
+            } else {
+                gcp.get_token(&scopes)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("failed to get GCP access token: {}", e))?
+            };
+            Ok(token)
+        }
+        other => anyhow::bail!(
+            "unsupported auth provider: {}. Supported: gcp, google, adc",
+            other
+        ),
+    }
+}
+
+/// Build the noetl-tools [`ToolConfig`] for an HTTP request.
+///
+/// Identical to the [`to_tools_config`] `Tool::Http` arm but pulled
+/// out so the dispatch arm can also inject an `Authorization:
+/// Bearer <token>` header when a CLI `AuthConfig` is present
+/// (resolved via [`resolve_auth_to_bearer`]).
+///
+/// CLI's `auth` is intentionally NOT mapped to noetl-tools'
+/// `ToolConfig.auth` field: that field expects an `AuthConfig` with
+/// `credential` / `token` lookup against `ExecutionContext.secrets`,
+/// which CLI local mode does not populate.  Pre-resolving the
+/// token and injecting it as a header keeps the CLI's existing
+/// authority semantics (the CLI process's gcloud / ADC chain) and
+/// avoids reshaping the credential resolver path.
+fn http_tool_config(
+    method: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+    params: &HashMap<String, String>,
+    body: Option<&str>,
+    bearer: Option<&str>,
+) -> ToolConfig {
+    let mut merged_headers = headers.clone();
+    if let Some(token) = bearer {
+        merged_headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", token),
+        );
+    }
+    ToolConfig {
+        kind: "http".to_string(),
+        config: serde_json::json!({
+            "method": method.to_uppercase(),
+            "url": url,
+            "headers": merged_headers,
+            "params": params,
+            "body": body.map(http_body_value),
+        }),
+        timeout: None,
+        retry: None,
+        auth: None,
+    }
+}
+
+/// Reshape noetl-tools' HTTP result envelope back to the CLI's
+/// pre-PR-2c-5 shape.
+///
+/// noetl-tools' HttpTool always packs `data: {"status_code":
+/// u16, "headers": {...}, "body": <json>}` into the ToolResult,
+/// regardless of whether the HTTP response was 2xx (Success) or
+/// 4xx/5xx (Error).  The CLI's `execute_http_request` returned the
+/// envelope `{"status": <int>, "body": <json>}` for ALL HTTP
+/// responses (including 4xx/5xx) so playbook steps could branch on
+/// the status code.  We preserve that contract here: only network-
+/// transport failures bubble up as `anyhow::Error`; HTTP error
+/// statuses come back inside the JSON envelope.
+fn reshape_http_result(result: ToolResult) -> Result<BridgeOutcome> {
+    if let Some(data) = result.data {
+        let status_code = data
+            .get("status_code")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as i32;
+        let body = data
+            .get("body")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let envelope = serde_json::json!({
+            "status": status_code,
+            "body": body,
+        });
+        return Ok(BridgeOutcome {
+            result: Some(envelope.to_string()),
+        });
+    }
+    // No data — fall back to the generic from_tools_result path so
+    // we surface whatever error / stdout the tool emitted.
+    from_tools_result(result)
 }
 
 fn target_to_value(target: &crate::playbook::SinkTarget) -> serde_json::Value {
@@ -480,9 +610,53 @@ pub async fn dispatch_via_registry(
             }
             Ok(last_outcome)
         }
-        Tool::Http { .. } => {
-            // PR-2c-5 fills this in.
-            Ok(BridgeOutcome::empty())
+        Tool::Http {
+            method,
+            url,
+            headers,
+            params,
+            body,
+            auth,
+        } => {
+            // PR-2c-5: dispatch through noetl_tools::HttpTool.
+            //
+            // CLI semantics preserved:
+            // - Auth resolution via GCP ADC (gcp / google / adc).
+            // - Step result is the JSON envelope
+            //     `{"status": <int>, "body": <json-or-string>}`
+            //   regardless of HTTP status code (so playbook steps
+            //   can branch on `<step>.body.status`).
+            //
+            // Semantic divergences (documented on the executor-crate-
+            // architecture wiki page):
+            // - HTTP transport: curl subprocess → reqwest direct.
+            // - GCP token: `gcloud auth print-access-token` shellout
+            //   → `gcp_auth` crate (workload-identity aware on GKE).
+            // - Body bytes: CLI sent the body string verbatim via
+            //   `curl -d`.  noetl-tools serializes the body as JSON
+            //   when the string parses as JSON (adding Content-Type:
+            //   application/json automatically), otherwise sends it
+            //   verbatim.  See `http_body_value`.
+            let bearer = if let Some(auth_cfg) = auth {
+                Some(resolve_auth_to_bearer(auth_cfg).await?)
+            } else {
+                None
+            };
+            let config = http_tool_config(
+                method,
+                url,
+                headers,
+                params,
+                body.as_deref(),
+                bearer.as_deref(),
+            );
+            let http_tool = HttpTool::new();
+            let ctx = to_tools_context(bridge);
+            let result = http_tool
+                .execute(&config, &ctx)
+                .await
+                .map_err(|e| anyhow::anyhow!("http dispatch failed: {}", e))?;
+            reshape_http_result(result)
         }
         Tool::DuckDb { .. } => {
             // PR-2c-6 fills this in.
@@ -579,7 +753,7 @@ mod tests {
     #[test]
     fn to_tools_config_http_round_trips_essentials() {
         let tool = Tool::Http {
-            method: "POST".into(),
+            method: "post".into(), // lowercase to verify uppercasing
             url: "https://example.com/api".into(),
             headers: HashMap::new(),
             params: HashMap::new(),
@@ -588,9 +762,138 @@ mod tests {
         };
         let cfg = to_tools_config(&tool);
         assert_eq!(cfg.kind, "http");
+        // noetl-tools' HttpConfig.method deserializes via
+        // #[serde(rename_all = "UPPERCASE")] so the bridge always
+        // uppercases the CLI's method string.
         assert_eq!(cfg.config["method"], "POST");
         assert_eq!(cfg.config["url"], "https://example.com/api");
-        assert_eq!(cfg.config["body"], r#"{"k":"v"}"#);
+        // JSON bodies are parsed into a JSON Value so reqwest
+        // serialises them with Content-Type: application/json.
+        assert_eq!(cfg.config["body"], serde_json::json!({"k": "v"}));
+    }
+
+    #[test]
+    fn to_tools_config_http_keeps_non_json_body_as_string() {
+        let tool = Tool::Http {
+            method: "POST".into(),
+            url: "https://example.com".into(),
+            headers: HashMap::new(),
+            params: HashMap::new(),
+            body: Some("not json at all".into()),
+            auth: None,
+        };
+        let cfg = to_tools_config(&tool);
+        assert_eq!(cfg.config["body"], "not json at all");
+    }
+
+    #[test]
+    fn http_body_value_parses_json_strings() {
+        let v = http_body_value(r#"{"a":1}"#);
+        assert_eq!(v, serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn http_body_value_falls_back_to_string() {
+        let v = http_body_value("plain text body");
+        assert_eq!(v, serde_json::Value::String("plain text body".into()));
+    }
+
+    #[test]
+    fn http_tool_config_injects_bearer_header() {
+        let cfg = http_tool_config(
+            "GET",
+            "https://example.com",
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            Some("test-token-123"),
+        );
+        assert_eq!(cfg.kind, "http");
+        assert_eq!(
+            cfg.config["headers"]["Authorization"],
+            "Bearer test-token-123"
+        );
+    }
+
+    #[test]
+    fn http_tool_config_preserves_caller_headers_with_bearer() {
+        let mut hdrs = HashMap::new();
+        hdrs.insert("X-Trace-Id".into(), "abc123".into());
+        let cfg = http_tool_config(
+            "POST",
+            "https://example.com",
+            &hdrs,
+            &HashMap::new(),
+            None,
+            Some("token"),
+        );
+        assert_eq!(cfg.config["headers"]["X-Trace-Id"], "abc123");
+        assert_eq!(cfg.config["headers"]["Authorization"], "Bearer token");
+    }
+
+    #[test]
+    fn http_tool_config_no_auth_omits_authorization_header() {
+        let cfg = http_tool_config(
+            "GET",
+            "https://example.com",
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        );
+        let hdrs = cfg.config["headers"].as_object().unwrap();
+        assert!(!hdrs.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn reshape_http_result_extracts_envelope() {
+        let mut result = ToolResult::success(serde_json::json!({
+            "status_code": 200,
+            "headers": {},
+            "body": {"ok": true},
+        }));
+        result.exit_code = Some(0);
+        let outcome = reshape_http_result(result).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["status"], 200);
+        assert_eq!(parsed["body"], serde_json::json!({"ok": true}));
+    }
+
+    #[test]
+    fn reshape_http_result_preserves_4xx_envelope_without_erroring() {
+        // CLI contract: HTTP error statuses come back inside the
+        // `{status, body}` envelope, NOT as anyhow::Error.  Only
+        // network-transport failures bubble up.
+        let mut result = ToolResult {
+            status: ToolStatus::Error,
+            data: Some(serde_json::json!({
+                "status_code": 404,
+                "headers": {},
+                "body": {"error": "not found"},
+            })),
+            error: Some("HTTP 404 response".into()),
+            stdout: None,
+            stderr: None,
+            exit_code: Some(1),
+            duration_ms: Some(5),
+        };
+        result.exit_code = Some(1);
+        let outcome = reshape_http_result(result).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["status"], 404);
+        assert_eq!(parsed["body"], serde_json::json!({"error": "not found"}));
+    }
+
+    #[tokio::test]
+    async fn resolve_auth_to_bearer_rejects_unknown_provider() {
+        let cfg = CliAuthConfig {
+            provider: "azure".into(),
+            scopes: vec![],
+        };
+        let err = resolve_auth_to_bearer(&cfg).await.unwrap_err();
+        assert!(err.to_string().contains("unsupported auth provider"));
     }
 
     #[test]
@@ -651,19 +954,16 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_via_registry_returns_empty_for_unwired_kind() {
-        // PR-2c-3 wired `Tool::Rhai`; PR-2c-4 wired `Tool::Shell`.
-        // The remaining stub kinds (Http, DuckDb, Playbook, Auth,
-        // Sink) still return empty.  Use `Tool::Http` here — PR-2c-5
-        // fills it in next.
+        // PR-2c-3 wired `Tool::Rhai`; PR-2c-4 wired `Tool::Shell`;
+        // PR-2c-5 wired `Tool::Http`.  The remaining stub kinds
+        // (DuckDb, Playbook, Auth, Sink) still return empty.  Use
+        // `Tool::DuckDb` here — PR-2c-6 fills it in next.
         let vars = empty_vars();
         let bridge = bridge_ctx(&vars);
-        let tool = Tool::Http {
-            method: "GET".into(),
-            url: "https://example.com".into(),
-            headers: HashMap::new(),
-            params: HashMap::new(),
-            body: None,
-            auth: None,
+        let tool = Tool::DuckDb {
+            db: ":memory:".into(),
+            query: Some("SELECT 1".into()),
+            params: vec![],
         };
         let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
         assert!(outcome.result.is_none());
