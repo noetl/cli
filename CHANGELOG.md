@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.21.0](https://github.com/noetl/cli/compare/v2.20.0...v2.21.0) (2026-05-30)
+
+### Features
+
+* **executor:** wire Tool::Http through noetl-tools bridge (R-1.1 PR-2c-5) ([d504f71](https://github.com/noetl/cli/commit/d504f7190b65138e3955b41d7462edffe1b6fbbe)), closes [noetl/ai-meta#36](https://github.com/noetl/ai-meta/issues/36) [noetl/cli#19](https://github.com/noetl/cli/issues/19)
+
 ## [2.20.0](https://github.com/noetl/cli/compare/v2.19.0...v2.20.0) (2026-05-30)
 
 ### Features
