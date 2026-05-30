@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.22.0](https://github.com/noetl/cli/compare/v2.21.0...v2.22.0) (2026-05-30)
+
+### Features
+
+* **executor:** wire Tool::DuckDb through noetl-tools bridge (R-1.1 PR-2c-6) ([b5d1111](https://github.com/noetl/cli/commit/b5d1111647650aa73703787833ea050fa781b562)), closes [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30) [noetl/cli#19](https://github.com/noetl/cli/issues/19)
+
 ## [2.21.0](https://github.com/noetl/cli/compare/v2.20.0...v2.21.0) (2026-05-30)
 
 ### Features
