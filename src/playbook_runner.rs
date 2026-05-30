@@ -979,22 +979,44 @@ impl PlaybookRunner {
                 }
             }
             Tool::Rhai { code, args } => {
-                // Render templates in args
+                // Render templates in args + code (same as pre-R-1.1
+                // behaviour — the bridge runs against rendered input).
                 let mut rendered_args: HashMap<String, String> = HashMap::new();
                 for (key, template) in args {
                     let value = self.render_template(template, context)?;
                     rendered_args.insert(key.clone(), value);
                 }
-
-                // Render templates in code
                 let rendered_code = self.render_template(code, context)?;
 
                 if self.verbose {
                     eprintln!("   🦀 Executing Rhai script");
                 }
 
-                let result = self.execute_rhai_script(&rendered_code, &rendered_args, context)?;
-                Ok(Some(result))
+                // R-1.1 PR-2c-3: dispatch through the noetl-tools
+                // bridge instead of the CLI's inline execute_rhai_script.
+                // The async bridge dispatch is invoked from this sync
+                // function via block_in_place + Handle::current().
+                let rendered_tool = Tool::Rhai {
+                    code: rendered_code,
+                    args: rendered_args,
+                };
+                let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
+                    execution_id: 0, // CLI local mode doesn't carry a snowflake id
+                    step: "<cli-local>",
+                    variables: &context.variables,
+                    server_url: String::new(),
+                    worker_id: None,
+                    command_id: None,
+                };
+                let outcome = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                        noetl_executor::tools_bridge::dispatch_via_registry(
+                            &rendered_tool,
+                            &bridge_ctx,
+                        ),
+                    )
+                })?;
+                Ok(outcome.result)
             }
             Tool::Unsupported => {
                 eprintln!("   Tool not supported in local execution mode");
@@ -1085,238 +1107,13 @@ impl PlaybookRunner {
     }
 
     /// Execute a Rhai script with access to HTTP, sleep, and utility functions
-    fn execute_rhai_script(
-        &self,
-        code: &str,
-        args: &HashMap<String, String>,
-        context: &ExecutionContext,
-    ) -> Result<String> {
-        let mut engine = Engine::new();
 
-        // Create shared output buffer for logging
-        let output_buffer = Arc::new(Mutex::new(Vec::<String>::new()));
-        let output_clone = output_buffer.clone();
-
-        // Register log/print function
-        engine.register_fn("log", move |msg: &str| {
-            eprintln!("{}", msg);
-            if let Ok(mut buf) = output_clone.lock() {
-                buf.push(msg.to_string());
-            }
-        });
-
-        engine.register_fn("print", |msg: &str| {
-            eprintln!("{}", msg);
-        });
-
-        // Register timestamp function
-        engine.register_fn("timestamp", || -> String {
-            chrono::Local::now().format("%H:%M:%S").to_string()
-        });
-
-        // Register sleep function (seconds)
-        engine.register_fn("sleep", |seconds: i64| {
-            std::thread::sleep(std::time::Duration::from_secs(seconds as u64));
-        });
-
-        // Register sleep_ms function (milliseconds)
-        engine.register_fn("sleep_ms", |ms: i64| {
-            std::thread::sleep(std::time::Duration::from_millis(ms as u64));
-        });
-
-        // Register HTTP GET function
-        engine.register_fn("http_get", |url: &str| -> Dynamic {
-            Self::rhai_http_request("GET", url, "", None)
-        });
-
-        engine.register_fn("http_get_auth", |url: &str, token: &str| -> Dynamic {
-            Self::rhai_http_request("GET", url, "", Some(token))
-        });
-
-        // Register HTTP POST function
-        engine.register_fn("http_post", |url: &str, body: &str| -> Dynamic {
-            Self::rhai_http_request("POST", url, body, None)
-        });
-
-        engine.register_fn("http_post_auth", |url: &str, body: &str, token: &str| -> Dynamic {
-            Self::rhai_http_request("POST", url, body, Some(token))
-        });
-
-        // Register HTTP DELETE function
-        engine.register_fn("http_delete", |url: &str| -> Dynamic {
-            Self::rhai_http_request("DELETE", url, "", None)
-        });
-
-        engine.register_fn("http_delete_auth", |url: &str, token: &str| -> Dynamic {
-            Self::rhai_http_request("DELETE", url, "", Some(token))
-        });
-
-        // Register JSON parse function
-        engine.register_fn("parse_json", |json_str: &str| -> Dynamic {
-            match serde_json::from_str::<serde_json::Value>(json_str) {
-                Ok(value) => Self::json_to_rhai(&value),
-                Err(_) => Dynamic::UNIT,
-            }
-        });
-
-        // Register JSON stringify function
-        engine.register_fn("to_json", |value: Dynamic| -> String {
-            Self::rhai_to_json_string(&value)
-        });
-
-        // Register get_token function for GCP auth
-        engine.register_fn("get_gcp_token", || -> String {
-            let output = Command::new("gcloud").args(["auth", "print-access-token"]).output();
-
-            match output {
-                Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-                _ => String::new(),
-            }
-        });
-
-        // Register string contains check
-        engine.register_fn("contains", |haystack: &str, needle: &str| -> bool {
-            haystack.contains(needle)
-        });
-
-        engine.register_fn("contains_any", |haystack: &str, needles: Array| -> bool {
-            for needle in needles {
-                if let Some(s) = needle.into_string().ok() {
-                    if haystack.to_lowercase().contains(&s.to_lowercase()) {
-                        return true;
-                    }
-                }
-            }
-            false
-        });
-
-        // Create scope with args and context variables
-        let mut scope = Scope::new();
-
-        // Add args to scope
-        let mut args_map = Map::new();
-        for (key, value) in args {
-            args_map.insert(key.clone().into(), Dynamic::from(value.clone()));
-        }
-        scope.push("args", args_map);
-
-        // Add workload variables to scope
-        let mut workload_map = Map::new();
-        for (key, value) in &context.variables {
-            if key.starts_with("workload.") {
-                let short_key = key.strip_prefix("workload.").unwrap_or(key);
-                workload_map.insert(short_key.to_string().into(), Dynamic::from(value.clone()));
-            }
-        }
-        scope.push("workload", workload_map);
-
-        // Add vars to scope
-        let mut vars_map = Map::new();
-        for (key, value) in &context.variables {
-            if key.starts_with("vars.") {
-                let short_key = key.strip_prefix("vars.").unwrap_or(key);
-                vars_map.insert(short_key.to_string().into(), Dynamic::from(value.clone()));
-            }
-        }
-        scope.push("vars", vars_map);
-
-        // Run the script
-        let result = engine
-            .eval_with_scope::<Dynamic>(&mut scope, code)
-            .map_err(|e| anyhow::anyhow!("Rhai script error: {}", e))?;
-
-        // Convert result to string
-        let result_str = if result.is_unit() {
-            "".to_string()
-        } else if result.is_string() {
-            result.into_string().unwrap_or_default()
-        } else {
-            Self::rhai_to_json_string(&result)
-        };
-
-        Ok(result_str)
-    }
-
-    /// Helper: Execute HTTP request and return Rhai-compatible result
-    fn rhai_http_request(method: &str, url: &str, body: &str, token: Option<&str>) -> Dynamic {
-        let mut curl_args = vec![
-            "-s".to_string(),
-            "-w".to_string(),
-            "\n%{http_code}".to_string(),
-            "-X".to_string(),
-            method.to_string(),
-        ];
-
-        if let Some(t) = token {
-            curl_args.push("-H".to_string());
-            curl_args.push(format!("Authorization: Bearer {}", t));
-        }
-
-        if !body.is_empty() {
-            curl_args.push("-H".to_string());
-            curl_args.push("Content-Type: application/json".to_string());
-            curl_args.push("-d".to_string());
-            curl_args.push(body.to_string());
-        }
-
-        curl_args.push(url.to_string());
-
-        let output = Command::new("curl").args(&curl_args).output();
-
-        match output {
-            Ok(out) => {
-                let full_output = String::from_utf8_lossy(&out.stdout).to_string();
-
-                // Parse output - body before last newline, status after
-                let (body_part, status_str) = if let Some(pos) = full_output.rfind('\n') {
-                    (
-                        full_output[..pos].to_string(),
-                        full_output[pos + 1..].trim().to_string(),
-                    )
-                } else {
-                    (full_output.clone(), "0".to_string())
-                };
-
-                let status: i64 = status_str.parse().unwrap_or(0);
-
-                // Create result map
-                let mut result = Map::new();
-                result.insert("status".into(), Dynamic::from(status));
-                result.insert("status_str".into(), Dynamic::from(status_str));
-                result.insert("body_raw".into(), Dynamic::from(body_part.clone()));
-
-                // Try to parse body as JSON
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&body_part) {
-                    result.insert("body".into(), Self::json_to_rhai(&json_val));
-                    result.insert("ok".into(), Dynamic::from(status >= 200 && status < 300));
-                } else {
-                    result.insert("body".into(), Dynamic::from(body_part));
-                    result.insert("ok".into(), Dynamic::from(status >= 200 && status < 300));
-                }
-
-                Dynamic::from(result)
-            }
-            Err(e) => {
-                let mut result = Map::new();
-                result.insert("status".into(), Dynamic::from(0_i64));
-                result.insert("ok".into(), Dynamic::from(false));
-                result.insert("error".into(), Dynamic::from(e.to_string()));
-                Dynamic::from(result)
-            }
-        }
-    }
-
-    /// Convert serde_json::Value to Rhai Dynamic
-    fn json_to_rhai(value: &serde_json::Value) -> Dynamic {
-        // R-1.1 PR-2b: body extracted to noetl_executor::template.
-        noetl_executor::template::json_to_rhai(value)
-    }
-
-    /// Convert Rhai Dynamic to JSON string
-    fn rhai_to_json_string(value: &Dynamic) -> String {
-        // R-1.1 PR-2b: body extracted to noetl_executor::template.
-        noetl_executor::template::rhai_to_json_string(value)
-    }
+    // R-1.1 PR-2c-3: the rhai_to_json_string / json_to_rhai forwarders
+    // that lived here were used only by execute_rhai_script (now
+    // deleted) and rhai_http_request (now deleted), so they came out
+    // with that change.  noetl-executor::template::{json_to_rhai,
+    // rhai_to_json_string} remain available for any future caller
+    // that needs them.
 
     fn execute_http_request(
         &self,

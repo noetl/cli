@@ -37,14 +37,15 @@
 //! Keeping the bridge explicit forces these decisions into one place
 //! instead of scattering them across each tool-kind sub-PR.
 
-#![allow(dead_code)] // until PR-2c-3 onwards wires the call sites in.
+#![allow(dead_code)] // until PR-2c-4 onwards wires the call sites in.
 
 use std::collections::HashMap;
 
 use anyhow::Result;
 use noetl_tools::context::ExecutionContext as ToolsExecutionContext;
-use noetl_tools::registry::ToolConfig;
+use noetl_tools::registry::{Tool as ToolsRegistryTool, ToolConfig};
 use noetl_tools::result::{ToolResult, ToolStatus};
+use noetl_tools::tools::RhaiTool;
 
 use crate::playbook::{CmdsList, Tool};
 
@@ -118,12 +119,80 @@ pub struct BridgeContext<'a> {
 /// [`serde_json::Value::String`] entries; secrets stay empty (CLI
 /// local mode resolves credentials at the credential-resolver layer,
 /// not at tool dispatch).
+///
+/// Variable shape: **flat**.  Each CLI variable `workload.region`
+/// becomes a JSON value at the same flat key in the resulting map.
+/// This matches what most `noetl-tools` tools (http / postgres / etc.)
+/// expect from their template engine.  The rhai tool needs a
+/// *nested* shape so `workload.region` is reachable as a Rhai field
+/// access on a `workload` map; see [`to_tools_context_for_rhai`] for
+/// the restructured variant used inside the rhai dispatch arm.
 pub fn to_tools_context(bridge: &BridgeContext) -> ToolsExecutionContext {
     let variables: HashMap<String, serde_json::Value> = bridge
         .variables
         .iter()
         .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
         .collect();
+
+    ToolsExecutionContext {
+        execution_id: bridge.execution_id,
+        step: bridge.step.to_string(),
+        variables,
+        server_url: bridge.server_url.clone(),
+        worker_id: bridge.worker_id.clone(),
+        command_id: bridge.command_id.clone(),
+        ..ToolsExecutionContext::default()
+    }
+}
+
+/// Build a [`ToolsExecutionContext`] whose `variables` map matches the
+/// scope shape the CLI's inline `execute_rhai_script` produced — flat
+/// `workload.region` / `vars.x` / `<step>.<field>` keys grouped into
+/// nested objects so Rhai's `workload.region` / `vars.x` / `<step>.<field>`
+/// field-access syntax works.
+///
+/// PR-2c-3 introduces this for the rhai dispatch arm.  Other tool
+/// kinds (http, postgres, duckdb, etc.) continue to consume the flat
+/// shape from [`to_tools_context`] because their template engines
+/// expect the `{{workload.region}}` lookup style, not Rhai-style
+/// field navigation.
+pub fn to_tools_context_for_rhai(bridge: &BridgeContext) -> ToolsExecutionContext {
+    let mut variables: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut workload_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    let mut vars_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    let mut step_maps: HashMap<String, serde_json::Map<String, serde_json::Value>> =
+        HashMap::new();
+
+    for (key, value) in bridge.variables {
+        let val = serde_json::Value::String(value.clone());
+        if let Some(suffix) = key.strip_prefix("workload.") {
+            workload_map.insert(suffix.to_string(), val);
+        } else if let Some(suffix) = key.strip_prefix("vars.") {
+            vars_map.insert(suffix.to_string(), val);
+        } else if let Some((step, field)) = key.split_once('.') {
+            step_maps
+                .entry(step.to_string())
+                .or_default()
+                .insert(field.to_string(), val);
+        } else {
+            // Unprefixed keys land at the top level — same shape as
+            // [`to_tools_context`].
+            variables.insert(key.clone(), val);
+        }
+    }
+
+    if !workload_map.is_empty() {
+        variables.insert(
+            "workload".to_string(),
+            serde_json::Value::Object(workload_map),
+        );
+    }
+    if !vars_map.is_empty() {
+        variables.insert("vars".to_string(), serde_json::Value::Object(vars_map));
+    }
+    for (step, map) in step_maps {
+        variables.insert(step, serde_json::Value::Object(map));
+    }
 
     ToolsExecutionContext {
         execution_id: bridge.execution_id,
@@ -293,10 +362,28 @@ pub async fn dispatch_via_registry(
 
     match tool {
         Tool::Rhai { .. } => {
-            // PR-2c-3 fills this in by instantiating the rhai tool
-            // from noetl-tools, executing it, and converting the
-            // result via from_tools_result.
-            Ok(BridgeOutcome::empty())
+            // PR-2c-3: first real tool replacement.  Builds a
+            // RhaiTool from noetl-tools, dispatches against the
+            // adapter-converted config + context, and converts the
+            // result back through `from_tools_result`.
+            //
+            // Semantic note documented in the PR body: noetl-tools'
+            // `timestamp()` returns the Unix epoch as a string
+            // (e.g. "1716847425"), whereas the CLI's inline
+            // implementation returned `chrono::Local::now()
+            // .format("%H:%M:%S")` (e.g. "14:23:45").  Other
+            // helpers (log, print, parse_json, contains, http_*,
+            // get_gcp_token, sleep, sleep_ms) match.
+            let rhai_tool = RhaiTool::new();
+            let config = to_tools_config(tool);
+            // rhai needs a nested variable shape so
+            // `workload.region` is a Rhai field-access expression.
+            let ctx = to_tools_context_for_rhai(bridge);
+            let result = rhai_tool
+                .execute(&config, &ctx)
+                .await
+                .map_err(|e| anyhow::anyhow!("rhai dispatch failed: {}", e))?;
+            from_tools_result(result)
         }
         Tool::Shell { .. } => {
             // PR-2c-4 fills this in.
@@ -462,13 +549,13 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_via_registry_returns_empty_for_unwired_kind() {
-        // PR-2c-2 (this PR): all match arms return empty.  PR-2c-3
-        // onwards swaps `rhai`'s arm for a real registry call.
+        // PR-2c-3 wired `Tool::Rhai`.  This test still exercises the
+        // "unwired stub returns empty" branch using `Tool::Shell`,
+        // which PR-2c-4 fills in next.
         let vars = empty_vars();
         let bridge = bridge_ctx(&vars);
-        let tool = Tool::Rhai {
-            code: "42".into(),
-            args: HashMap::new(),
+        let tool = Tool::Shell {
+            cmds: CmdsList::Single("echo hi".into()),
         };
         let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
         assert!(outcome.result.is_none());
@@ -481,6 +568,104 @@ mod tests {
         let tool = Tool::Unsupported;
         let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
         assert!(err.to_string().contains("unsupported"));
+    }
+
+    // ---- PR-2c-3 — Tool::Rhai bridge integration ---------------------
+
+    #[tokio::test]
+    async fn dispatch_rhai_evaluates_simple_arithmetic() {
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Rhai {
+            code: "let x = 40; let y = 2; (x + y).to_string()".into(),
+            args: HashMap::new(),
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        assert_eq!(outcome.result, Some("42".into()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_rhai_reads_workload_variable_via_scope() {
+        // `to_tools_context_for_rhai` groups the CLI's flat
+        // `workload.region` key into a nested `workload` Map.
+        // Rhai's `workload.region` then resolves as field access.
+        let vars: HashMap<String, String> =
+            [("workload.region".into(), "us-west-1".into())].into();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Rhai {
+            code: r#"workload.region.to_string()"#.into(),
+            args: HashMap::new(),
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        assert_eq!(outcome.result, Some("us-west-1".into()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_rhai_reads_step_result_via_field_access() {
+        // Step results in the CLI surface as `<step>.result` keys.
+        // The nested-shape adapter groups them under a step-named map.
+        let vars: HashMap<String, String> = [
+            ("check_health.result".into(), "ok".into()),
+            ("check_health.status".into(), "200".into()),
+        ]
+        .into();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Rhai {
+            code: r#"check_health.result.to_string()"#.into(),
+            args: HashMap::new(),
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        assert_eq!(outcome.result, Some("ok".into()));
+    }
+
+    #[test]
+    fn to_tools_context_for_rhai_groups_workload_prefix() {
+        let vars: HashMap<String, String> = [
+            ("workload.region".into(), "us-west-1".into()),
+            ("workload.tier".into(), "prod".into()),
+            ("vars.timeout".into(), "30".into()),
+            ("step_a.result".into(), "done".into()),
+            ("toplevel".into(), "kept_at_root".into()),
+        ]
+        .into();
+        let bridge = bridge_ctx(&vars);
+        let ctx = to_tools_context_for_rhai(&bridge);
+
+        let workload = ctx
+            .variables
+            .get("workload")
+            .expect("workload group should exist")
+            .as_object()
+            .expect("workload should be an object");
+        assert_eq!(workload.get("region"), Some(&serde_json::json!("us-west-1")));
+        assert_eq!(workload.get("tier"), Some(&serde_json::json!("prod")));
+
+        let vars_map = ctx.variables.get("vars").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(vars_map.get("timeout"), Some(&serde_json::json!("30")));
+
+        let step_a = ctx.variables.get("step_a").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(step_a.get("result"), Some(&serde_json::json!("done")));
+
+        assert_eq!(
+            ctx.variables.get("toplevel"),
+            Some(&serde_json::json!("kept_at_root"))
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_rhai_string_literal_returns_unquoted() {
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Rhai {
+            code: r#""hello world""#.into(),
+            args: HashMap::new(),
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        // noetl-tools' RhaiTool returns the result through ToolResult.data
+        // as a JSON value; for string results that means a JSON-quoted
+        // string.  from_tools_result strips the JSON quotes when data
+        // is a Value::String.
+        assert_eq!(outcome.result, Some("hello world".into()));
     }
 
     // ---- Compiler proof: AuthConfig from playbook is still constructable
