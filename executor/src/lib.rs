@@ -32,6 +32,7 @@ pub mod source;
 pub mod sources;
 pub mod dispatch;
 pub mod events;
+pub mod playbook;
 
 /// Re-exports for downstream crates (the CLI and the worker) so they
 /// can import via the crate root.
