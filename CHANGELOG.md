@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.1.0](https://github.com/noetl/cli/compare/v3.0.0...v3.1.0) (2026-05-30)
+
+### Features
+
+* **executor:** add structured Condition + 12-variant Operator (R-1.2 PR-2b, bumps to 0.2.1) ([687f83c](https://github.com/noetl/cli/commit/687f83c153987d66f433b43b9d48fc28057f0a74)), closes [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30)
+
 ## [3.0.0](https://github.com/noetl/cli/compare/v2.24.0...v3.0.0) (2026-05-30)
 
 ### ⚠ BREAKING CHANGES
