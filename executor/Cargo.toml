@@ -4,8 +4,16 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
-description = "NoETL shared execution core - drives playbook commands from local YAML or NATS"
-publish = false
+homepage = "https://noetl.io"
+description = "NoETL shared execution core — utilities and types shared between the noetl CLI's local-mode runner and the noetl-worker NATS pull consumer."
+readme = "README.md"
+keywords = ["noetl", "etl", "workflow", "automation", "executor"]
+categories = ["development-tools"]
+# R-1.2 PR-1: published to crates.io so `noetl` (the bin in this
+# workspace) can satisfy its dependency from crates.io, and so the
+# noetl-worker repo can depend on `noetl-executor = "0.1"` for R-1.2
+# onwards.  See § H.10 of Appendix H of the global hybrid cloud
+# blueprint for the architectural rationale.
 
 [dependencies]
 # Async runtime; matches the CLI's tokio surface so the shared crate
