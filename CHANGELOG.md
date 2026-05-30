@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0](https://github.com/noetl/cli/compare/v2.24.0...v3.0.0) (2026-05-30)
+
+### ⚠ BREAKING CHANGES
+
+* **executor:** to the public types -> bump to 0.2.0 (0.x semver
+treats minor bumps as breaking).  Bin's `Cargo.toml` updated to
+`noetl-executor = { path = "executor", version = "0.2" }` so the
+workspace builds against the local 0.2 source and `cargo publish`
+resolves against the published 0.2 line.
+
+## Verification
+
+- `cargo build --workspace` clean.
+- `cargo test --workspace`: 174 passing (no test changes needed
+  except a single `"exec_test".into()` -> `12345i64` for the
+  noop-sink test, which the type change forced).
+- No behavior change in any of the existing 80 unit + 12
+  integration noetl-executor tests.
+
+## What this unblocks
+
+- PR-2b (noetl/cli): extend `executor::condition` with structured
+  Condition + 12-variant Operator; bump to 0.2.1.
+- PR-2c (noetl/worker): replace `WorkerEvent` with `ExecutorEvent`
+  directly -- no type conversion needed.
+- PR-2d (noetl/worker): NATS subscriber implements
+  `executor::worker::source::CommandSource` against worker's
+  i64-typed snowflake ids -- no conversion needed.
+
+### Miscellaneous Chores
+
+* **executor:** align execution_id to i64 across the crate (R-1.2 PR-2a, bumps to 0.2.0) ([ee95ae7](https://github.com/noetl/cli/commit/ee95ae75437c1f8db3979a1f2fc30748953ac99d)), closes [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30)
+
 ## [2.24.0](https://github.com/noetl/cli/compare/v2.23.0...v2.24.0) (2026-05-30)
 
 ### Features
