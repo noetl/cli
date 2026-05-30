@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.23.0](https://github.com/noetl/cli/compare/v2.22.0...v2.23.0) (2026-05-30)
+
+### Features
+
+* **executor:** codify § H.10 finding for Tool::Playbook (R-1.1 PR-2c-7) ([7a4c486](https://github.com/noetl/cli/commit/7a4c486615d3036710cf64fb8fad386238ac320f)), closes [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30) [noetl/cli#19](https://github.com/noetl/cli/issues/19)
+
 ## [2.22.0](https://github.com/noetl/cli/compare/v2.21.0...v2.22.0) (2026-05-30)
 
 ### Features
