@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.18.0](https://github.com/noetl/cli/compare/v2.17.1...v2.18.0) (2026-05-30)
+
+### Features
+
+* **executor:** flesh out tools_bridge adapters (R-1.1 PR-2c-2) ([7750cf2](https://github.com/noetl/cli/commit/7750cf23ef4cc084e237ae5093c2683869569127))
+
 ## [2.17.1](https://github.com/noetl/cli/compare/v2.17.0...v2.17.1) (2026-05-29)
 
 ### Bug Fixes
