@@ -55,6 +55,7 @@ pub mod events;
 pub mod playbook;
 pub mod runtime;
 pub mod template;
+pub mod tools_bridge;
 pub mod worker;
 
 /// Re-exports for downstream crates (the CLI and the worker) so they

@@ -33,5 +33,16 @@ tracing = "0.1"
 regex = "1.10"
 rhai = { version = "1.18", features = ["sync"] }
 
+# Tool registry (R-1.1 PR-2c-1 per Appendix H § H.10.4).  Pinned to
+# match `repos/worker` so both binaries that depend on noetl-executor
+# resolve to the same noetl-tools version.  Bridge layer in
+# noetl-executor::tools_bridge maps the CLI's YAML-parsed `Tool` enum
+# (from noetl-executor::playbook) onto the registry's dispatch API.
+#
+# Subsequent sub-PRs (PR-2c-2 onwards per Strategy B) replace one
+# inline tool implementation in playbook_runner.rs at a time so
+# semantic differences surface incrementally instead of all at once.
+noetl-tools = "2.8.7"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
