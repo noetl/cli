@@ -1,21 +1,26 @@
-//! `CommandSource` — abstraction over how the executor receives the
-//! next command to run.
+//! `CommandSource` — worker-only abstraction over how the worker
+//! receives the next command to run.
 //!
-//! The CLI's local mode parses YAML into a graph of commands and
-//! supplies them via [`crate::sources::local_playbook::LocalPlaybookSource`].
-//! The worker (R-1.3) implements a NATS-backed source that pulls from
-//! a durable consumer.  The executor never cares which one it has.
+//! This module is **worker-only**.  The CLI does NOT consume types
+//! from here — its local-mode runner is a tree walker that doesn't
+//! need a pull-model command source.  See § H.10 of the global hybrid
+//! cloud blueprint for the architectural rationale.
+//!
+//! The worker (R-1.3) implements a NATS-backed `CommandSource` that
+//! pulls from a durable consumer.  Future worker implementations
+//! (e.g. an HTTP-poll source for serverless deployments under § H.2's
+//! Cloud Run compute substrate) implement the same trait.
 
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// One command the executor will dispatch to a tool.
+/// One command the worker will dispatch to a tool.
 ///
 /// The shape mirrors the Python-side `noetl.command` row + envelope as
 /// of v2.103.x — keep the field names aligned so wire-format
-/// compatibility is automatic.  R-1.2 will add the remaining fields
-/// (step, tool kind, input, render context, etc.) by porting the YAML
-/// command builder from `repos/cli/src/playbook_runner.rs`.
+/// compatibility is automatic.  R-1.3 will add the remaining fields
+/// (input, render context, parent execution id, etc.) when the worker
+/// reaches feature parity with the Python worker.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Command {
     /// Stable identifier for this command.  CLI generates a UUID;

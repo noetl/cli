@@ -1579,6 +1579,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "regex",
+ "rhai",
  "serde",
  "serde_json",
  "serde_yaml",

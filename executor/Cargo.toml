@@ -28,5 +28,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # Tracing.
 tracing = "0.1"
 
+# Template + condition utilities (R-1.1 PR-2b extraction from
+# playbook_runner.rs per § H.10.3 of Appendix H).
+regex = "1.10"
+rhai = { version = "1.18", features = ["sync"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

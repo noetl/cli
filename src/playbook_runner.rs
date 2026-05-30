@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use duckdb::{params, Connection};
 use rhai::{Array, Dynamic, Engine, Map, Scope};
+// `Deserialize` / `Serialize` derive macros come in through the
+// `pub use noetl_executor::playbook::*` block below; no direct use
+// in this file after R-1.1 PR-2b's extraction.
+#[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 use serde_yaml;
 use std::collections::HashMap;
@@ -140,69 +144,57 @@ impl PlaybookRunner {
 
     /// Validate playbook requirements against local runtime capabilities
     fn validate_capabilities(&self, playbook: &Playbook) -> Result<()> {
+        // R-1.1 PR-2b: validation logic extracted to
+        // noetl_executor::capabilities::validate_capabilities.  The
+        // pure function returns a ValidationReport; this CLI
+        // adapter formats the report against the CLI's playbook_path
+        // for human-readable error messages.
+        use noetl_executor::capabilities::{validate_capabilities, ValidationError};
+
         let local_caps = RuntimeCapabilities::local();
+        let report = validate_capabilities(playbook, &local_caps)?;
 
-        // Check executor profile
-        if let Some(executor) = &playbook.executor {
-            // Check if profile is compatible
-            match executor.profile.as_str() {
-                "distributed" => {
+        // CLI-side: warnings go to stderr.
+        for warning in &report.warnings {
+            eprintln!("Warning: {}", warning);
+        }
+
+        // CLI-side: first error short-circuits with a formatted message
+        // (matches pre-extraction behaviour).
+        if let Some(err) = report.errors.first() {
+            match err {
+                ValidationError::IncompatibleProfile { required } => {
                     anyhow::bail!(
-                        "Playbook '{}' requires distributed runtime (executor.profile: distributed)\n\
-                         Use: noetl exec {} --runtime distributed",
+                        "Playbook '{}' requires {} runtime (executor.profile: {})\n\
+                         Use: noetl exec {} --runtime {}",
                         playbook.metadata.name,
-                        self.playbook_path.display()
+                        required,
+                        required,
+                        self.playbook_path.display(),
+                        required,
                     );
                 }
-                "local" | "auto" | "" => {
-                    // Compatible with local runtime
-                }
-                other => {
-                    eprintln!(
-                        "Warning: Unknown executor profile '{}', proceeding with local runtime",
-                        other
+                ValidationError::MissingTool { tool, supported } => {
+                    anyhow::bail!(
+                        "Playbook '{}' requires tool '{}' which is not supported by local runtime.\n\
+                         Supported tools: {:?}\n\
+                         Consider using: noetl exec {} --runtime distributed",
+                        playbook.metadata.name,
+                        tool,
+                        supported,
+                        self.playbook_path.display(),
                     );
                 }
-            }
-
-            // Check version compatibility
-            if executor.version != local_caps.version && !executor.version.is_empty() {
-                eprintln!(
-                    "Warning: Playbook requires '{}', local runtime provides '{}'. \
-                     Some features may not work as expected.",
-                    executor.version, local_caps.version
-                );
-            }
-
-            // Check required tools
-            if let Some(requires) = &executor.requires {
-                for tool in &requires.tools {
-                    if !local_caps.tools.contains(tool) {
-                        anyhow::bail!(
-                            "Playbook '{}' requires tool '{}' which is not supported by local runtime.\n\
-                             Supported tools: {:?}\n\
-                             Consider using: noetl exec {} --runtime distributed",
-                            playbook.metadata.name,
-                            tool,
-                            local_caps.tools,
-                            self.playbook_path.display()
-                        );
-                    }
-                }
-
-                // Check required features
-                for feature in &requires.features {
-                    if !local_caps.features.contains(feature) {
-                        anyhow::bail!(
-                            "Playbook '{}' requires feature '{}' which is not supported by local runtime.\n\
-                             Supported features: {:?}\n\
-                             Consider using: noetl exec {} --runtime distributed",
-                            playbook.metadata.name,
-                            feature,
-                            local_caps.features,
-                            self.playbook_path.display()
-                        );
-                    }
+                ValidationError::MissingFeature { feature, supported } => {
+                    anyhow::bail!(
+                        "Playbook '{}' requires feature '{}' which is not supported by local runtime.\n\
+                         Supported features: {:?}\n\
+                         Consider using: noetl exec {} --runtime distributed",
+                        playbook.metadata.name,
+                        feature,
+                        supported,
+                        self.playbook_path.display(),
+                    );
                 }
             }
         }
@@ -769,145 +761,15 @@ impl PlaybookRunner {
     }
 
     fn evaluate_condition(&self, condition: &str, context: &ExecutionContext) -> Result<bool> {
-        // Simple condition evaluation
-        // Supports: {{ var == "value" }}, {{ var != "value" }}, {{ var }} (truthy check)
-
-        // Extract content from {{ ... }} if present
-        let expression = if condition.trim().starts_with("{{") && condition.trim().ends_with("}}") {
-            condition
-                .trim()
-                .strip_prefix("{{")
-                .unwrap()
-                .strip_suffix("}}")
-                .unwrap()
-                .trim()
-        } else {
-            condition.trim()
-        };
-
-        // Replace variables within the expression
-        let mut rendered = expression.to_string();
-        for (key, value) in &context.variables {
-            // Replace variable references like workload.action with their values
-            rendered = rendered.replace(key, value);
-        }
-
-        // Helper to strip quotes from a value
-        fn strip_quotes(s: &str) -> String {
-            let s = s.trim();
-            if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-                s[1..s.len() - 1].to_string()
-            } else {
-                s.to_string()
-            }
-        }
-
-        // Check for comparison operators
-        if rendered.contains("==") {
-            let parts: Vec<&str> = rendered.split("==").map(|s| s.trim()).collect();
-            if parts.len() == 2 {
-                return Ok(strip_quotes(parts[0]) == strip_quotes(parts[1]));
-            }
-        }
-
-        if rendered.contains("!=") {
-            let parts: Vec<&str> = rendered.split("!=").map(|s| s.trim()).collect();
-            if parts.len() == 2 {
-                return Ok(strip_quotes(parts[0]) != strip_quotes(parts[1]));
-            }
-        }
-
-        // Check for 'in' operator (e.g., "'value' in var" or "var in list")
-        if rendered.contains(" in ") {
-            let parts: Vec<&str> = rendered.split(" in ").map(|s| s.trim()).collect();
-            if parts.len() == 2 {
-                let needle = strip_quotes(parts[0]);
-                let haystack = strip_quotes(parts[1]);
-                return Ok(haystack.contains(&needle));
-            }
-        }
-
-        // Truthy check - not empty, not "false", not "0"
-        let value = strip_quotes(&rendered);
-        Ok(!value.is_empty() && value != "false" && value != "0")
+        // R-1.1 PR-2b: body extracted to noetl_executor::condition.
+        noetl_executor::condition::evaluate_condition(condition, &context.variables)
     }
 
     /// Evaluate a Rhai expression as a boolean condition
     /// The Rhai code should return a boolean (true/false)
     fn evaluate_rhai_condition(&self, code: &str, context: &ExecutionContext) -> Result<bool> {
-        let mut engine = Engine::new();
-        let mut scope = Scope::new();
-
-        // Add workload variables to scope
-        let mut workload_map = Map::new();
-        for (key, value) in &context.variables {
-            if key.starts_with("workload.") {
-                let short_key = key.strip_prefix("workload.").unwrap_or(key);
-                workload_map.insert(short_key.to_string().into(), Dynamic::from(value.clone()));
-            }
-        }
-        scope.push("workload", workload_map);
-
-        // Add vars to scope
-        let mut vars_map = Map::new();
-        for (key, value) in &context.variables {
-            if key.starts_with("vars.") {
-                let short_key = key.strip_prefix("vars.").unwrap_or(key);
-                vars_map.insert(short_key.to_string().into(), Dynamic::from(value.clone()));
-            }
-        }
-        scope.push("vars", vars_map);
-
-        // Add step results to scope
-        for (key, value) in &context.variables {
-            // Add step results directly (e.g., check_existing.status)
-            if !key.starts_with("workload.") && !key.starts_with("vars.") && key.contains('.') {
-                let parts: Vec<&str> = key.splitn(2, '.').collect();
-                if parts.len() == 2 {
-                    let step_name = parts[0];
-                    let field_name = parts[1];
-
-                    // Create or get the step map
-                    if !scope.contains(step_name) {
-                        scope.push(step_name.to_string(), Map::new());
-                    }
-
-                    // Update the step map with this field
-                    if let Some(step_map) = scope.get_mut(step_name) {
-                        if let Some(map) = step_map.clone().try_cast::<Map>() {
-                            let mut map = map;
-                            map.insert(field_name.to_string().into(), Dynamic::from(value.clone()));
-                            *step_map = Dynamic::from(map);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Register comparison helpers
-        engine.register_fn("eq", |a: &str, b: &str| -> bool { a == b });
-        engine.register_fn("ne", |a: &str, b: &str| -> bool { a != b });
-        engine.register_fn("contains", |haystack: &str, needle: &str| -> bool {
-            haystack.contains(needle)
-        });
-
-        // Evaluate the condition
-        let result = engine
-            .eval_with_scope::<Dynamic>(&mut scope, code)
-            .map_err(|e| anyhow::anyhow!("Rhai condition error: {}", e))?;
-
-        // Convert result to boolean
-        if result.is_bool() {
-            Ok(result.as_bool().unwrap_or(false))
-        } else if result.is_int() {
-            Ok(result.as_int().unwrap_or(0) != 0)
-        } else if result.is_string() {
-            let s = result.into_string().unwrap_or_default();
-            Ok(!s.is_empty() && s != "false" && s != "0")
-        } else {
-            // Treat non-unit values as truthy
-            Ok(!result.is_unit())
-        }
+        // R-1.1 PR-2b: body extracted to noetl_executor::condition.
+        noetl_executor::condition::evaluate_rhai_condition(code, &context.variables)
     }
 
     fn execute_tool(&self, tool: &Tool, context: &mut ExecutionContext) -> Result<Option<String>> {
@@ -1446,59 +1308,14 @@ impl PlaybookRunner {
 
     /// Convert serde_json::Value to Rhai Dynamic
     fn json_to_rhai(value: &serde_json::Value) -> Dynamic {
-        match value {
-            serde_json::Value::Null => Dynamic::UNIT,
-            serde_json::Value::Bool(b) => Dynamic::from(*b),
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Dynamic::from(i)
-                } else if let Some(f) = n.as_f64() {
-                    Dynamic::from(f)
-                } else {
-                    Dynamic::from(n.to_string())
-                }
-            }
-            serde_json::Value::String(s) => Dynamic::from(s.clone()),
-            serde_json::Value::Array(arr) => {
-                let rhai_arr: Array = arr.iter().map(Self::json_to_rhai).collect();
-                Dynamic::from(rhai_arr)
-            }
-            serde_json::Value::Object(obj) => {
-                let mut map = Map::new();
-                for (k, v) in obj {
-                    map.insert(k.clone().into(), Self::json_to_rhai(v));
-                }
-                Dynamic::from(map)
-            }
-        }
+        // R-1.1 PR-2b: body extracted to noetl_executor::template.
+        noetl_executor::template::json_to_rhai(value)
     }
 
     /// Convert Rhai Dynamic to JSON string
     fn rhai_to_json_string(value: &Dynamic) -> String {
-        if value.is_unit() {
-            "null".to_string()
-        } else if value.is_bool() {
-            value.as_bool().map(|b| b.to_string()).unwrap_or_default()
-        } else if value.is_int() {
-            value.as_int().map(|i| i.to_string()).unwrap_or_default()
-        } else if value.is_float() {
-            value.as_float().map(|f| f.to_string()).unwrap_or_default()
-        } else if value.is_string() {
-            format!("\"{}\"", value.clone().into_string().unwrap_or_default())
-        } else if value.is_array() {
-            let arr = value.clone().into_array().unwrap_or_default();
-            let items: Vec<String> = arr.iter().map(Self::rhai_to_json_string).collect();
-            format!("[{}]", items.join(","))
-        } else if value.is_map() {
-            let map = value.clone().cast::<Map>();
-            let items: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("\"{}\":{}", k, Self::rhai_to_json_string(v)))
-                .collect();
-            format!("{{{}}}", items.join(","))
-        } else {
-            format!("\"{}\"", value)
-        }
+        // R-1.1 PR-2b: body extracted to noetl_executor::template.
+        noetl_executor::template::rhai_to_json_string(value)
     }
 
     fn execute_http_request(
@@ -1851,70 +1668,8 @@ impl PlaybookRunner {
     }
 
     fn render_template(&self, template: &str, context: &ExecutionContext) -> Result<String> {
-        // Basic template rendering - replace {{ workload.var }}, {{ vars.var }}, {{ step_name.result }}
-        let mut result = template.to_string();
-
-        // First, handle templates with filters (e.g., {{ workload.var | lower }})
-        let filter_regex = regex::Regex::new(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\|\s*([a-zA-Z_]+)\s*\}\}").unwrap();
-        result = filter_regex
-            .replace_all(&result, |caps: &regex::Captures| {
-                let var_name = &caps[1];
-                let filter_name = &caps[2];
-
-                // Try to find the variable value
-                let value = context
-                    .variables
-                    .get(var_name)
-                    .or_else(|| context.variables.get(&format!("workload.{}", var_name)))
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-
-                // Apply the filter
-                match filter_name {
-                    "lower" => value.to_lowercase(),
-                    "upper" => value.to_uppercase(),
-                    "trim" => value.trim().to_string(),
-                    "default" => {
-                        if value.is_empty() {
-                            "".to_string()
-                        } else {
-                            value.to_string()
-                        }
-                    }
-                    _ => value.to_string(),
-                }
-            })
-            .to_string();
-
-        // Handle workload.* variables
-        for (key, value) in &context.variables {
-            if key.starts_with("workload.") {
-                let placeholder = format!("{{{{ {} }}}}", key);
-                result = result.replace(&placeholder, value);
-            }
-        }
-
-        // Handle vars.* variables
-        for (key, value) in &context.variables {
-            if key.starts_with("vars.") {
-                let placeholder = format!("{{{{ {} }}}}", key);
-                result = result.replace(&placeholder, value);
-            }
-        }
-
-        // Handle step_name.result variables
-        for (step_name, value) in &context.step_results {
-            let placeholder = format!("{{{{ {}.result }}}}", step_name);
-            result = result.replace(&placeholder, value);
-        }
-
-        // Also support direct {{ variable }} lookups
-        for (key, value) in &context.variables {
-            let placeholder = format!("{{{{ {} }}}}", key);
-            result = result.replace(&placeholder, value);
-        }
-
-        Ok(result.trim().to_string())
+        // R-1.1 PR-2b: body extracted to noetl_executor::template.
+        noetl_executor::template::render_template(template, &context.variables, &context.step_results)
     }
 
     /// Render template with access to JSON result via result.path notation
@@ -1924,87 +1679,16 @@ impl PlaybookRunner {
         context: &ExecutionContext,
         result_json: Option<&serde_json::Value>,
     ) -> Result<String> {
-        let mut output = template.to_string();
-
-        // Handle result.path expressions like {{ result.status }}, {{ result.body.name }}
-        let result_regex =
-            regex::Regex::new(r"\{\{\s*result\.([a-zA-Z0-9_.\[\]]+)\s*(?:\|\s*([a-zA-Z_]+(?:\([^)]*\))?))?\s*\}\}")
-                .unwrap();
-
-        output = result_regex
-            .replace_all(&output, |caps: &regex::Captures| {
-                let path = &caps[1];
-                let filter = caps.get(2).map(|m| m.as_str());
-
-                if let Some(json) = result_json {
-                    // Navigate the JSON path
-                    let value = self.get_json_path(json, path);
-                    let value_str = match &value {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Number(n) => n.to_string(),
-                        serde_json::Value::Bool(b) => b.to_string(),
-                        serde_json::Value::Null => "".to_string(),
-                        other => other.to_string(),
-                    };
-
-                    // Apply filter if present
-                    if let Some(f) = filter {
-                        if f == "default" || f.starts_with("default(") {
-                            if value_str.is_empty() || value_str == "null" {
-                                // Extract default value from default('value') or default("")
-                                if let Some(start) = f.find('(') {
-                                    let inner = &f[start + 1..f.len() - 1];
-                                    inner.trim_matches(|c| c == '\'' || c == '"').to_string()
-                                } else {
-                                    "".to_string()
-                                }
-                            } else {
-                                value_str
-                            }
-                        } else {
-                            value_str
-                        }
-                    } else {
-                        value_str
-                    }
-                } else {
-                    "".to_string()
-                }
-            })
-            .to_string();
-
-        // Then apply normal template rendering for other variables
-        self.render_template(&output, context)
+        // R-1.1 PR-2b: body extracted to noetl_executor::template.
+        noetl_executor::template::render_template_with_result(
+            template,
+            &context.variables,
+            &context.step_results,
+            result_json,
+        )
     }
 
     /// Get a value from JSON using a path like "status", "body.name", "items[0].id"
-    fn get_json_path(&self, json: &serde_json::Value, path: &str) -> serde_json::Value {
-        let parts: Vec<&str> = path.split('.').collect();
-        let mut current = json.clone();
-
-        for part in parts {
-            // Handle array index notation like items[0]
-            if part.contains('[') {
-                if let Some(bracket_pos) = part.find('[') {
-                    let key = &part[..bracket_pos];
-                    let idx_str = &part[bracket_pos + 1..part.len() - 1];
-
-                    if !key.is_empty() {
-                        current = current.get(key).cloned().unwrap_or(serde_json::Value::Null);
-                    }
-
-                    if let Ok(idx) = idx_str.parse::<usize>() {
-                        current = current.get(idx).cloned().unwrap_or(serde_json::Value::Null);
-                    }
-                }
-            } else {
-                current = current.get(part).cloned().unwrap_or(serde_json::Value::Null);
-            }
-        }
-
-        current
-    }
-
     fn resolve_playbook_path(&self, relative_path: &str) -> Result<PathBuf> {
         let base_dir = self
             .playbook_path
