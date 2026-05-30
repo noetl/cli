@@ -33,7 +33,13 @@ path = "src/main.rs"
 # noetl-executor::playbook so both the CLI and noetl-worker (R-1.3)
 # operate on the same data model.  See Appendix H of the global hybrid
 # cloud blueprint.
-noetl-executor = { path = "executor" }
+#
+# Both `path` and `version` are specified per Cargo's recommendation
+# for workspace members that are also published to crates.io: local
+# dev uses the path; `cargo publish` resolves against the crates.io
+# version constraint.  R-1.2 PR-1 set the executor's `publish = true`
+# so this dependency can be satisfied from crates.io.
+noetl-executor = { path = "executor", version = "0.1" }
 
 clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = [

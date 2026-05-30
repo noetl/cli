@@ -55,6 +55,59 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+
+      # ---- noetl-executor (workspace member) --------------------------
+      # R-1.2 PR-1: noetl-executor must publish before the noetl bin
+      # because the bin depends on it from crates.io.  The executor's
+      # version is independent of the bin's version -- it tracks the
+      # shared-execution-core crate's API, not the CLI's release
+      # cadence.
+      - name: Get noetl-executor version
+        id: executor_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXECUTOR_VERSION=$(grep -E '^version = ' executor/Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=${EXECUTOR_VERSION}" >> "${GITHUB_OUTPUT}"
+      - name: Check noetl-executor version on crates.io
+        id: executor_check
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.executor_version.outputs.version }}"
+          if curl -fsS -H "User-Agent: noetl-cli-release" "https://crates.io/api/v1/crates/noetl-executor/${VERSION}" >/dev/null; then
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Publish noetl-executor
+        if: ${{ env.CRATES_IO_TOKEN != '' && steps.executor_check.outputs.already_published != 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ env.CRATES_IO_TOKEN }}
+        shell: bash
+        run: |
+          set +e
+          OUTPUT="$(cargo publish -p noetl-executor 2>&1)"
+          STATUS=$?
+          set -e
+
+          echo "${OUTPUT}"
+
+          if [[ ${STATUS} -eq 0 ]]; then
+            exit 0
+          fi
+
+          if echo "${OUTPUT}" | grep -Eqi "already uploaded|already exists"; then
+            echo "noetl-executor version already published; continuing."
+            exit 0
+          fi
+
+          exit ${STATUS}
+      - name: Skip noetl-executor publish (already on crates.io)
+        if: ${{ steps.executor_check.outputs.already_published == 'true' }}
+        run: echo "noetl-executor version ${{ steps.executor_version.outputs.version }} already on crates.io; skipping."
+
+      # ---- noetl + ntl binaries (workspace root) ----------------------
       - name: Check crate version on crates.io
         id: crate_check
         shell: bash
@@ -62,7 +115,7 @@ jobs:
           set -euo pipefail
           CRATE_NAME=$(grep -E '^name = ' Cargo.toml | head -1 | cut -d'"' -f2)
           VERSION="${{ needs.verify-version.outputs.version }}"
-          if curl -fsS "https://crates.io/api/v1/crates/${CRATE_NAME}/${VERSION}" >/dev/null; then
+          if curl -fsS -H "User-Agent: noetl-cli-release" "https://crates.io/api/v1/crates/${CRATE_NAME}/${VERSION}" >/dev/null; then
             echo "already_published=true" >> "${GITHUB_OUTPUT}"
           else
             echo "already_published=false" >> "${GITHUB_OUTPUT}"
