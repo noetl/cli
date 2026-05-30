@@ -1,0 +1,32 @@
+[package]
+name = "noetl-executor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/noetl/cli"
+description = "NoETL shared execution core - drives playbook commands from local YAML or NATS"
+publish = false
+
+[dependencies]
+# Async runtime; matches the CLI's tokio surface so the shared crate
+# can run inside either the CLI or the worker binary.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+async-trait = "0.1"
+
+# Serialization for command + event envelopes.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Error handling.
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Time + UUID for event ids and timestamps.
+chrono = { version = "0.4", features = ["serde"] }
+
+# Tracing.
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

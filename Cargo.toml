@@ -1,3 +1,12 @@
+[workspace]
+# Cargo workspace.  The CLI binary remains the root package; `executor`
+# is a workspace member crate that hosts the shared execution core
+# (LocalPlaybookSource for the CLI's `noetl run --runtime local` path
+# and NatsCommandSource for noetl-worker — see Appendix H of the
+# global hybrid cloud blueprint, https://noetl.dev/docs/architecture/
+# noetl_global_hybrid_cloud_grid_distributed_architecture_blueprint).
+members = ["executor"]
+
 [package]
 name = "noetl"
 version = "2.17.1"
