@@ -1,18 +1,19 @@
 use anyhow::{Context, Result};
 use duckdb::{params, Connection};
-use rhai::{Array, Dynamic, Engine, Map, Scope};
 // `Deserialize` / `Serialize` derive macros come in through the
 // `pub use noetl_executor::playbook::*` block below; no direct use
-// in this file after R-1.1 PR-2b's extraction.
+// in this file after R-1.1 PR-2b's extraction.  The `rhai::*` /
+// `BufRead*` / `Arc` / `Mutex` imports left after R-1.1 PR-2c-3
+// (rhai deletion) and PR-2c-4 (shell deletion) are scrubbed below;
+// remaining tools still need them (PR-2c-5 onwards continues
+// trimming).
 #[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 use serde_yaml;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // YAML playbook types (R-1.1 PR-2a, see Appendix H of the global hybrid
@@ -775,24 +776,54 @@ impl PlaybookRunner {
     fn execute_tool(&self, tool: &Tool, context: &mut ExecutionContext) -> Result<Option<String>> {
         match tool {
             Tool::Shell { cmds } => {
-                let commands = match cmds {
-                    CmdsList::Single(cmd) => {
-                        // Split multi-line string into individual commands
-                        cmd.lines()
-                            .map(|s| s.trim())
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string())
-                            .collect::<Vec<_>>()
+                // R-1.1 PR-2c-4: dispatch through the noetl-tools
+                // bridge instead of CLI's inline execute_shell_command.
+                // Per-command bash invocations preserved; bridge
+                // returns the LAST command's stdout for the step
+                // result (matches existing CLI contract).
+                //
+                // Semantic note: noetl-tools' ShellTool collects
+                // stdout + stderr and returns them at completion.
+                // The CLI's pre-PR-2c-4 implementation streamed
+                // output to the terminal line-by-line.  Long-running
+                // shell steps no longer show real-time output;
+                // documented in the PR body and on the
+                // executor-crate-architecture wiki page.
+
+                // Render each command's template first so the bridge
+                // dispatch runs the rendered commands (not the raw
+                // templates).
+                let rendered_cmds = match cmds {
+                    CmdsList::Single(cmd) => CmdsList::Single(self.render_template(cmd, context)?),
+                    CmdsList::Multiple(c) => {
+                        let mut out = Vec::with_capacity(c.len());
+                        for raw in c {
+                            out.push(self.render_template(raw, context)?);
+                        }
+                        CmdsList::Multiple(out)
                     }
-                    CmdsList::Multiple(cmds) => cmds.clone(),
                 };
 
-                let mut last_output = String::new();
-                for command in commands {
-                    let rendered_command = self.render_template(&command, context)?;
-                    last_output = self.execute_shell_command(&rendered_command)?;
-                }
-                Ok(Some(last_output))
+                let rendered_tool = Tool::Shell {
+                    cmds: rendered_cmds,
+                };
+                let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
+                    execution_id: 0,
+                    step: "<cli-local>",
+                    variables: &context.variables,
+                    server_url: String::new(),
+                    worker_id: None,
+                    command_id: None,
+                };
+                let outcome = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                        noetl_executor::tools_bridge::dispatch_via_registry(
+                            &rendered_tool,
+                            &bridge_ctx,
+                        ),
+                    )
+                })?;
+                Ok(outcome.result)
             }
             Tool::Http {
                 method,
@@ -1027,84 +1058,6 @@ impl PlaybookRunner {
         }
     }
 
-    fn execute_shell_command(&self, command: &str) -> Result<String> {
-        if self.verbose {
-            eprintln!("   🔧 Executing: {}", command);
-        }
-
-        let mut binding = Command::new("bash");
-        let cmd = binding
-            .arg("-c")
-            .arg(command)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let cr = std::env::current_dir()?;
-
-        let cmd = cmd.current_dir(cr);
-
-        let mut child = cmd.spawn().context("Failed to spawn shell command")?;
-
-        // Clone the stdout and stderr to read in separate threads
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-
-        // Collect stdout lines into a shared buffer so we can:
-        //   (a) keep streaming each line to stderr as the command runs
-        //       (preserves the existing UX where shell output appears
-        //       interleaved with the runner's own progress prints)
-        //   (b) return the captured stdout as the step's result, so
-        //       PlaybookRunner can store it in step_results.<step>.
-        // Without (b), every kind:shell step's result was an empty
-        // string — which made bridge result envelopes useless for
-        // anything inspection-shaped (the agent bridge's primary use
-        // case). Shared Arc<Mutex<Vec<String>>> is the simplest way
-        // to thread-safely hand stdout lines back to the main thread
-        // after the reader joins.
-        let stdout_buf = Arc::new(Mutex::new(Vec::<String>::new()));
-        let stdout_buf_clone = stdout_buf.clone();
-        let stdout_thread = std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    eprintln!("{}", line);
-                    if let Ok(mut buf) = stdout_buf_clone.lock() {
-                        buf.push(line);
-                    }
-                }
-            }
-        });
-
-        let stderr_thread = std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    eprintln!("{}", line);
-                }
-            }
-        });
-
-        // Wait for both threads to finish
-        stdout_thread.join().unwrap();
-        stderr_thread.join().unwrap();
-
-        let status = child.wait()?;
-
-        if !status.success() {
-            anyhow::bail!("Command failed with exit code: {:?}", status.code());
-        }
-
-        // Reassemble the captured stdout. Lock should always succeed
-        // here because both threads have joined. Lines are joined
-        // with newlines (the reader stripped them); a trailing
-        // newline is appended only when the original output had one,
-        // which we approximate by appending an empty string and
-        // letting `.join("\n")` handle the rest.
-        let captured = stdout_buf.lock()
-            .map(|buf| buf.join("\n"))
-            .unwrap_or_default();
-        Ok(captured)
-    }
 
     /// Execute a Rhai script with access to HTTP, sleep, and utility functions
 
