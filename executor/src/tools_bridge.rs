@@ -560,6 +560,64 @@ fn reshape_duckdb_result(result: ToolResult) -> Result<BridgeOutcome> {
     })
 }
 
+/// Prepare the variable map for a sub-playbook invocation.
+///
+/// Used by the CLI's `Tool::Playbook` arm (which keeps owning the
+/// tree-walker recursion per § H.10).  The helper merges the
+/// parent context's variables with the sub-playbook's
+/// `input:` (DSL v2) or `args:` (DSL v1 legacy), each rendered
+/// against the parent context via the caller-supplied
+/// `render_template` closure and prefixed with `workload.` to
+/// match the sub-playbook's expected variable shape.
+///
+/// `input` takes precedence over `args` when both are present —
+/// same precedence the CLI's pre-PR-2c-7 inline implementation
+/// applied.
+///
+/// `parent_vars`, `args`, and `input` correspond directly to the
+/// caller's `context.variables`, `Tool::Playbook.args`, and
+/// `Tool::Playbook.input` fields.  The `render` closure receives
+/// each template string and is expected to return the rendered
+/// value (the CLI passes `|t| self.render_template(t, context)`).
+///
+/// Returning a fresh `HashMap` rather than mutating in place makes
+/// the helper easy to test and matches how the inline
+/// implementation operated.
+pub fn prepare_sub_playbook_vars<F>(
+    parent_vars: &HashMap<String, String>,
+    args: &HashMap<String, String>,
+    input: &HashMap<String, serde_yaml::Value>,
+    mut render: F,
+) -> Result<HashMap<String, String>>
+where
+    F: FnMut(&str) -> Result<String>,
+{
+    let mut sub_vars = parent_vars.clone();
+
+    if !input.is_empty() {
+        // DSL v2: tool.input takes precedence — render and prefix
+        // with `workload.`.
+        for (key, value_yaml) in input {
+            let template = match value_yaml {
+                serde_yaml::Value::String(s) => s.clone(),
+                serde_yaml::Value::Number(n) => n.to_string(),
+                serde_yaml::Value::Bool(b) => b.to_string(),
+                other => serde_yaml::to_string(other)?.trim().to_string(),
+            };
+            let value = render(&template)?;
+            sub_vars.insert(format!("workload.{}", key), value);
+        }
+    } else if !args.is_empty() {
+        // DSL v1 legacy: args field — prefix with `workload.`.
+        for (key, template) in args {
+            let value = render(template)?;
+            sub_vars.insert(format!("workload.{}", key), value);
+        }
+    }
+
+    Ok(sub_vars)
+}
+
 fn target_to_value(target: &crate::playbook::SinkTarget) -> serde_json::Value {
     match target {
         crate::playbook::SinkTarget::File { path } => {
@@ -801,8 +859,43 @@ pub async fn dispatch_via_registry(
             reshape_duckdb_result(result)
         }
         Tool::Playbook { .. } => {
-            // PR-2c-7 fills this in.
-            Ok(BridgeOutcome::empty())
+            // PR-2c-7: encodes the § H.10 architectural finding.
+            //
+            // `Tool::Playbook` is the recursion case of the CLI's
+            // tree walker — it loads a sub-playbook YAML and
+            // dispatches it through the same `PlaybookRunner` the
+            // top-level invocation uses.  `PlaybookRunner` lives in
+            // the CLI binary, not in `noetl-executor` or
+            // `noetl-tools`, so routing this tool through the
+            // bridge would require either:
+            //   - dragging the tree walker into `noetl-executor`,
+            //     re-opening the § H.10 question that re-scoped
+            //     the crate to a utilities-and-types crate; or
+            //   - adding a callback trait to `noetl-tools` that
+            //     delegates back to the CLI binary, an
+            //     infrastructure layer nothing else in the
+            //     registry uses.
+            //
+            // The architecturally honest answer is that this tool
+            // kind is NOT bridgeable.  The CLI's `Tool::Playbook`
+            // arm stays inline by design.  Bailing loudly here
+            // ensures any future code that tries to dispatch
+            // `Tool::Playbook` through the bridge gets an
+            // immediate, descriptive error instead of a silent
+            // empty outcome.
+            //
+            // Sub-playbook variable preparation (the input + args
+            // merging logic the CLI's call site performs before
+            // recursing) DOES move into the executor as
+            // [`prepare_sub_playbook_vars`] — that part is reusable
+            // and testable independent of the tree walker.
+            anyhow::bail!(
+                "Tool::Playbook is not bridgeable: sub-playbook \
+                 execution stays in the CLI's tree walker per \
+                 § H.10 of the Rust migration roadmap. Use \
+                 `PlaybookRunner::new(path).run()` directly from \
+                 the CLI."
+            );
         }
         Tool::Auth { .. } | Tool::Sink { .. } => {
             // PR-2c-8 fills these in; both need new tool kinds in
@@ -1170,6 +1263,136 @@ mod tests {
         assert!(outcome.result.is_none());
     }
 
+    // ---- PR-2c-7 — sub-playbook variable preparation ------------------
+
+    #[test]
+    fn prepare_sub_playbook_vars_passes_parent_vars_through() {
+        let parent: HashMap<String, String> =
+            [("vars.timeout".into(), "30".into())].into();
+        let sub = prepare_sub_playbook_vars(
+            &parent,
+            &HashMap::new(),
+            &HashMap::new(),
+            |t| Ok(t.to_string()),
+        )
+        .unwrap();
+        assert_eq!(sub.get("vars.timeout"), Some(&"30".to_string()));
+    }
+
+    #[test]
+    fn prepare_sub_playbook_vars_v2_input_takes_precedence_over_v1_args() {
+        let parent: HashMap<String, String> = HashMap::new();
+        let mut input = HashMap::new();
+        input.insert(
+            "region".into(),
+            serde_yaml::Value::String("us-east-1".into()),
+        );
+        let mut args = HashMap::new();
+        args.insert("region".into(), "us-west-1".into());
+
+        let sub = prepare_sub_playbook_vars(&parent, &args, &input, |t| {
+            Ok(t.to_string())
+        })
+        .unwrap();
+        // input wins; args ignored when input is non-empty.
+        assert_eq!(sub.get("workload.region"), Some(&"us-east-1".to_string()));
+    }
+
+    #[test]
+    fn prepare_sub_playbook_vars_v1_args_used_when_input_empty() {
+        let parent: HashMap<String, String> = HashMap::new();
+        let mut args = HashMap::new();
+        args.insert("tier".into(), "prod".into());
+        let sub = prepare_sub_playbook_vars(
+            &parent,
+            &args,
+            &HashMap::new(),
+            |t| Ok(t.to_string()),
+        )
+        .unwrap();
+        assert_eq!(sub.get("workload.tier"), Some(&"prod".to_string()));
+    }
+
+    #[test]
+    fn prepare_sub_playbook_vars_renders_input_templates() {
+        let parent: HashMap<String, String> = HashMap::new();
+        let mut input = HashMap::new();
+        input.insert(
+            "url".into(),
+            serde_yaml::Value::String("{{base}}/api".into()),
+        );
+        let sub = prepare_sub_playbook_vars(
+            &parent,
+            &HashMap::new(),
+            &input,
+            |t| Ok(t.replace("{{base}}", "https://example.com")),
+        )
+        .unwrap();
+        assert_eq!(
+            sub.get("workload.url"),
+            Some(&"https://example.com/api".to_string())
+        );
+    }
+
+    #[test]
+    fn prepare_sub_playbook_vars_coerces_yaml_numbers_and_bools() {
+        let parent: HashMap<String, String> = HashMap::new();
+        let mut input = HashMap::new();
+        input.insert(
+            "timeout".into(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(30)),
+        );
+        input.insert("verbose".into(), serde_yaml::Value::Bool(true));
+        let sub = prepare_sub_playbook_vars(
+            &parent,
+            &HashMap::new(),
+            &input,
+            |t| Ok(t.to_string()),
+        )
+        .unwrap();
+        assert_eq!(sub.get("workload.timeout"), Some(&"30".to_string()));
+        assert_eq!(sub.get("workload.verbose"), Some(&"true".to_string()));
+    }
+
+    #[test]
+    fn prepare_sub_playbook_vars_passes_through_when_both_empty() {
+        let parent: HashMap<String, String> = [(
+            "workload.region".into(),
+            "us-east-1".into(),
+        )]
+        .into();
+        let sub = prepare_sub_playbook_vars(
+            &parent,
+            &HashMap::new(),
+            &HashMap::new(),
+            |t| Ok(t.to_string()),
+        )
+        .unwrap();
+        // No input or args; parent vars come through unchanged.
+        assert_eq!(sub.len(), 1);
+        assert_eq!(
+            sub.get("workload.region"),
+            Some(&"us-east-1".to_string())
+        );
+    }
+
+    #[test]
+    fn prepare_sub_playbook_vars_render_error_propagates() {
+        let parent: HashMap<String, String> = HashMap::new();
+        let mut input = HashMap::new();
+        input.insert(
+            "bad".into(),
+            serde_yaml::Value::String("{{nope}}".into()),
+        );
+        let result = prepare_sub_playbook_vars(
+            &parent,
+            &HashMap::new(),
+            &input,
+            |_| Err(anyhow::anyhow!("render exploded")),
+        );
+        assert!(result.unwrap_err().to_string().contains("render exploded"));
+    }
+
     #[test]
     fn to_tools_config_rhai_carries_code() {
         let tool = Tool::Rhai {
@@ -1229,19 +1452,42 @@ mod tests {
     #[tokio::test]
     async fn dispatch_via_registry_returns_empty_for_unwired_kind() {
         // PR-2c-3 wired `Tool::Rhai`; PR-2c-4 wired `Tool::Shell`;
-        // PR-2c-5 wired `Tool::Http`; PR-2c-6 wired `Tool::DuckDb`.
-        // The remaining stub kinds (Playbook, Auth, Sink) still
-        // return empty.  Use `Tool::Playbook` here — PR-2c-7 fills
-        // it in next.
+        // PR-2c-5 wired `Tool::Http`; PR-2c-6 wired `Tool::DuckDb`;
+        // PR-2c-7 codified the § H.10 finding for `Tool::Playbook`
+        // (loud bail).  The remaining stub kinds (Auth, Sink) still
+        // return empty.  Use `Tool::Auth` here — PR-2c-8 wires it
+        // next.
         let vars = empty_vars();
         let bridge = bridge_ctx(&vars);
-        let tool = Tool::Playbook {
-            path: "non-existent.yaml".into(),
-            args: HashMap::new(),
-            input: HashMap::new(),
+        let tool = Tool::Auth {
+            provider: "adc".into(),
+            scopes: vec![],
+            project: None,
         };
         let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
         assert!(outcome.result.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_playbook_bails_with_h10_finding() {
+        // PR-2c-7: `Tool::Playbook` is not bridgeable.  Make sure
+        // the dispatch arm bails with a descriptive error rather
+        // than silently returning an empty outcome.
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Playbook {
+            path: "sub.yaml".into(),
+            args: HashMap::new(),
+            input: HashMap::new(),
+        };
+        let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Tool::Playbook")
+                && msg.contains("not bridgeable")
+                && msg.contains("§ H.10"),
+            "error message should explain the § H.10 finding: {msg}"
+        );
     }
 
     // ---- PR-2c-4 — Tool::Shell bridge integration --------------------
