@@ -48,7 +48,7 @@ use noetl_tools::registry::{Tool as ToolsRegistryTool, ToolConfig};
 use noetl_tools::result::{ToolResult, ToolStatus};
 use noetl_tools::tools::{DuckdbTool, HttpTool, RhaiTool, ShellTool};
 
-use crate::playbook::{AuthConfig as CliAuthConfig, CmdsList, Tool};
+use crate::playbook::{AuthConfig as CliAuthConfig, CmdsList, SinkFormat, Tool};
 
 // ---------------------------------------------------------------------------
 // Bridge outcome — what the dispatch returns back to the caller.
@@ -618,6 +618,128 @@ where
     Ok(sub_vars)
 }
 
+/// Apply post-resolution `Tool::Auth` side-effects to the CLI's
+/// execution context.
+///
+/// Returns the (key, value) pairs the caller should
+/// `set_variable` on its `ExecutionContext` so subsequent steps
+/// can reference `{{ auth.token }}` etc.  Wrapping this in a
+/// helper means future call sites (the worker, integration tests)
+/// don't have to re-derive which keys to set.
+///
+/// `project` is the **already-rendered** project string (the CLI
+/// renders templates against its own context before calling this
+/// helper), or `None` if the playbook didn't supply one.
+///
+/// Output order:
+///  - `auth.project` (only if `project` is `Some` and non-empty)
+///  - `auth.token`
+///  - `auth.provider`
+///
+/// Matching the CLI's pre-PR-2c-8 ordering — `auth.project` set
+/// first by the inline arm, then the token + provider after the
+/// `resolve_auth_to_bearer` call.
+pub fn auth_context_updates(
+    provider: &str,
+    token: &str,
+    project: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut updates: Vec<(String, String)> = Vec::with_capacity(3);
+    if let Some(p) = project {
+        if !p.is_empty() {
+            updates.push(("auth.project".to_string(), p.to_string()));
+        }
+    }
+    updates.push(("auth.token".to_string(), token.to_string()));
+    updates.push(("auth.provider".to_string(), provider.to_string()));
+    updates
+}
+
+/// Format the payload a `Tool::Sink` writes to its target.
+///
+/// Pure transformation lifted from the CLI's inline
+/// `Tool::Sink` arm.  The CLI passes the last step's result
+/// (already a JSON-serialized string in `ExecutionContext`) and
+/// the playbook's declared `format:` field; the helper returns
+/// the formatted string ready to write to file / DuckDB / GCS.
+///
+/// Format rules:
+/// - [`SinkFormat::Json`]: pass-through.  Same as CLI's
+///   pre-PR-2c-8 behaviour (the raw step-result string).
+/// - [`SinkFormat::Yaml`]: parse the input as JSON, then dump as
+///   YAML.  Falls back to pass-through if the input doesn't parse.
+/// - [`SinkFormat::Csv`]: see [`json_to_csv`] for the rules.
+pub fn format_sink_payload(format: &SinkFormat, raw: &str) -> Result<String> {
+    match format {
+        SinkFormat::Json => Ok(raw.to_string()),
+        SinkFormat::Yaml => {
+            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(raw) {
+                Ok(serde_yaml::to_string(&json_val).unwrap_or_else(|_| raw.to_string()))
+            } else {
+                Ok(raw.to_string())
+            }
+        }
+        SinkFormat::Csv => json_to_csv(raw),
+    }
+}
+
+/// Convert a JSON-array-of-objects string into CSV.
+///
+/// Pure helper lifted from the CLI's inline `json_to_csv`.  Returns
+/// the input unchanged if:
+/// - it doesn't parse as JSON,
+/// - it parses as a non-array value, or
+/// - it's an empty array, or
+/// - the first element isn't a JSON object.
+///
+/// Otherwise: emits a header row from the first object's keys
+/// followed by one row per array element.  Values are converted
+/// via `Display`; strings that contain `,` or `"` are
+/// double-quoted with embedded `"` doubled — minimal RFC 4180
+/// quoting, matching the CLI's pre-PR-2c-8 implementation.
+pub fn json_to_csv(json_str: &str) -> Result<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json_str).unwrap_or(serde_json::Value::String(json_str.to_string()));
+
+    match value {
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            let headers: Vec<String> = if let Some(serde_json::Value::Object(obj)) = arr.first() {
+                obj.keys().cloned().collect()
+            } else {
+                return Ok(json_str.to_string());
+            };
+
+            let mut csv = headers.join(",") + "\n";
+
+            for item in &arr {
+                if let serde_json::Value::Object(obj) = item {
+                    let row: Vec<String> = headers
+                        .iter()
+                        .map(|h| {
+                            obj.get(h)
+                                .map(|v| match v {
+                                    serde_json::Value::String(s) => {
+                                        if s.contains(',') || s.contains('"') {
+                                            format!("\"{}\"", s.replace('"', "\"\""))
+                                        } else {
+                                            s.clone()
+                                        }
+                                    }
+                                    _ => v.to_string(),
+                                })
+                                .unwrap_or_default()
+                        })
+                        .collect();
+                    csv.push_str(&row.join(","));
+                    csv.push('\n');
+                }
+            }
+            Ok(csv)
+        }
+        _ => Ok(json_str.to_string()),
+    }
+}
+
 fn target_to_value(target: &crate::playbook::SinkTarget) -> serde_json::Value {
     match target {
         crate::playbook::SinkTarget::File { path } => {
@@ -897,10 +1019,56 @@ pub async fn dispatch_via_registry(
                  the CLI."
             );
         }
-        Tool::Auth { .. } | Tool::Sink { .. } => {
-            // PR-2c-8 fills these in; both need new tool kinds in
-            // noetl-tools (or specific bridge-side handling).
-            Ok(BridgeOutcome::empty())
+        Tool::Auth { .. } => {
+            // PR-2c-8: `Tool::Auth` does not dispatch through the
+            // registry.  Token resolution lives in
+            // [`resolve_auth_to_bearer`] (added in PR-2c-5);
+            // applying the resulting token to the CLI's
+            // `ExecutionContext` lives in [`auth_context_updates`]
+            // (added in PR-2c-8).  Both are sync helpers the CLI
+            // calls directly without going through dispatch.  The
+            // arm bails so any future code path that tries to
+            // route a `Tool::Auth` through the registry gets a
+            // clear, descriptive error instead of silently
+            // returning an empty outcome.
+            anyhow::bail!(
+                "Tool::Auth is not bridge-dispatched: use \
+                 `resolve_auth_to_bearer` for token resolution and \
+                 `auth_context_updates` for applying the token to \
+                 the caller's execution context. See § H.10 of the \
+                 Rust migration roadmap."
+            );
+        }
+        Tool::Sink { .. } => {
+            // PR-2c-8: `Tool::Sink` does not dispatch through the
+            // registry either.  noetl-tools' `TransferTool` is
+            // database-to-database only (snowflake / postgres /
+            // duckdb / http source → snowflake / postgres /
+            // duckdb target); it has no file / GCS / object-store
+            // target.  The CLI's three sink targets (File,
+            // DuckDb, Gcs) each stay inline:
+            //
+            // - **File**: `fs::write` is a one-liner; the format
+            //   conversion (json / yaml / csv) DID extract into
+            //   [`format_sink_payload`] so it's reusable and
+            //   testable.
+            // - **DuckDb**: complex `INSERT INTO ... SELECT FROM
+            //   read_json_auto(...)` with a single-object fallback;
+            //   no `noetl-tools` equivalent.  Stays inline by
+            //   design (§ H.10-style finding).
+            // - **Gcs**: gsutil shellout.  A follow-up sub-PR
+            //   (tracked separately) will migrate this to the
+            //   `object_store` crate per § H.4 of Appendix H.
+            //
+            // The arm bails so misuse is loud.
+            anyhow::bail!(
+                "Tool::Sink is not bridge-dispatched: noetl-tools \
+                 has no file / GCS / object-store target. Use \
+                 `format_sink_payload` for format conversion; the \
+                 CLI's sink targets (file / duckdb / gcs) stay \
+                 inline per § H.10. GCS migration to `object_store` \
+                 is tracked as a separate follow-up."
+            );
         }
         Tool::Unsupported => {
             anyhow::bail!("unsupported tool kind");
@@ -1393,6 +1561,135 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("render exploded"));
     }
 
+    // ---- PR-2c-8 — Tool::Auth context updates -------------------------
+
+    #[test]
+    fn auth_context_updates_includes_token_and_provider() {
+        let updates = auth_context_updates("gcp", "tok-123", None);
+        let map: HashMap<String, String> = updates.into_iter().collect();
+        assert_eq!(map.get("auth.token"), Some(&"tok-123".to_string()));
+        assert_eq!(map.get("auth.provider"), Some(&"gcp".to_string()));
+        assert!(map.get("auth.project").is_none());
+    }
+
+    #[test]
+    fn auth_context_updates_includes_project_when_set() {
+        let updates = auth_context_updates("adc", "t", Some("my-project"));
+        let map: HashMap<String, String> = updates.into_iter().collect();
+        assert_eq!(
+            map.get("auth.project"),
+            Some(&"my-project".to_string())
+        );
+        assert_eq!(map.get("auth.token"), Some(&"t".to_string()));
+        assert_eq!(map.get("auth.provider"), Some(&"adc".to_string()));
+    }
+
+    #[test]
+    fn auth_context_updates_skips_empty_project() {
+        let updates = auth_context_updates("gcp", "t", Some(""));
+        let map: HashMap<String, String> = updates.into_iter().collect();
+        assert!(map.get("auth.project").is_none());
+    }
+
+    #[test]
+    fn auth_context_updates_orders_project_before_token() {
+        // The CLI's pre-PR-2c-8 inline arm set `auth.project` first,
+        // then the token + provider after the auth call.  Preserve
+        // that ordering so observable side-effects (logs, traces)
+        // match.
+        let updates = auth_context_updates("gcp", "t", Some("p"));
+        assert_eq!(updates[0].0, "auth.project");
+        assert_eq!(updates[1].0, "auth.token");
+        assert_eq!(updates[2].0, "auth.provider");
+    }
+
+    // ---- PR-2c-8 — Sink payload formatting + CSV ----------------------
+
+    #[test]
+    fn format_sink_payload_json_passthrough() {
+        let raw = r#"{"k": "v"}"#;
+        let out = format_sink_payload(&SinkFormat::Json, raw).unwrap();
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn format_sink_payload_yaml_converts_json_object() {
+        let raw = r#"{"k": "v"}"#;
+        let out = format_sink_payload(&SinkFormat::Yaml, raw).unwrap();
+        let reparsed: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(reparsed["k"].as_str(), Some("v"));
+    }
+
+    #[test]
+    fn format_sink_payload_yaml_falls_back_when_not_json() {
+        let raw = "not even close to json";
+        let out = format_sink_payload(&SinkFormat::Yaml, raw).unwrap();
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn format_sink_payload_csv_uses_json_to_csv() {
+        let raw = r#"[{"a":1,"b":2},{"a":3,"b":4}]"#;
+        let out = format_sink_payload(&SinkFormat::Csv, raw).unwrap();
+        assert!(out.contains("a,b\n") || out.contains("b,a\n"));
+        // Two data rows + header.
+        assert_eq!(out.lines().count(), 3);
+    }
+
+    #[test]
+    fn json_to_csv_returns_input_for_non_array() {
+        assert_eq!(json_to_csv("not json").unwrap(), "not json");
+        assert_eq!(json_to_csv(r#"{"k":"v"}"#).unwrap(), r#"{"k":"v"}"#);
+    }
+
+    #[test]
+    fn json_to_csv_returns_input_for_empty_array() {
+        assert_eq!(json_to_csv("[]").unwrap(), "[]");
+    }
+
+    #[test]
+    fn json_to_csv_emits_header_and_rows_for_object_array() {
+        let raw = r#"[{"name":"alice","age":30},{"name":"bob","age":25}]"#;
+        let csv = json_to_csv(raw).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 3);
+        // Header derived from first object's keys (order
+        // preserved by serde_json::Map).
+        assert!(lines[0] == "name,age" || lines[0] == "age,name");
+        // Each subsequent line should contain both values.
+        assert!(lines[1].contains("alice") && lines[1].contains("30"));
+        assert!(lines[2].contains("bob") && lines[2].contains("25"));
+    }
+
+    #[test]
+    fn json_to_csv_quotes_strings_with_commas() {
+        let raw = r#"[{"label":"a, b","n":1}]"#;
+        let csv = json_to_csv(raw).unwrap();
+        // Quoted field with the comma preserved inside.
+        assert!(csv.contains("\"a, b\""), "csv: {csv}");
+    }
+
+    #[test]
+    fn json_to_csv_doubles_embedded_quotes() {
+        let raw = r#"[{"q":"she said \"hi\""}]"#;
+        let csv = json_to_csv(raw).unwrap();
+        // RFC-4180-style: embedded `"` doubled, whole field quoted.
+        assert!(csv.contains("\"she said \"\"hi\"\"\""), "csv: {csv}");
+    }
+
+    #[test]
+    fn json_to_csv_missing_field_emits_empty() {
+        let raw = r#"[{"a":1,"b":2},{"a":3}]"#; // second row missing `b`
+        let csv = json_to_csv(raw).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        // The second data row should end with a trailing comma or
+        // have an empty field for `b`.
+        assert!(
+            lines[2].ends_with(",") || lines[2].contains(",,"),
+            "csv: {csv}"
+        );
+    }
+
     #[test]
     fn to_tools_config_rhai_carries_code() {
         let tool = Tool::Rhai {
@@ -1449,14 +1746,20 @@ mod tests {
         assert!(err.to_string().contains("connection refused"));
     }
 
+    // PR-2c-8 removed the
+    // `dispatch_via_registry_returns_empty_for_unwired_kind` test:
+    // every Tool variant now either dispatches through the registry
+    // (Rhai/Shell/Http/DuckDb), bails with a § H.10 finding
+    // (Playbook/Auth/Sink), or bails as unsupported.  See the
+    // per-variant dispatch tests for the wired kinds and the bail
+    // tests for Playbook/Auth/Sink/Unsupported.
+
     #[tokio::test]
-    async fn dispatch_via_registry_returns_empty_for_unwired_kind() {
-        // PR-2c-3 wired `Tool::Rhai`; PR-2c-4 wired `Tool::Shell`;
-        // PR-2c-5 wired `Tool::Http`; PR-2c-6 wired `Tool::DuckDb`;
-        // PR-2c-7 codified the § H.10 finding for `Tool::Playbook`
-        // (loud bail).  The remaining stub kinds (Auth, Sink) still
-        // return empty.  Use `Tool::Auth` here — PR-2c-8 wires it
-        // next.
+    async fn dispatch_auth_bails_pointing_at_helper() {
+        // PR-2c-8: Tool::Auth has no bridge dispatch path.  The
+        // bridge bails with a message pointing at
+        // `resolve_auth_to_bearer` + `auth_context_updates` so
+        // misuse is loud rather than silent.
         let vars = empty_vars();
         let bridge = bridge_ctx(&vars);
         let tool = Tool::Auth {
@@ -1464,8 +1767,36 @@ mod tests {
             scopes: vec![],
             project: None,
         };
-        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
-        assert!(outcome.result.is_none());
+        let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Tool::Auth")
+                && msg.contains("resolve_auth_to_bearer")
+                && msg.contains("auth_context_updates"),
+            "error should point at the helpers: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_sink_bails_pointing_at_helper() {
+        // PR-2c-8: Tool::Sink has no bridge dispatch path either —
+        // noetl-tools' TransferTool is database-to-database only.
+        // The bridge bails with a message pointing at
+        // `format_sink_payload` for format conversion.
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Sink {
+            target: crate::playbook::SinkTarget::File {
+                path: "/tmp/out.json".into(),
+            },
+            format: SinkFormat::Json,
+        };
+        let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Tool::Sink") && msg.contains("format_sink_payload"),
+            "error should point at the helper: {msg}"
+        );
     }
 
     #[tokio::test]
