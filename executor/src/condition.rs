@@ -161,6 +161,263 @@ pub fn evaluate_rhai_condition(
     }
 }
 
+// ===========================================================================
+// R-1.2 PR-2b — structured condition surface
+//
+// The CLI's `evaluate_condition` / `evaluate_rhai_condition` above work
+// on template-style **strings** with a flat `HashMap<String, String>`
+// variable map.  That matches how the CLI's tree walker calls into the
+// YAML's `when:` / `if:` blocks.
+//
+// The worker (R-1.2 PR-2c/d) receives commands from NATS that carry
+// **structured JSON** `case` / `when` blocks: each condition is a
+// `{ left, op, right }` triple, and the worker evaluates them against
+// `noetl_tools::context::ExecutionContext`.  The worker's pre-PR-2b
+// inline implementation lived in `repos/worker/src/executor/case_evaluator.rs`
+// (~437 LoC).  This module exposes the condition primitive so both
+// binaries agree on operator semantics.
+//
+// The wrapper struct + Case/CaseAction control-flow types stay in the
+// worker — they're tied to the worker's pull-loop dispatch semantics
+// per § H.10.
+// ===========================================================================
+
+use noetl_tools::context::ExecutionContext as ToolsExecutionContext;
+use noetl_tools::template::TemplateEngine;
+use serde::{Deserialize, Serialize};
+
+/// Operator for [`evaluate_structured_condition`].
+///
+/// Twelve variants matching the worker's pre-PR-2b inline operator
+/// set.  Wire format: lowercase snake-case (`"eq"`, `"not_in"`, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Operator {
+    /// Equality (`left == right`).
+    #[default]
+    Eq,
+    /// Inequality (`left != right`).
+    Ne,
+    /// Greater than (numeric).
+    Gt,
+    /// Less than (numeric).
+    Lt,
+    /// Greater than or equal (numeric).
+    Gte,
+    /// Less than or equal (numeric).
+    Lte,
+    /// `left` (string) contains `right` (string).
+    Contains,
+    /// `left` (string) matches `right` (regex).
+    Matches,
+    /// `left` is truthy (right ignored).
+    Truthy,
+    /// `left` is falsy (right ignored).
+    Falsy,
+    /// `left` is an element of `right` (array).
+    In,
+    /// `left` is NOT an element of `right` (array).
+    NotIn,
+}
+
+/// Structured condition the worker carries on its NATS command
+/// envelopes.  Lifted from the worker's pre-PR-2b
+/// `executor::case_evaluator::Condition`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Condition {
+    /// Left-hand side value or variable reference.  Resolved against
+    /// the context (variable lookup), against `result.<path>`
+    /// (JSON-path navigation of the tool result), or as a literal
+    /// string after template substitution.
+    pub left: String,
+
+    /// Operator.
+    #[serde(default)]
+    pub op: Operator,
+
+    /// Right-hand side value.  May contain templates;
+    /// [`evaluate_structured_condition`] renders them against the
+    /// supplied context before applying the operator.
+    #[serde(default)]
+    pub right: Option<serde_json::Value>,
+}
+
+/// Evaluate a structured condition against `ctx` + optional tool
+/// `result`.
+///
+/// Behaviour matches the worker's pre-PR-2b
+/// `CaseEvaluator::evaluate_condition`:
+///
+/// - `condition.left` resolution order:
+///   1. `"result"` → the supplied tool result (or `Null` if `None`).
+///   2. `"result.<path>"` → JSON path navigation of the result.
+///   3. Variable lookup via `ctx.get_variable(&left)`.
+///   4. Template rendering via `TemplateEngine::render`.
+///   5. Literal string.
+/// - `condition.right` is template-rendered against `ctx` before use.
+/// - Operator semantics match the worker's inline implementation.
+///
+/// This function is pure and synchronous — no I/O, no async.
+pub fn evaluate_structured_condition(
+    condition: &Condition,
+    ctx: &ToolsExecutionContext,
+    result: Option<&serde_json::Value>,
+) -> Result<bool> {
+    let template_engine = TemplateEngine::new();
+    let left = resolve_value(&condition.left, ctx, result, &template_engine)?;
+    let right = condition
+        .right
+        .as_ref()
+        .map(|r| resolve_json_value(r, ctx, &template_engine))
+        .transpose()?;
+
+    match condition.op {
+        Operator::Eq => Ok(left == right.unwrap_or(serde_json::Value::Null)),
+        Operator::Ne => Ok(left != right.unwrap_or(serde_json::Value::Null)),
+        Operator::Gt => compare_numeric(&left, &right, |a, b| a > b),
+        Operator::Lt => compare_numeric(&left, &right, |a, b| a < b),
+        Operator::Gte => compare_numeric(&left, &right, |a, b| a >= b),
+        Operator::Lte => compare_numeric(&left, &right, |a, b| a <= b),
+        Operator::Contains => {
+            let left_str = left.as_str().unwrap_or("");
+            let right_str = right.as_ref().and_then(|r| r.as_str()).unwrap_or("");
+            Ok(left_str.contains(right_str))
+        }
+        Operator::Matches => {
+            let left_str = left.as_str().unwrap_or("");
+            let pattern = right.as_ref().and_then(|r| r.as_str()).unwrap_or("");
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
+            Ok(re.is_match(left_str))
+        }
+        Operator::Truthy => Ok(is_truthy(&left)),
+        Operator::Falsy => Ok(!is_truthy(&left)),
+        Operator::In => {
+            if let Some(serde_json::Value::Array(arr)) = &right {
+                Ok(arr.contains(&left))
+            } else {
+                Ok(false)
+            }
+        }
+        Operator::NotIn => {
+            if let Some(serde_json::Value::Array(arr)) = &right {
+                Ok(!arr.contains(&left))
+            } else {
+                Ok(true)
+            }
+        }
+    }
+}
+
+/// Resolve a value reference to a JSON value.  See
+/// [`evaluate_structured_condition`] for the resolution order.
+fn resolve_value(
+    value: &str,
+    ctx: &ToolsExecutionContext,
+    result: Option<&serde_json::Value>,
+    template_engine: &TemplateEngine,
+) -> Result<serde_json::Value> {
+    if let Some(path) = value.strip_prefix("result.") {
+        if let Some(res) = result {
+            return Ok(json_path(res, path)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
+        }
+        return Ok(serde_json::Value::Null);
+    }
+
+    if value == "result" {
+        return Ok(result.cloned().unwrap_or(serde_json::Value::Null));
+    }
+
+    if let Some(var) = ctx.get_variable(value) {
+        return Ok(var.clone());
+    }
+
+    if TemplateEngine::is_template(value) {
+        let template_ctx = ctx.to_template_context();
+        let rendered = template_engine
+            .render(value, &template_ctx)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        return Ok(serde_json::from_str(&rendered).unwrap_or(serde_json::json!(rendered)));
+    }
+
+    Ok(serde_json::json!(value))
+}
+
+/// Resolve a JSON value that might contain templates.
+fn resolve_json_value(
+    value: &serde_json::Value,
+    ctx: &ToolsExecutionContext,
+    template_engine: &TemplateEngine,
+) -> Result<serde_json::Value> {
+    let template_ctx = ctx.to_template_context();
+    template_engine
+        .render_value(value, &template_ctx)
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Navigate a JSON path (dot-delimited keys + optional numeric
+/// indices for arrays).
+fn json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for segment in path.split('.') {
+        match current {
+            serde_json::Value::Object(obj) => {
+                current = obj.get(segment)?;
+            }
+            serde_json::Value::Array(arr) => {
+                let idx: usize = segment.parse().ok()?;
+                current = arr.get(idx)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+/// Compare two JSON values numerically.
+fn compare_numeric<F>(
+    left: &serde_json::Value,
+    right: &Option<serde_json::Value>,
+    cmp: F,
+) -> Result<bool>
+where
+    F: Fn(f64, f64) -> bool,
+{
+    let left_num = value_to_f64(left)?;
+    let right_num = value_to_f64(right.as_ref().unwrap_or(&serde_json::Value::Null))?;
+    Ok(cmp(left_num, right_num))
+}
+
+/// Check if a JSON value is truthy (empty / zero / false → falsy).
+fn is_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Array(a) => !a.is_empty(),
+        serde_json::Value::Object(o) => !o.is_empty(),
+    }
+}
+
+/// Convert a JSON value to f64.  Booleans become 0.0 / 1.0; nulls
+/// become 0.0; strings parse via `FromStr`.
+fn value_to_f64(value: &serde_json::Value) -> Result<f64> {
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .ok_or_else(|| anyhow::anyhow!("Invalid number")),
+        serde_json::Value::String(s) => s
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Cannot parse '{s}' as number")),
+        serde_json::Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
+        serde_json::Value::Null => Ok(0.0),
+        _ => Err(anyhow::anyhow!("Cannot convert {value:?} to number")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +470,199 @@ mod tests {
             &v
         )
         .unwrap());
+    }
+
+    // ---- R-1.2 PR-2b — structured condition tests --------------------
+
+    fn tools_ctx_with(pairs: &[(&str, serde_json::Value)]) -> ToolsExecutionContext {
+        let mut ctx = ToolsExecutionContext::default();
+        for (k, v) in pairs {
+            ctx.set_variable(*k, v.clone());
+        }
+        ctx
+    }
+
+    #[test]
+    fn structured_eq_against_variable() {
+        let ctx = tools_ctx_with(&[("status", serde_json::json!("success"))]);
+        let cond = Condition {
+            left: "status".into(),
+            op: Operator::Eq,
+            right: Some(serde_json::json!("success")),
+        };
+        assert!(evaluate_structured_condition(&cond, &ctx, None).unwrap());
+        let cond_fail = Condition {
+            left: "status".into(),
+            op: Operator::Eq,
+            right: Some(serde_json::json!("failed")),
+        };
+        assert!(!evaluate_structured_condition(&cond_fail, &ctx, None).unwrap());
+    }
+
+    #[test]
+    fn structured_ne_inverts_eq() {
+        let ctx = tools_ctx_with(&[("status", serde_json::json!("ok"))]);
+        let cond = Condition {
+            left: "status".into(),
+            op: Operator::Ne,
+            right: Some(serde_json::json!("error")),
+        };
+        assert!(evaluate_structured_condition(&cond, &ctx, None).unwrap());
+    }
+
+    #[test]
+    fn structured_numeric_comparisons() {
+        let ctx = tools_ctx_with(&[("count", serde_json::json!(10))]);
+        for (op, rhs, expected) in [
+            (Operator::Gt, 5, true),
+            (Operator::Gt, 10, false),
+            (Operator::Gte, 10, true),
+            (Operator::Lt, 100, true),
+            (Operator::Lte, 10, true),
+        ] {
+            let cond = Condition {
+                left: "count".into(),
+                op,
+                right: Some(serde_json::json!(rhs)),
+            };
+            assert_eq!(
+                evaluate_structured_condition(&cond, &ctx, None).unwrap(),
+                expected,
+                "op {:?} vs {} expected {}",
+                cond.op,
+                rhs,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn structured_contains_matches_strings() {
+        let ctx = tools_ctx_with(&[("msg", serde_json::json!("hello world"))]);
+        let cond = Condition {
+            left: "msg".into(),
+            op: Operator::Contains,
+            right: Some(serde_json::json!("world")),
+        };
+        assert!(evaluate_structured_condition(&cond, &ctx, None).unwrap());
+        let cond_no = Condition {
+            left: "msg".into(),
+            op: Operator::Contains,
+            right: Some(serde_json::json!("zzz")),
+        };
+        assert!(!evaluate_structured_condition(&cond_no, &ctx, None).unwrap());
+    }
+
+    #[test]
+    fn structured_matches_regex() {
+        let ctx = tools_ctx_with(&[("user", serde_json::json!("alice@example.com"))]);
+        let cond = Condition {
+            left: "user".into(),
+            op: Operator::Matches,
+            right: Some(serde_json::json!(r"^\w+@\w+\.com$")),
+        };
+        assert!(evaluate_structured_condition(&cond, &ctx, None).unwrap());
+    }
+
+    #[test]
+    fn structured_truthy_falsy() {
+        let ctx = tools_ctx_with(&[
+            ("on", serde_json::json!(true)),
+            ("zero", serde_json::json!(0)),
+            ("empty", serde_json::json!("")),
+            ("nonempty", serde_json::json!("x")),
+        ]);
+        let truthy_on = Condition {
+            left: "on".into(),
+            op: Operator::Truthy,
+            right: None,
+        };
+        assert!(evaluate_structured_condition(&truthy_on, &ctx, None).unwrap());
+        let falsy_zero = Condition {
+            left: "zero".into(),
+            op: Operator::Falsy,
+            right: None,
+        };
+        assert!(evaluate_structured_condition(&falsy_zero, &ctx, None).unwrap());
+        let falsy_empty = Condition {
+            left: "empty".into(),
+            op: Operator::Falsy,
+            right: None,
+        };
+        assert!(evaluate_structured_condition(&falsy_empty, &ctx, None).unwrap());
+        let truthy_x = Condition {
+            left: "nonempty".into(),
+            op: Operator::Truthy,
+            right: None,
+        };
+        assert!(evaluate_structured_condition(&truthy_x, &ctx, None).unwrap());
+    }
+
+    #[test]
+    fn structured_in_and_not_in() {
+        let ctx = tools_ctx_with(&[("role", serde_json::json!("admin"))]);
+        let in_cond = Condition {
+            left: "role".into(),
+            op: Operator::In,
+            right: Some(serde_json::json!(["admin", "ops", "dev"])),
+        };
+        assert!(evaluate_structured_condition(&in_cond, &ctx, None).unwrap());
+        let not_in_cond = Condition {
+            left: "role".into(),
+            op: Operator::NotIn,
+            right: Some(serde_json::json!(["guest", "viewer"])),
+        };
+        assert!(evaluate_structured_condition(&not_in_cond, &ctx, None).unwrap());
+    }
+
+    #[test]
+    fn structured_left_resolves_result_path() {
+        let ctx = ToolsExecutionContext::default();
+        let result = serde_json::json!({
+            "status": "ok",
+            "data": {"count": 42}
+        });
+        let cond = Condition {
+            left: "result.data.count".into(),
+            op: Operator::Eq,
+            right: Some(serde_json::json!(42)),
+        };
+        assert!(evaluate_structured_condition(&cond, &ctx, Some(&result)).unwrap());
+    }
+
+    #[test]
+    fn structured_left_resolves_bare_result() {
+        let ctx = ToolsExecutionContext::default();
+        let result = serde_json::json!("hello");
+        let cond = Condition {
+            left: "result".into(),
+            op: Operator::Eq,
+            right: Some(serde_json::json!("hello")),
+        };
+        assert!(evaluate_structured_condition(&cond, &ctx, Some(&result)).unwrap());
+    }
+
+    #[test]
+    fn structured_operator_serializes_snake_case() {
+        let cond = Condition {
+            left: "x".into(),
+            op: Operator::NotIn,
+            right: None,
+        };
+        let s = serde_json::to_string(&cond).unwrap();
+        assert!(s.contains("\"not_in\""), "got: {s}");
+        let parsed: Condition = serde_json::from_str(&s).unwrap();
+        assert!(matches!(parsed.op, Operator::NotIn));
+    }
+
+    #[test]
+    fn structured_in_returns_false_when_right_not_array() {
+        let ctx = tools_ctx_with(&[("x", serde_json::json!(1))]);
+        let cond = Condition {
+            left: "x".into(),
+            op: Operator::In,
+            right: Some(serde_json::json!("not an array")),
+        };
+        assert!(!evaluate_structured_condition(&cond, &ctx, None).unwrap());
     }
 }
