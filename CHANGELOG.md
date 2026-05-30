@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.24.0](https://github.com/noetl/cli/compare/v2.23.0...v2.24.0) (2026-05-30)
+
+### Features
+
+* **executor:** extract Tool::Auth + Tool::Sink helpers via bridge (R-1.1 PR-2c-8) ([a58202c](https://github.com/noetl/cli/commit/a58202c2e83639a68c4d3914b856bcb32b9a8ec5)), closes [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30) [noetl/cli#19](https://github.com/noetl/cli/issues/19)
+
 ## [2.23.0](https://github.com/noetl/cli/compare/v2.22.0...v2.23.0) (2026-05-30)
 
 ### Features
