@@ -1552,6 +1552,7 @@ dependencies = [
  "dotenvy",
  "duckdb",
  "nix",
+ "noetl-executor",
  "rand 0.8.6",
  "ratatui",
  "regex",
