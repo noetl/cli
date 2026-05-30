@@ -45,7 +45,7 @@ use anyhow::Result;
 use noetl_tools::context::ExecutionContext as ToolsExecutionContext;
 use noetl_tools::registry::{Tool as ToolsRegistryTool, ToolConfig};
 use noetl_tools::result::{ToolResult, ToolStatus};
-use noetl_tools::tools::RhaiTool;
+use noetl_tools::tools::{RhaiTool, ShellTool};
 
 use crate::playbook::{CmdsList, Tool};
 
@@ -218,12 +218,30 @@ pub fn to_tools_context_for_rhai(bridge: &BridgeContext) -> ToolsExecutionContex
 /// current behaviour of emitting an error.
 pub fn to_tools_config(tool: &Tool) -> ToolConfig {
     let (kind, config) = match tool {
-        Tool::Shell { cmds } => (
-            "shell",
-            serde_json::json!({
-                "cmds": cmds_to_value(cmds),
-            }),
-        ),
+        Tool::Shell { cmds } => {
+            // noetl-tools::ShellConfig expects a single `command`
+            // string.  CLI's CmdsList::Multiple becomes a newline-
+            // joined block (one bash invocation with a multi-line
+            // script); CmdsList::Single becomes the string verbatim.
+            //
+            // Important: this is the per-call ToolConfig shape.  The
+            // Tool::Shell arm of `dispatch_via_registry` does NOT use
+            // this helper because the CLI's runtime semantics require
+            // one bash invocation PER command (independent process,
+            // no shared cwd/env state) — the dispatch arm loops and
+            // builds per-command ToolConfigs via [`shell_command_config`].
+            (
+                "shell",
+                serde_json::json!({
+                    "command": match cmds {
+                        CmdsList::Single(s) => s.clone(),
+                        CmdsList::Multiple(v) => v.join("\n"),
+                    },
+                    "shell": "bash",
+                    "capture": true,
+                }),
+            )
+        }
         Tool::Http {
             method,
             url,
@@ -291,12 +309,21 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
     }
 }
 
-fn cmds_to_value(cmds: &CmdsList) -> serde_json::Value {
-    match cmds {
-        CmdsList::Single(s) => serde_json::Value::String(s.clone()),
-        CmdsList::Multiple(v) => {
-            serde_json::Value::Array(v.iter().map(|s| serde_json::Value::String(s.clone())).collect())
-        }
+/// Build a single-command ToolConfig for the shell tool.  Used by
+/// the `Tool::Shell` dispatch arm to preserve the CLI's per-command
+/// bash-invocation semantics (independent process, no shared
+/// cwd/env state across commands).
+fn shell_command_config(command: &str) -> ToolConfig {
+    ToolConfig {
+        kind: "shell".to_string(),
+        config: serde_json::json!({
+            "command": command,
+            "shell": "bash",
+            "capture": true,
+        }),
+        timeout: None,
+        retry: None,
+        auth: None,
     }
 }
 
@@ -385,9 +412,73 @@ pub async fn dispatch_via_registry(
                 .map_err(|e| anyhow::anyhow!("rhai dispatch failed: {}", e))?;
             from_tools_result(result)
         }
-        Tool::Shell { .. } => {
-            // PR-2c-4 fills this in.
-            Ok(BridgeOutcome::empty())
+        Tool::Shell { cmds } => {
+            // PR-2c-4: dispatch through noetl_tools::ShellTool.
+            //
+            // CLI semantics preserved:
+            // - CmdsList::Single splits on newlines into individual
+            //   commands; each runs in its own bash invocation.
+            // - CmdsList::Multiple runs each element in its own
+            //   bash invocation in order.
+            // - Bails on first non-zero exit (CLI's existing
+            //   `anyhow::bail!("Command failed ...")`).
+            // - Returns the last command's stdout as the step result.
+            //
+            // Note vs CLI: noetl-tools' ShellTool collects stdout +
+            // stderr and returns them in the ToolResult at the end
+            // of execution.  The CLI's inline implementation
+            // streamed output to the terminal line-by-line as the
+            // command ran.  For long-running shell steps users no
+            // longer see real-time output.  Documented in the PR
+            // body and on the executor-crate-architecture wiki
+            // page's semantic-divergence table.
+            let commands: Vec<String> = match cmds {
+                CmdsList::Single(cmd) => cmd
+                    .lines()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect(),
+                CmdsList::Multiple(c) => c.clone(),
+            };
+
+            let shell_tool = ShellTool::new();
+            let ctx = to_tools_context(bridge);
+            let mut last_outcome = BridgeOutcome::empty();
+            for command in commands {
+                let config = shell_command_config(&command);
+                let result = shell_tool
+                    .execute(&config, &ctx)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("shell dispatch failed: {}", e))?;
+
+                // noetl-tools' shell tool packs the result into
+                // ToolResult.data as a typed JSON object:
+                //   {"exit_code": i32, "stdout": String, "stderr": String}
+                // For the CLI's step-result contract (a single
+                // string = the command's stdout), we unwrap stdout
+                // directly here.  `from_tools_result` would
+                // otherwise stringify the whole JSON dict.
+                if result.status != ToolStatus::Success {
+                    let exit_code = result
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("exit_code"))
+                        .and_then(|v| v.as_i64());
+                    anyhow::bail!(
+                        "Command failed with exit code: {:?}",
+                        exit_code
+                    );
+                }
+                let stdout = result
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("stdout"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim_end_matches('\n').to_string());
+                last_outcome = BridgeOutcome { result: stdout };
+            }
+            Ok(last_outcome)
         }
         Tool::Http { .. } => {
             // PR-2c-5 fills this in.
@@ -457,21 +548,32 @@ mod tests {
         };
         let cfg = to_tools_config(&tool);
         assert_eq!(cfg.kind, "shell");
-        assert_eq!(cfg.config["cmds"], serde_json::json!("ls -la"));
+        assert_eq!(cfg.config["command"], "ls -la");
+        assert_eq!(cfg.config["shell"], "bash");
+        assert_eq!(cfg.config["capture"], true);
         assert!(cfg.timeout.is_none());
     }
 
     #[test]
-    fn to_tools_config_shell_multiple_cmds() {
+    fn to_tools_config_shell_multiple_cmds_joins_with_newlines() {
+        // The to_tools_config helper produces a SINGLE-command shape
+        // by joining; the dispatch arm instead loops per command to
+        // preserve the CLI's "fresh bash per command" semantics.
         let tool = Tool::Shell {
             cmds: CmdsList::Multiple(vec!["echo one".into(), "echo two".into()]),
         };
         let cfg = to_tools_config(&tool);
         assert_eq!(cfg.kind, "shell");
-        assert_eq!(
-            cfg.config["cmds"],
-            serde_json::json!(["echo one", "echo two"])
-        );
+        assert_eq!(cfg.config["command"], "echo one\necho two");
+    }
+
+    #[test]
+    fn shell_command_config_emits_per_cmd_shape() {
+        let cfg = shell_command_config("echo hi");
+        assert_eq!(cfg.kind, "shell");
+        assert_eq!(cfg.config["command"], "echo hi");
+        assert_eq!(cfg.config["shell"], "bash");
+        assert_eq!(cfg.config["capture"], true);
     }
 
     #[test]
@@ -549,16 +651,91 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_via_registry_returns_empty_for_unwired_kind() {
-        // PR-2c-3 wired `Tool::Rhai`.  This test still exercises the
-        // "unwired stub returns empty" branch using `Tool::Shell`,
-        // which PR-2c-4 fills in next.
+        // PR-2c-3 wired `Tool::Rhai`; PR-2c-4 wired `Tool::Shell`.
+        // The remaining stub kinds (Http, DuckDb, Playbook, Auth,
+        // Sink) still return empty.  Use `Tool::Http` here — PR-2c-5
+        // fills it in next.
         let vars = empty_vars();
         let bridge = bridge_ctx(&vars);
-        let tool = Tool::Shell {
-            cmds: CmdsList::Single("echo hi".into()),
+        let tool = Tool::Http {
+            method: "GET".into(),
+            url: "https://example.com".into(),
+            headers: HashMap::new(),
+            params: HashMap::new(),
+            body: None,
+            auth: None,
         };
         let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
         assert!(outcome.result.is_none());
+    }
+
+    // ---- PR-2c-4 — Tool::Shell bridge integration --------------------
+
+    #[tokio::test]
+    async fn dispatch_shell_single_command_returns_stdout() {
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Shell {
+            cmds: CmdsList::Single("echo bridged".into()),
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        // The bridge trims the trailing newline that `echo` adds so
+        // the step result matches the CLI's pre-PR-2c-4 contract
+        // (per-line stdout joined without trailing whitespace).
+        assert_eq!(outcome.result, Some("bridged".into()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_shell_multiple_returns_last_command_stdout() {
+        // CLI semantic: with CmdsList::Multiple, each command runs
+        // in its own bash invocation; the step result is the last
+        // command's stdout.
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Shell {
+            cmds: CmdsList::Multiple(vec![
+                "echo first".into(),
+                "echo second".into(),
+                "echo third".into(),
+            ]),
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        assert_eq!(outcome.result, Some("third".into()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_shell_failure_propagates_error() {
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Shell {
+            cmds: CmdsList::Single("exit 7".into()),
+        };
+        let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
+        // noetl-tools' shell tool reports non-zero exit codes by
+        // surfacing ToolResult.status == Error or by returning
+        // result with exit_code set; either way the bridge's
+        // from_tools_result converts that into an anyhow::Error.
+        assert!(
+            err.to_string().contains("shell")
+                || err.to_string().contains("exit")
+                || err.to_string().contains("failed"),
+            "error message: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_shell_single_with_newlines_runs_each_line_independently() {
+        // CLI semantic: CmdsList::Single splits on newlines into
+        // separate bash invocations.  This means `cd /tmp` on one
+        // line doesn't change the cwd of the next line.
+        let vars = empty_vars();
+        let bridge = bridge_ctx(&vars);
+        let tool = Tool::Shell {
+            cmds: CmdsList::Single("echo first_line\necho second_line".into()),
+        };
+        let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+        assert_eq!(outcome.result, Some("second_line".into()));
     }
 
     #[tokio::test]
