@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.19.0](https://github.com/noetl/cli/compare/v2.18.0...v2.19.0) (2026-05-30)
+
+### Features
+
+* **executor:** wire Tool::Rhai through noetl-tools bridge (R-1.1 PR-2c-3) ([fe07488](https://github.com/noetl/cli/commit/fe074880c29330baf43ac007b1a1b02626006500))
+
 ## [2.18.0](https://github.com/noetl/cli/compare/v2.17.1...v2.18.0) (2026-05-30)
 
 ### Features
