@@ -35,6 +35,13 @@
 //!   own crates).
 //! - [`events`] — `ExecutorEvent`, `EventSink` trait, `NoopSink`,
 //!   `EventEmitter` helper (R-1.1 PR-1).
+//! - [`tools_bridge`] — adapter layer onto the `noetl-tools` registry
+//!   (R-1.1 PR-2c-1 onwards).  Wires `Tool::Rhai` / `Tool::Shell` /
+//!   `Tool::Http` / `Tool::DuckDb` through the registry; supplies pure
+//!   helpers (`prepare_sub_playbook_vars`, `resolve_auth_to_bearer`,
+//!   `auth_context_updates`, `format_sink_payload`, `json_to_csv`)
+//!   for the inline tool kinds (`Tool::Playbook` / `Tool::Auth` /
+//!   `Tool::Sink`) that stay in the CLI by design per § H.10.
 //! - [`worker`] — worker-only abstractions: [`worker::source`]
 //!   contains the `Command` struct + `CommandSource` trait.  The CLI
 //!   does NOT consume these; they exist for the worker's NATS pull
