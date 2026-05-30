@@ -908,6 +908,21 @@ impl PlaybookRunner {
                 Ok(outcome.result)
             }
             Tool::Playbook { path, args, input } => {
+                // R-1.1 PR-2c-7: per § H.10, `Tool::Playbook` is
+                // the recursion case of the CLI's tree walker —
+                // the sub-playbook is dispatched through another
+                // `PlaybookRunner` in-process, not through the
+                // noetl-tools registry.  The bridge dispatch arm
+                // bails loudly if anyone tries to route this kind
+                // through it.
+                //
+                // The variable-preparation step (merging the
+                // parent context with DSL v2 `input:` or DSL v1
+                // `args:`, each rendered against the parent and
+                // prefixed with `workload.`) DID move into the
+                // executor as
+                // `noetl_executor::tools_bridge::prepare_sub_playbook_vars`
+                // so future callers (and unit tests) can reuse it.
                 let rendered_path = self.render_template(path, context)?;
                 let playbook_path = self.resolve_playbook_path(&rendered_path)?;
 
@@ -915,29 +930,12 @@ impl PlaybookRunner {
                     eprintln!("   Executing sub-playbook: {}", playbook_path.display());
                 }
 
-                // DSL v2: Merge context variables with input (preferred) or args (legacy)
-                let mut sub_vars = context.variables.clone();
-
-                // Use input if present (DSL v2), otherwise fall back to args (DSL v1)
-                if !input.is_empty() {
-                    // DSL v2: tool.input takes precedence - render and prefix with workload.
-                    for (key, value_yaml) in input {
-                        let template = match value_yaml {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
-                            serde_yaml::Value::Bool(b) => b.to_string(),
-                            other => serde_yaml::to_string(other)?.trim().to_string(),
-                        };
-                        let value = self.render_template(&template, context)?;
-                        sub_vars.insert(format!("workload.{}", key), value);
-                    }
-                } else if !args.is_empty() {
-                    // DSL v1 legacy: args field - prefix with workload.
-                    for (key, template) in args {
-                        let value = self.render_template(template, context)?;
-                        sub_vars.insert(format!("workload.{}", key), value);
-                    }
-                }
+                let sub_vars = noetl_executor::tools_bridge::prepare_sub_playbook_vars(
+                    &context.variables,
+                    args,
+                    input,
+                    |t| self.render_template(t, context),
+                )?;
 
                 // Propagate quiet to sub-playbooks so they're consistently
                 // silent; deliberately do NOT propagate emit_json — we
