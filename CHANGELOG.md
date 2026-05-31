@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.2.0](https://github.com/noetl/cli/compare/v4.1.0...v4.2.0) (2026-05-31)
+
+### Features
+
+* **workspace:** add noetl-arrow-cache crate (R-2.1) ([ca5559a](https://github.com/noetl/cli/commit/ca5559a4bf44d3efa0cdd595d64f5b7946d76377)), closes [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30)
+
 ## [4.1.0](https://github.com/noetl/cli/compare/v4.0.0...v4.1.0) (2026-05-31)
 
 ### Features
