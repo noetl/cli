@@ -2,6 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.0.0](https://github.com/noetl/cli/compare/v3.1.0...v4.0.0) (2026-05-31)
+
+### ⚠ BREAKING CHANGES
+
+* **executor:** to the public trait + struct → 0.2.1 → **0.3.0**
+(0.x semver convention: minor bump for breaking).  Bin's
+`noetl-executor = { ..., version = "0.3" }` updated to match.
+
+Safe to break: no production consumer imports this module today.
+noetl-worker 1.1.2 (currently on crates.io) doesn't use the trait;
+PR-2d-2 in the worker repo will be its first adoption against the
+new 0.3.0 surface.
+
+## Tests
+
+8 new unit tests including a reusable `MockSource` implementation
+that records ack/nack calls in an `Arc<Mutex<Vec<MockAck>>>` for
+test assertions:
+
+- `empty_source_returns_none`
+- `next_yields_in_order_and_increments_handles`
+- `ack_and_nack_recorded_in_order`
+- `already_claimed_outcome_carries_handle`
+- `retry_later_outcome_carries_error_message`
+- `failed_outcome_carries_error_message`
+- `command_round_trips_through_serde_with_defaults`
+- `command_round_trips_through_serde_with_full_fields`
+
+The `MockSource` itself is testability scaffold that worker tests
+in PR-2d-2 can lift verbatim.
+
+Workspace tests: 193 passing (99 noetl-executor unit + 12
+integration + 41 noetl + 41 ntl).
+
+## What's next (PR-2d-2 in noetl/worker)
+
+After 0.3.0 publishes:
+
+- Add `NatsCommandSource { subscriber, client, worker_id }` in
+  repos/worker/src/nats/source.rs implementing the new trait.
+- Translate at the seam between `crate::client::Command` and the
+  enriched `noetl_executor::worker::source::Command`.
+- Refactor `Worker::process_commands` to drive through
+  `CommandSource::next` + `ack`/`nack` instead of the inline
+  subscriber + client calls.
+- Mock-source unit tests for the dispatcher.
+
+### Features
+
+* **executor:** redesign CommandSource trait with ack lifecycle + richer Command (R-1.2 PR-2d-1, bumps to 0.3.0) ([a673709](https://github.com/noetl/cli/commit/a67370922649b0c1b17e99cb57efd488942bd499)), closes [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30)
+
 ## [3.1.0](https://github.com/noetl/cli/compare/v3.0.0...v3.1.0) (2026-05-30)
 
 ### Features
