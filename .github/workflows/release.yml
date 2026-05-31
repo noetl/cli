@@ -107,6 +107,58 @@ jobs:
         if: ${{ steps.executor_check.outputs.already_published == 'true' }}
         run: echo "noetl-executor version ${{ steps.executor_version.outputs.version }} already on crates.io; skipping."
 
+      # ---- noetl-arrow-cache (workspace member) -----------------------
+      # R-2.1: same shape as noetl-executor above.  Independent
+      # version (tracks the Arrow IPC shared-memory cache API, not
+      # the CLI's release cadence).  Downstream consumers
+      # (noetl-worker, noetl-server) depend on this crate from
+      # crates.io, so it must publish before they can pick up R-2.x
+      # changes.
+      - name: Get noetl-arrow-cache version
+        id: arrow_cache_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARROW_CACHE_VERSION=$(grep -E '^version = ' arrow-cache/Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=${ARROW_CACHE_VERSION}" >> "${GITHUB_OUTPUT}"
+      - name: Check noetl-arrow-cache version on crates.io
+        id: arrow_cache_check
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.arrow_cache_version.outputs.version }}"
+          if curl -fsS -H "User-Agent: noetl-cli-release" "https://crates.io/api/v1/crates/noetl-arrow-cache/${VERSION}" >/dev/null; then
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Publish noetl-arrow-cache
+        if: ${{ env.CRATES_IO_TOKEN != '' && steps.arrow_cache_check.outputs.already_published != 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ env.CRATES_IO_TOKEN }}
+        shell: bash
+        run: |
+          set +e
+          OUTPUT="$(cargo publish -p noetl-arrow-cache 2>&1)"
+          STATUS=$?
+          set -e
+
+          echo "${OUTPUT}"
+
+          if [[ ${STATUS} -eq 0 ]]; then
+            exit 0
+          fi
+
+          if echo "${OUTPUT}" | grep -Eqi "already uploaded|already exists"; then
+            echo "noetl-arrow-cache version already published; continuing."
+            exit 0
+          fi
+
+          exit ${STATUS}
+      - name: Skip noetl-arrow-cache publish (already on crates.io)
+        if: ${{ steps.arrow_cache_check.outputs.already_published == 'true' }}
+        run: echo "noetl-arrow-cache version ${{ steps.arrow_cache_version.outputs.version }} already on crates.io; skipping."
+
       # ---- noetl + ntl binaries (workspace root) ----------------------
       - name: Check crate version on crates.io
         id: crate_check
