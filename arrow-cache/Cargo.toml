@@ -1,0 +1,46 @@
+[package]
+name = "noetl-arrow-cache"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/noetl/cli"
+homepage = "https://noetl.io"
+description = "NoETL Arrow IPC shared-memory cache — Rust mirror of Python's ArrowIpcSharedMemoryCache for zero-copy same-node data plane"
+keywords = ["arrow", "ipc", "shared-memory", "cache", "noetl"]
+categories = ["caching", "data-structures"]
+readme = "README.md"
+
+[dependencies]
+# Core types + datetime — match the conventions used by sibling
+# crates `noetl-executor` and `noetl-tools` so call sites can use
+# the same `chrono::Utc::now()` flows for lease expiry.
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# POSIX shared memory.  The `shared_memory` crate wraps
+# `shm_open`/`mmap` cross-platform (Linux + macOS) and matches
+# the on-disk layout Python's `multiprocessing.shared_memory.SharedMemory`
+# produces — same `/dev/shm/<name>` files, same `shm_open(O_CREAT)`
+# semantics.
+shared_memory = "0.12"
+
+# Error handling — Anyhow is used by the rest of the workspace.
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Tracing follows the workspace conventions for spans + structured
+# logs (per `agents/rules/observability.md`).
+tracing = "0.1"
+
+# SHA-2 for the schema-digest portion of the shm name.  Matches
+# Python's `hashlib.sha256(payload).hexdigest()[:8]`.
+sha2 = "0.10"
+
+# Hex encoding for the digest.
+hex = "0.4"
+
+[dev-dependencies]
+# `tempfile` for namespacing test shm regions away from real
+# deployments.
+tempfile = "3"
