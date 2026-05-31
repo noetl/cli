@@ -1,11 +1,16 @@
 [workspace]
-# Cargo workspace.  The CLI binary remains the root package; `executor`
-# is a workspace member crate that hosts the shared execution core
-# (LocalPlaybookSource for the CLI's `noetl run --runtime local` path
-# and NatsCommandSource for noetl-worker — see Appendix H of the
-# global hybrid cloud blueprint, https://noetl.dev/docs/architecture/
-# noetl_global_hybrid_cloud_grid_distributed_architecture_blueprint).
-members = ["executor"]
+# Cargo workspace.  The CLI binary remains the root package; sibling
+# crates host shared infrastructure:
+#
+# - `executor` — the shared execution core (LocalPlaybookSource for
+#   the CLI's `noetl run --runtime local` path, NatsCommandSource for
+#   noetl-worker).  See Appendix H of the global hybrid cloud
+#   blueprint, https://noetl.dev/docs/architecture/
+#   noetl_global_hybrid_cloud_grid_distributed_architecture_blueprint
+# - `arrow-cache` — Rust mirror of Python's
+#   `ArrowIpcSharedMemoryCache`.  Same-node zero-copy IPC for the
+#   columnar data plane.  R-2.1 in the Rust migration roadmap.
+members = ["executor", "arrow-cache"]
 
 [package]
 name = "noetl"
