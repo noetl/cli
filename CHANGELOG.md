@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.1.0](https://github.com/noetl/cli/compare/v4.0.0...v4.1.0) (2026-05-31)
+
+### Features
+
+* **executor:** enrich ExecutorEvent with optional event_id / worker_id / meta (R-1.2 PR-EE-1, 0.3.1) ([83caadf](https://github.com/noetl/cli/commit/83caadf48a88be1b6d98772198bd545062d731dc)), closes [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30) [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30) [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30)
+
 ## [4.0.0](https://github.com/noetl/cli/compare/v3.1.0...v4.0.0) (2026-05-31)
 
 ### ⚠ BREAKING CHANGES
