@@ -10,7 +10,10 @@
 # - `arrow-cache` — Rust mirror of Python's
 #   `ArrowIpcSharedMemoryCache`.  Same-node zero-copy IPC for the
 #   columnar data plane.  R-2.1 in the Rust migration roadmap.
-members = ["executor", "arrow-cache"]
+# - `arrow-flight-client` — Rust client for the noetl-server's
+#   Arrow Flight `do_get` endpoint.  R-2.3 Phase B; pairs with the
+#   Python server in noetl/noetl#643.
+members = ["executor", "arrow-cache", "arrow-flight-client"]
 
 [package]
 name = "noetl"
