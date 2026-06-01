@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.3.0](https://github.com/noetl/cli/compare/v4.2.0...v4.3.0) (2026-06-01)
+
+### Features
+
+* **arrow-flight-client:** noetl-arrow-flight-client crate (R-2.3 Phase B) ([4bf1891](https://github.com/noetl/cli/commit/4bf1891de32e0be96c9eb33f99a5360728cb2f9e)), closes [noetl/noetl#643](https://github.com/noetl/noetl/issues/643) [#643](https://github.com/noetl/cli/issues/643) [noetl/noetl#643](https://github.com/noetl/noetl/issues/643) [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30)
+
 ## [4.2.0](https://github.com/noetl/cli/compare/v4.1.0...v4.2.0) (2026-05-31)
 
 ### Features
