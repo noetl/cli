@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.6.0](https://github.com/noetl/cli/compare/v4.5.0...v4.6.0) (2026-06-01)
+
+### Features
+
+* **arrow-flight-client:** bearer-token auth on the client (R-2.3 Phase C2.3) ([95fbe97](https://github.com/noetl/cli/commit/95fbe979aa27e7c5c139e05aefb0f42bfa9e9e50)), closes [noetl/noetl#647](https://github.com/noetl/noetl/issues/647) [noetl/noetl#647](https://github.com/noetl/noetl/issues/647) [noetl/ai-meta#33](https://github.com/noetl/ai-meta/issues/33)
+
 ## [4.5.0](https://github.com/noetl/cli/compare/v4.4.0...v4.5.0) (2026-06-01)
 
 ### Features
