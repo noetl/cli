@@ -661,3 +661,179 @@ async fn connect_with_combined_tls_and_bearer() {
         .expect("resolve over combined config");
     assert_eq!(batches.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// R-2.3 Phase C2.4 — Client-side mTLS
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_config_identity_chains_with_other_knobs() {
+    // Builder is order-independent + can stack with ca_certificate +
+    // domain_name.  `to_tonic()` shouldn't panic when all three are
+    // set.
+    let _cfg = FlightTlsConfig::new()
+        .ca_certificate(b"fake-ca".to_vec())
+        .identity(b"fake-cert".to_vec(), b"fake-key".to_vec())
+        .domain_name("flight.example.com");
+    // We can't introspect ClientTlsConfig from outside tonic, but
+    // the integration test below proves the wire path works.
+}
+
+#[test]
+fn tls_config_identity_only_no_ca() {
+    // Identity without an explicit CA is still a valid construct —
+    // the client trusts the default roots, the server still gets the
+    // client identity.
+    let _cfg = FlightTlsConfig::new().identity(b"fake-cert".to_vec(), b"fake-key".to_vec());
+}
+
+/// Spin up a TLS-enabled in-process Flight server that **requires** a
+/// client cert.  Generates a fresh CA, server cert, + client cert
+/// chain via rcgen — three certs, all with `localhost` SAN.
+async fn start_mtls_stub_server(
+    batch: Option<RecordBatch>,
+) -> (
+    String,
+    oneshot::Sender<()>,
+    Vec<u8>, // server CA pem (for the client to trust)
+    Vec<u8>, // client cert pem (for the client to present)
+    Vec<u8>, // client key pem
+) {
+    // Self-signed server cert.  rcgen's simple generator gives a
+    // fresh chain per call — fine for an isolated test process.
+    let server_cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("generate server cert");
+    let server_cert_pem = server_cert.cert.pem();
+    let server_key_pem = server_cert.signing_key.serialize_pem();
+
+    // Self-signed client cert (a separate identity).  In production
+    // the client cert would chain to a real CA; for the in-test
+    // server we treat the client cert itself as the trust anchor
+    // (a CA bundle of a single self-signed cert, which is how
+    // tonic accepts it).
+    let client_cert =
+        rcgen::generate_simple_self_signed(vec!["worker-test".to_string()]).expect("generate client cert");
+    let client_cert_pem = client_cert.cert.pem();
+    let client_key_pem = client_cert.signing_key.serialize_pem();
+
+    let server_identity = tonic::transport::Identity::from_pem(server_cert_pem.as_bytes(), server_key_pem.as_bytes());
+    // For mTLS: server demands client certs chaining to the client's
+    // own self-signed cert (acts as our trust root for the test).
+    let client_ca = tonic::transport::Certificate::from_pem(client_cert_pem.as_bytes());
+    let tls = tonic::transport::ServerTlsConfig::new()
+        .identity(server_identity)
+        .client_ca_root(client_ca);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("local_addr");
+    let endpoint = format!("https://localhost:{}", addr.port());
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let last_ticket = Arc::new(tokio::sync::Mutex::new(None));
+    let svc = StubFlightShared {
+        response_batch: batch,
+        last_ticket,
+        required_token: None,
+    };
+
+    let (tx, rx) = oneshot::channel();
+    tokio::spawn(async move {
+        Server::builder()
+            .tls_config(tls)
+            .expect("server tls_config")
+            .add_service(FlightServiceServer::new(svc))
+            .serve_with_incoming_shutdown(incoming, async {
+                rx.await.ok();
+            })
+            .await
+            .expect("serve_with_incoming_shutdown");
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    (
+        endpoint,
+        tx,
+        server_cert_pem.into_bytes(),
+        client_cert_pem.into_bytes(),
+        client_key_pem.into_bytes(),
+    )
+}
+
+#[tokio::test]
+async fn connect_with_mtls_round_trips_against_demanding_server() {
+    let batch = sample_batch();
+    let (endpoint, _shutdown, server_ca, client_cert, client_key) = start_mtls_stub_server(Some(batch.clone())).await;
+
+    let tls = FlightTlsConfig::new()
+        .ca_certificate(server_ca)
+        .identity(client_cert, client_key)
+        .domain_name("localhost");
+    let resolver = FlightResolver::connect_with_tls(&endpoint, tls)
+        .await
+        .expect("connect_with mTLS");
+    let batches = resolver
+        .resolve("noetl://execution/12345/result/big_select/abcd1234")
+        .await
+        .expect("resolve over mTLS");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), batch.num_rows());
+}
+
+#[tokio::test]
+async fn connect_with_mtls_rejected_when_client_cert_missing() {
+    let batch = sample_batch();
+    let (endpoint, _shutdown, server_ca, _client_cert, _client_key) = start_mtls_stub_server(Some(batch)).await;
+
+    // Trust the server's cert but DON'T present a client identity.
+    // The server (configured with `client_ca_root`) refuses the
+    // handshake.  tonic's `connect()` defers the full handshake
+    // until the first request, so the rejection surfaces on
+    // `resolve()` rather than `connect()`.
+    let tls = FlightTlsConfig::new()
+        .ca_certificate(server_ca)
+        .domain_name("localhost");
+    let resolver_result = FlightResolver::connect_with_tls(&endpoint, tls).await;
+    // Either connect or the first call fails — accept both shapes
+    // since different tonic versions surface the handshake error
+    // at different points.
+    match resolver_result {
+        Err(_) => {
+            // Handshake failed at connect time.  Acceptable.
+        }
+        Ok(resolver) => {
+            // Channel opened lazily; first call should fail.
+            let err = resolver
+                .resolve("noetl://execution/12345/result/x/y")
+                .await
+                .expect_err("expected first call to fail without client cert");
+            match err {
+                FlightError::Transport(_) | FlightError::Server(_) => {}
+                other => panic!("expected Transport/Server error, got {other:?}"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn connect_with_mtls_via_flight_config() {
+    // Same as the direct connect_with_tls path but via the unified
+    // `FlightConfig::new().tls(tls).bearer_token(t)` builder, to
+    // confirm mTLS composes with the Phase C2.3 auth surface.
+    let batch = sample_batch();
+    let (endpoint, _shutdown, server_ca, client_cert, client_key) = start_mtls_stub_server(Some(batch.clone())).await;
+
+    let tls = FlightTlsConfig::new()
+        .ca_certificate(server_ca)
+        .identity(client_cert, client_key)
+        .domain_name("localhost");
+    // No bearer needed (server isn't requiring it) but exercise the
+    // combined config shape anyway.
+    let cfg = FlightConfig::new().tls(tls);
+    let resolver = FlightResolver::connect_with(&endpoint, cfg)
+        .await
+        .expect("connect_with combined mTLS config");
+    let batches = resolver
+        .resolve("noetl://execution/12345/result/big_select/abcd1234")
+        .await
+        .expect("resolve via FlightConfig");
+    assert_eq!(batches.len(), 1);
+}

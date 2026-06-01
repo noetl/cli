@@ -31,14 +31,17 @@
 //! [`FlightTlsConfig`] + [`FlightResolver::connect_with_tls`] so the
 //! client can talk to a TLS-fronted Flight endpoint (the server side
 //! opted into via `NOETL_FLIGHT_TLS_CERT` + `NOETL_FLIGHT_TLS_KEY` in
-//! Phase C2.1).  Phase C2.3 (0.4.0, this version) adds
-//! [`FlightAuth`] + [`FlightConfig`] + [`FlightResolver::connect_with`]
-//! so the client can send `Authorization: Bearer <token>` on every
-//! gRPC call, validated by the server's bearer-token middleware
-//! (`NOETL_FLIGHT_BEARER_TOKENS`).
+//! Phase C2.1).  Phase C2.3 (0.4.0) adds [`FlightAuth`] +
+//! [`FlightConfig`] + [`FlightResolver::connect_with`] so the
+//! client can send `Authorization: Bearer <token>` on every gRPC
+//! call, validated by the server's bearer-token middleware
+//! (`NOETL_FLIGHT_BEARER_TOKENS`).  Phase C2.4 (0.5.0, this
+//! version) adds [`FlightTlsConfig::identity`] so the client can
+//! present a client certificate during the TLS handshake when the
+//! server requires mutual TLS (`NOETL_FLIGHT_CLIENT_CA`,
+//! noetl/noetl#648).
 //!
-//! mTLS client identity (C2.4) rides on the same `FlightTlsConfig`
-//! builder — see the Phase C2 umbrella at noetl/ai-meta#33.
+//! See the Phase C2 umbrella at noetl/ai-meta#33 for the wider plan.
 //!
 //! Wiring the client into a concrete consumer (the noetl-worker for
 //! cross-node tabular reads, the Rust noetl-server once it gains a
@@ -61,7 +64,7 @@ use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::{FlightDescriptor, FlightInfo, Ticket};
 use futures::TryStreamExt;
 use thiserror::Error;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 /// Typed error variants for `resolve()` failures.  Callers usually
 /// match on the variant to decide between fall-back paths (HTTP
@@ -142,9 +145,10 @@ pub struct FlightEndpointSummary {
 /// Useful when the endpoint URL is an IP (or a service-internal DNS
 /// name) but the cert was issued for a different SAN.
 ///
-/// Client-side identity (mTLS) is reserved for Phase C2.4 — when
-/// that lands this struct gains an `identity` field carrying the
-/// `(client_cert_pem, client_key_pem)` pair.
+/// Client-side identity (mTLS, Phase C2.4) is configured via
+/// `identity(cert_pem, key_pem)`.  When the server is started with
+/// `NOETL_FLIGHT_CLIENT_CA` set (noetl/noetl#648) it requires every
+/// client to present a cert chaining to that CA on the TLS handshake.
 ///
 /// ## Example — explicit CA + SNI override
 ///
@@ -163,10 +167,35 @@ pub struct FlightEndpointSummary {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// ## Example — mTLS (Phase C2.4)
+///
+/// ```no_run
+/// # use noetl_arrow_flight_client::{FlightResolver, FlightConfig, FlightTlsConfig};
+/// # async fn run() -> anyhow::Result<()> {
+/// let ca_pem = std::fs::read("/etc/noetl/flight-ca.pem")?;
+/// let client_cert = std::fs::read("/etc/noetl/worker-client.crt")?;
+/// let client_key = std::fs::read("/etc/noetl/worker-client.key")?;
+/// let tls = FlightTlsConfig::new()
+///     .ca_certificate(ca_pem)
+///     .identity(client_cert, client_key);
+/// let cfg = FlightConfig::new().tls(tls);
+///
+/// let resolver = FlightResolver::connect_with(
+///     "https://noetl.example.com:8083",
+///     cfg,
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Default, Clone)]
 pub struct FlightTlsConfig {
     ca_pem: Option<Vec<u8>>,
     domain_name: Option<String>,
+    /// R-2.3 Phase C2.4 — `(cert_pem, key_pem)` pair the client
+    /// presents on the TLS handshake when the server demands a
+    /// client cert.  Both must be set together or both None.
+    identity_pem: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl FlightTlsConfig {
@@ -195,6 +224,29 @@ impl FlightTlsConfig {
         self
     }
 
+    /// R-2.3 Phase C2.4: set the client-side identity (cert + key)
+    /// the resolver presents on the TLS handshake.  Required when
+    /// the noetl-server is started with `NOETL_FLIGHT_CLIENT_CA`
+    /// set (mutual TLS).
+    ///
+    /// Both PEM blobs must be valid — `Identity::from_pem` accepts
+    /// them in their on-disk form (the same format the k8s Secret
+    /// would mount on the worker pod).  The pair is stored as
+    /// `(cert_pem, key_pem)` and converted to a `tonic::transport::Identity`
+    /// lazily inside `to_tonic`.
+    ///
+    /// Per [`agents/rules/execution-model.md`][exec], the client
+    /// cert + key are business-logic credentials and should be
+    /// resolved from a NoETL-managed secret (k8s Secret mounted on
+    /// the worker pod, in the usual case) rather than embedded in
+    /// playbook config.
+    ///
+    /// [exec]: https://github.com/noetl/ai-meta/blob/main/agents/rules/execution-model.md
+    pub fn identity(mut self, cert_pem: impl Into<Vec<u8>>, key_pem: impl Into<Vec<u8>>) -> Self {
+        self.identity_pem = Some((cert_pem.into(), key_pem.into()));
+        self
+    }
+
     /// Compose the underlying `tonic::transport::ClientTlsConfig`.
     fn to_tonic(&self) -> ClientTlsConfig {
         let mut tls = ClientTlsConfig::new();
@@ -203,6 +255,9 @@ impl FlightTlsConfig {
         }
         if let Some(domain) = &self.domain_name {
             tls = tls.domain_name(domain.clone());
+        }
+        if let Some((cert_pem, key_pem)) = &self.identity_pem {
+            tls = tls.identity(Identity::from_pem(cert_pem, key_pem));
         }
         tls
     }
