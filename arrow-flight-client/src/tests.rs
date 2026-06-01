@@ -82,8 +82,47 @@ impl FlightService for StubFlightShared {
         Ok(Response::new(Box::pin(futures::stream::empty())))
     }
 
-    async fn get_flight_info(&self, _request: Request<FlightDescriptor>) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::internal("FlightInfo lookup is not implemented in Phase A"))
+    async fn get_flight_info(&self, request: Request<FlightDescriptor>) -> Result<Response<FlightInfo>, Status> {
+        let descriptor = request.into_inner();
+        if descriptor.r#type != arrow_flight::flight_descriptor::DescriptorType::Cmd as i32 {
+            return Err(Status::internal("Cmd-shaped descriptor required"));
+        }
+        let Some(batch) = &self.response_batch else {
+            return Err(Status::unavailable(
+                "non-tabular result; fall back to HTTP /api/result/resolve",
+            ));
+        };
+
+        // Serialise the schema as Arrow IPC bytes (same wire shape
+        // the Python server returns).
+        let schema = batch.schema();
+        let options = arrow::ipc::writer::IpcWriteOptions::default();
+        let schema_data = arrow_flight::SchemaAsIpc::new(&schema, &options);
+        let schema_bytes: arrow_flight::IpcMessage = schema_data
+            .try_into()
+            .map_err(|e| Status::internal(format!("schema encode: {e}")))?;
+
+        let ticket_bytes = descriptor.cmd.clone();
+        let endpoint = arrow_flight::FlightEndpoint {
+            ticket: Some(arrow_flight::Ticket {
+                ticket: ticket_bytes.clone(),
+            }),
+            location: vec![arrow_flight::Location {
+                uri: "grpc://test-server".to_string(),
+            }],
+            expiration_time: None,
+            app_metadata: Default::default(),
+        };
+        let info = FlightInfo {
+            schema: schema_bytes.0,
+            flight_descriptor: Some(descriptor),
+            endpoint: vec![endpoint],
+            total_records: batch.num_rows() as i64,
+            total_bytes: 0,
+            ordered: false,
+            app_metadata: Default::default(),
+        };
+        Ok(Response::new(info))
     }
 
     async fn poll_flight_info(&self, _request: Request<FlightDescriptor>) -> Result<Response<PollInfo>, Status> {
@@ -227,6 +266,54 @@ async fn connect_to_unreachable_endpoint_fails_fast() {
     // connect_timeout budget.
     let result = FlightResolver::connect("http://127.0.0.1:1").await;
     assert!(result.is_err(), "should error on connection refused");
+}
+
+#[tokio::test]
+async fn get_flight_info_returns_schema_and_endpoint() {
+    let batch = sample_batch();
+    let (endpoint, _shutdown, _last_ticket) = start_stub_server(Some(batch)).await;
+
+    let resolver = FlightResolver::connect(&endpoint).await.expect("connect");
+    let info = resolver
+        .get_flight_info("noetl://execution/12345/result/big_select/abcd1234")
+        .await
+        .expect("get_flight_info");
+
+    assert_eq!(info.total_records, 3);
+    assert_eq!(info.endpoints.len(), 1);
+    let ep = &info.endpoints[0];
+    // The ticket the stub server hands back is the same bytes
+    // we sent in as the descriptor command — round-trip parity.
+    assert_eq!(
+        std::str::from_utf8(&ep.ticket).unwrap(),
+        "noetl://execution/12345/result/big_select/abcd1234"
+    );
+    assert!(!ep.locations.is_empty());
+    // Schema names match the sample batch.
+    assert_eq!(
+        info.schema
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect::<Vec<_>>(),
+        vec!["id", "username", "password", "score"],
+    );
+}
+
+#[tokio::test]
+async fn get_flight_info_returns_non_tabular_on_unavailable() {
+    let (endpoint, _shutdown, _last_ticket) = start_stub_server(None).await;
+    let resolver = FlightResolver::connect(&endpoint).await.expect("connect");
+    let err = resolver
+        .get_flight_info("noetl://execution/12345/result/shell_step/x")
+        .await
+        .expect_err("should be NonTabular");
+    match err {
+        FlightError::NonTabular { ref_uri, .. } => {
+            assert_eq!(ref_uri, "noetl://execution/12345/result/shell_step/x");
+        }
+        other => panic!("expected NonTabular, got {other:?}"),
+    }
 }
 
 #[tokio::test]

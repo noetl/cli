@@ -23,13 +23,19 @@
 //!
 //! ## R-2.3 phase scope
 //!
-//! Phase B (this crate) ships the standalone client.  Wiring it into
-//! a concrete consumer (the noetl-worker for cross-node tabular
-//! reads, the Rust noetl-server once it gains a result-store
-//! backend, the CLI tree walker for local-mode consumers) is
-//! deferred until a real caller surfaces.  Keeping the client in
-//! its own crate avoids coupling those consumers to each other's
-//! Cargo build graphs.
+//! Phase B (initial release) ships the standalone client + `resolve`
+//! / `resolve_rows` for materialising tabular results into typed
+//! `RecordBatch`es / JSON-shaped row dicts.  Phase C1 (this version)
+//! adds `get_flight_info` for schema + row-count discovery without
+//! materialising the payload — useful for sizing buffers or skipping
+//! the fetch entirely for non-tabular refs.
+//!
+//! Wiring the client into a concrete consumer (the noetl-worker for
+//! cross-node tabular reads, the Rust noetl-server once it gains a
+//! result-store backend, the CLI tree walker for local-mode
+//! consumers) is deferred until a real caller surfaces.  Keeping the
+//! client in its own crate avoids coupling those consumers to each
+//! other's Cargo build graphs.
 //!
 //! [wiki]: https://github.com/noetl/noetl/wiki/arrow_flight_result_fetch
 //! [execution-model]: https://github.com/noetl/ai-meta/blob/main/agents/rules/execution-model.md
@@ -38,9 +44,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arrow::array::RecordBatch;
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow_flight::decode::FlightRecordBatchStream;
+use arrow_flight::flight_descriptor::DescriptorType;
 use arrow_flight::flight_service_client::FlightServiceClient;
-use arrow_flight::Ticket;
+use arrow_flight::{FlightDescriptor, FlightInfo, Ticket};
 use futures::TryStreamExt;
 use thiserror::Error;
 use tonic::transport::{Channel, Endpoint};
@@ -64,6 +72,50 @@ pub enum FlightError {
     /// Server returned some other typed Flight error.
     #[error("server error: {0}")]
     Server(String),
+}
+
+/// FlightInfo discovery summary — R-2.3 Phase C1.
+///
+/// Returned by [`FlightResolver::get_flight_info`].  Callers use
+/// it to size buffers, inspect the schema, or decide whether to
+/// follow the embedded endpoints before issuing the actual
+/// [`FlightResolver::resolve`] call.
+///
+/// Field-level mirror of `pyarrow.flight.FlightInfo` (the wire
+/// type), with the Arrow schema pre-decoded so consumers don't
+/// re-parse the IPC bytes themselves.
+#[derive(Debug, Clone)]
+pub struct FlightInfoSummary {
+    /// Arrow schema of the rowset that `do_get` would stream.
+    /// Decoded from the FlightInfo's schema IPC bytes.
+    pub schema: SchemaRef,
+    /// Total rows the server reports for this ref.  Matches what
+    /// `resolve(ref).iter().map(|b| b.num_rows()).sum()` would
+    /// produce, without paying for the materialisation.
+    pub total_records: i64,
+    /// Encoded Arrow IPC byte length.  Matches the byte count
+    /// the server would stream over `do_get`.
+    pub total_bytes: i64,
+    /// gRPC endpoint(s) that can serve the corresponding `do_get`.
+    /// Phase C1 returns exactly one; the multi-endpoint variant is
+    /// deferred until sharded result tiers land.
+    pub endpoints: Vec<FlightEndpointSummary>,
+}
+
+/// One endpoint inside a [`FlightInfoSummary`].  Same shape as
+/// `pyarrow.flight.FlightEndpoint` but bytes pre-extracted from
+/// the wire types.
+#[derive(Debug, Clone)]
+pub struct FlightEndpointSummary {
+    /// Ticket bytes — typically the same `noetl://...` URI the
+    /// caller passed to `get_flight_info`.  Consumers with a known
+    /// ref URI can skip `get_flight_info` entirely and call
+    /// `do_get` directly with the same bytes.
+    pub ticket: Vec<u8>,
+    /// gRPC URLs that can serve this ticket.  In a single-server
+    /// deployment this is `[self.endpoint]`; future multi-endpoint
+    /// sharding adds entries here.
+    pub locations: Vec<String>,
 }
 
 /// Thin wrapper around `arrow_flight::FlightServiceClient` that
@@ -106,6 +158,79 @@ impl FlightResolver {
     /// Endpoint this resolver is connected to.  Useful for logging.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// R-2.3 Phase C1: fetch the [`FlightInfoSummary`] (schema + row
+    /// count + endpoints) for a ref URI without materialising the
+    /// underlying rowset.  Useful for clients that want to:
+    ///
+    /// - Inspect the schema before sizing buffers.
+    /// - Decide between Flight + the HTTP fallback based on row
+    ///   count / byte total.
+    /// - Discover which endpoint to call `do_get` against in a
+    ///   future multi-endpoint deployment (Phase C1 always returns
+    ///   one endpoint, but the API shape is stable for sharding).
+    ///
+    /// Wire convention: the descriptor's `cmd` field carries the
+    /// noetl:// URI bytes — same convention as the Ticket the
+    /// server returns inside the FlightEndpoint, so a consumer
+    /// with a known ref URI can skip `get_flight_info` entirely
+    /// and call [`resolve`] directly.
+    ///
+    /// Per `observability.md` Principle 1, the call is wrapped in
+    /// a `flight.get_flight_info` span carrying `endpoint` +
+    /// `ref_uri`.
+    pub async fn get_flight_info(&self, ref_uri: &str) -> Result<FlightInfoSummary, FlightError> {
+        let span = tracing::info_span!(
+            "flight.get_flight_info",
+            endpoint = %self.endpoint,
+            ref_uri = %ref_uri,
+        );
+        let _enter = span.enter();
+
+        let descriptor = FlightDescriptor {
+            r#type: DescriptorType::Cmd as i32,
+            cmd: ref_uri.as_bytes().to_vec().into(),
+            path: Vec::new(),
+        };
+        let mut client = self.client.clone();
+        let info: FlightInfo = match client.get_flight_info(descriptor).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => return Err(classify_status(ref_uri, &status)),
+        };
+
+        // Decode the IPC-encoded schema bytes via arrow-flight's
+        // `Schema::try_from(FlightInfo)` impl — clone the info
+        // because the impl consumes it, but we still need
+        // `info.endpoint` + the totals below.
+        let schema: Schema = Schema::try_from(info.clone())
+            .map_err(|e| FlightError::Server(format!("decode schema for ref {ref_uri}: {e}")))?;
+        let schema_ref: SchemaRef = std::sync::Arc::new(schema);
+
+        let endpoints = info
+            .endpoint
+            .iter()
+            .map(|ep| FlightEndpointSummary {
+                ticket: ep.ticket.as_ref().map(|t| t.ticket.to_vec()).unwrap_or_default(),
+                locations: ep.location.iter().map(|loc| loc.uri.clone()).collect(),
+            })
+            .collect();
+
+        tracing::info!(
+            endpoint = %self.endpoint,
+            ref_uri = %ref_uri,
+            total_records = info.total_records,
+            total_bytes = info.total_bytes,
+            n_endpoints = info.endpoint.len(),
+            "flight.get_flight_info completed",
+        );
+
+        Ok(FlightInfoSummary {
+            schema: schema_ref,
+            total_records: info.total_records,
+            total_bytes: info.total_bytes,
+            endpoints,
+        })
     }
 
     /// Submit `ref_uri` as a Flight Ticket and collect the streamed
