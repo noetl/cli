@@ -132,8 +132,16 @@ pub struct FlightResolver {
 
 impl FlightResolver {
     /// Connect to the noetl-server's Flight endpoint.  `endpoint`
-    /// must be a gRPC URL such as `grpc://localhost:8083` or
-    /// `grpc://noetl.noetl.svc.cluster.local:8083`.
+    /// must be a tonic-compatible URL — `http://...` for plaintext
+    /// h2c (default in kind + GKE without TLS) or `https://...` for
+    /// TLS-fronted deployments.  Examples:
+    /// `http://localhost:8083`, `http://noetl.noetl.svc.cluster.local:8083`,
+    /// `https://noetl.example.com:8083`.
+    ///
+    /// The `grpc://` scheme some Flight clients (Java, Python pyarrow)
+    /// accept is NOT valid for tonic — HTTP/2's `:scheme`
+    /// pseudo-header must be `http` or `https`, so `grpc://` surfaces
+    /// as `Bad :scheme header` at first request time.
     ///
     /// Honors a 10s connect timeout — Flight is on the cluster
     /// network and a slow connect almost always means the server
