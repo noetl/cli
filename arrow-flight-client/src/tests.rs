@@ -325,3 +325,142 @@ async fn endpoint_accessor_returns_constructor_arg() {
     let resolver = FlightResolver::connect(&endpoint).await.expect("connect");
     assert_eq!(resolver.endpoint(), endpoint);
 }
+
+// ---------------------------------------------------------------------------
+// R-2.3 Phase C2.2 — Client-side TLS
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_config_default_is_empty() {
+    let cfg = FlightTlsConfig::new();
+    // The struct has no `pub` fields so we can't introspect directly,
+    // but we can confirm to_tonic() doesn't panic for the empty case —
+    // i.e. a TLS handshake without CA override uses tonic's default
+    // trust roots.
+    let _tonic = cfg.to_tonic();
+}
+
+#[test]
+fn tls_config_builder_chains() {
+    let cfg = FlightTlsConfig::new()
+        .ca_certificate(b"-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----".to_vec())
+        .domain_name("flight.example.com");
+    // to_tonic() must consume both knobs without erroring.  We can't
+    // peek inside `ClientTlsConfig` from outside tonic, but the
+    // integration test below proves the wire path works end-to-end.
+    let _tonic = cfg.to_tonic();
+}
+
+#[test]
+fn tls_config_default_trait() {
+    // Default::default() is equivalent to FlightTlsConfig::new() —
+    // useful when callers pass the config via `..Default::default()`.
+    let cfg1 = FlightTlsConfig::default();
+    let cfg2 = FlightTlsConfig::new();
+    let _ = (cfg1.to_tonic(), cfg2.to_tonic());
+}
+
+/// Spin up a TLS-enabled in-process Flight server using a self-signed
+/// cert from rcgen.  Returns `(https://endpoint, shutdown_tx, ca_pem_bytes)`.
+async fn start_tls_stub_server(
+    batch: Option<RecordBatch>,
+) -> (
+    String,
+    oneshot::Sender<()>,
+    Vec<u8>,
+    Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+) {
+    // Self-signed cert + key for SAN `localhost` — matches the
+    // SNI the client uses when connecting to `https://localhost:<port>`.
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("generate self-signed cert");
+    let cert_pem = cert.cert.pem();
+    let key_pem = cert.signing_key.serialize_pem();
+
+    let identity = tonic::transport::Identity::from_pem(cert_pem.as_bytes(), key_pem.as_bytes());
+    let tls = tonic::transport::ServerTlsConfig::new().identity(identity);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("local_addr");
+    // The SNI hostname has to match the cert SAN (`localhost`), but
+    // we also need a working port — use `localhost` for the URL host
+    // + the bound port from the listener.
+    let endpoint = format!("https://localhost:{}", addr.port());
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let last_ticket = Arc::new(tokio::sync::Mutex::new(None));
+    let svc = StubFlightShared {
+        response_batch: batch,
+        last_ticket: last_ticket.clone(),
+    };
+
+    let (tx, rx) = oneshot::channel();
+    tokio::spawn(async move {
+        Server::builder()
+            .tls_config(tls)
+            .expect("server tls_config")
+            .add_service(FlightServiceServer::new(svc))
+            .serve_with_incoming_shutdown(incoming, async {
+                rx.await.ok();
+            })
+            .await
+            .expect("serve_with_incoming_shutdown");
+    });
+    // Give the server a beat to bind.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let ca_pem = cert_pem.into_bytes();
+    (endpoint, tx, ca_pem, last_ticket)
+}
+
+#[tokio::test]
+async fn connect_with_tls_round_trips_against_self_signed_server() {
+    let batch = sample_batch();
+    let (endpoint, _shutdown, ca_pem, _last_ticket) = start_tls_stub_server(Some(batch.clone())).await;
+
+    // With the matching CA the client must succeed.  Note the
+    // `domain_name("localhost")` override isn't strictly required
+    // here (the URL already says localhost) but it pins the test
+    // against the cert SAN explicitly so a future endpoint change
+    // doesn't silently break SNI.
+    let tls = FlightTlsConfig::new().ca_certificate(ca_pem).domain_name("localhost");
+    let resolver = FlightResolver::connect_with_tls(&endpoint, tls)
+        .await
+        .expect("connect_with_tls");
+
+    let batches = resolver
+        .resolve("noetl://execution/12345/result/big_select/abcd1234")
+        .await
+        .expect("resolve over TLS");
+
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), batch.num_rows());
+}
+
+#[tokio::test]
+async fn connect_with_tls_rejects_when_ca_missing() {
+    let batch = sample_batch();
+    let (endpoint, _shutdown, _ca_pem, _last_ticket) = start_tls_stub_server(Some(batch)).await;
+
+    // Empty TLS config — tonic falls back to the default trust
+    // store, which does NOT contain our self-signed CA.  Connect
+    // must fail at the TLS handshake.
+    let tls = FlightTlsConfig::new().domain_name("localhost");
+    let result = FlightResolver::connect_with_tls(&endpoint, tls).await;
+    assert!(result.is_err(), "expected TLS handshake to fail without CA, got Ok",);
+}
+
+#[tokio::test]
+async fn connect_plain_https_without_tls_config_fails() {
+    let batch = sample_batch();
+    let (endpoint, _shutdown, _ca_pem, _last_ticket) = start_tls_stub_server(Some(batch)).await;
+
+    // `connect()` (no tls_config) against an `https://` server
+    // without a matching CA in the default trust store should fail
+    // too — locks in that the API doesn't silently accept untrusted
+    // server certs.
+    let result = FlightResolver::connect(&endpoint).await;
+    assert!(
+        result.is_err(),
+        "expected plaintext-API + https endpoint to fail without trust roots",
+    );
+}

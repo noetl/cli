@@ -23,12 +23,20 @@
 //!
 //! ## R-2.3 phase scope
 //!
-//! Phase B (initial release) ships the standalone client + `resolve`
-//! / `resolve_rows` for materialising tabular results into typed
-//! `RecordBatch`es / JSON-shaped row dicts.  Phase C1 (this version)
-//! adds `get_flight_info` for schema + row-count discovery without
-//! materialising the payload — useful for sizing buffers or skipping
-//! the fetch entirely for non-tabular refs.
+//! Phase B (0.1.0) ships the standalone client + `resolve` /
+//! `resolve_rows` for materialising tabular results into typed
+//! `RecordBatch`es / JSON-shaped row dicts.  Phase C1 (0.2.0) adds
+//! `get_flight_info` for schema + row-count discovery without
+//! materialising the payload — useful for sizing buffers or
+//! skipping the fetch entirely for non-tabular refs.  Phase C2.2
+//! (0.3.0, this version) adds [`FlightTlsConfig`] +
+//! [`FlightResolver::connect_with_tls`] so the client can talk to a
+//! TLS-fronted Flight endpoint (the server side opted into via
+//! `NOETL_FLIGHT_TLS_CERT` + `NOETL_FLIGHT_TLS_KEY` in Phase C2.1).
+//!
+//! Bearer-token middleware (C2.3) + mTLS client identity (C2.4) ride
+//! on top of this configuration surface — see the Phase C2 umbrella
+//! at noetl/ai-meta#33.
 //!
 //! Wiring the client into a concrete consumer (the noetl-worker for
 //! cross-node tabular reads, the Rust noetl-server once it gains a
@@ -51,7 +59,7 @@ use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::{FlightDescriptor, FlightInfo, Ticket};
 use futures::TryStreamExt;
 use thiserror::Error;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
 /// Typed error variants for `resolve()` failures.  Callers usually
 /// match on the variant to decide between fall-back paths (HTTP
@@ -118,6 +126,86 @@ pub struct FlightEndpointSummary {
     pub locations: Vec<String>,
 }
 
+/// TLS configuration for the gRPC channel — R-2.3 Phase C2.2.
+///
+/// Pass to [`FlightResolver::connect_with_tls`] to talk to a
+/// TLS-fronted noetl-server Flight endpoint (the `NOETL_FLIGHT_TLS_*`
+/// envs the server side opted into in Phase C2.1).  The
+/// `ca_certificate` field carries the PEM-encoded server CA bundle —
+/// required when the server presents a non-public cert (the typical
+/// in-cluster case where a private CA signs the Flight cert).
+///
+/// `domain_name` overrides the SNI / cert verification hostname.
+/// When unset the host portion of the connection URL is used.
+/// Useful when the endpoint URL is an IP (or a service-internal DNS
+/// name) but the cert was issued for a different SAN.
+///
+/// Client-side identity (mTLS) is reserved for Phase C2.4 — when
+/// that lands this struct gains an `identity` field carrying the
+/// `(client_cert_pem, client_key_pem)` pair.
+///
+/// ## Example — explicit CA + SNI override
+///
+/// ```no_run
+/// # use noetl_arrow_flight_client::{FlightResolver, FlightTlsConfig};
+/// # async fn run() -> anyhow::Result<()> {
+/// let ca_pem = std::fs::read("/etc/noetl/flight-ca.pem")?;
+/// let tls = FlightTlsConfig::new()
+///     .ca_certificate(ca_pem)
+///     .domain_name("noetl-flight.svc.cluster.local");
+///
+/// let resolver = FlightResolver::connect_with_tls(
+///     "https://noetl.example.com:8083",
+///     tls,
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Default, Clone)]
+pub struct FlightTlsConfig {
+    ca_pem: Option<Vec<u8>>,
+    domain_name: Option<String>,
+}
+
+impl FlightTlsConfig {
+    /// New empty TLS config — relies on the URL scheme + tonic's
+    /// built-in defaults (system roots when available).  Equivalent
+    /// to passing the URL directly to [`FlightResolver::connect`]
+    /// with an `https://` scheme.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the PEM-encoded CA certificate the server's cert must
+    /// chain to.  When unset the channel falls back to tonic's
+    /// default trust roots (system roots when the `tls-roots`
+    /// feature is on; the empty trust store otherwise).
+    pub fn ca_certificate(mut self, ca_pem: impl Into<Vec<u8>>) -> Self {
+        self.ca_pem = Some(ca_pem.into());
+        self
+    }
+
+    /// Override the SNI / cert verification hostname.  Useful when
+    /// the endpoint URL is an IP or service-internal DNS but the
+    /// cert was issued for a different SAN.
+    pub fn domain_name(mut self, name: impl Into<String>) -> Self {
+        self.domain_name = Some(name.into());
+        self
+    }
+
+    /// Compose the underlying `tonic::transport::ClientTlsConfig`.
+    fn to_tonic(&self) -> ClientTlsConfig {
+        let mut tls = ClientTlsConfig::new();
+        if let Some(ca) = &self.ca_pem {
+            tls = tls.ca_certificate(Certificate::from_pem(ca));
+        }
+        if let Some(domain) = &self.domain_name {
+            tls = tls.domain_name(domain.clone());
+        }
+        tls
+    }
+}
+
 /// Thin wrapper around `arrow_flight::FlightServiceClient` that
 /// turns ref URIs into `RecordBatch` streams.
 ///
@@ -147,12 +235,51 @@ impl FlightResolver {
     /// network and a slow connect almost always means the server
     /// pod is unhealthy; failing fast lets the caller switch to the
     /// HTTP fallback or surface a clearer error.
+    ///
+    /// For TLS connections that need an explicit CA bundle (the
+    /// typical in-cluster case where a private CA signs the Flight
+    /// cert), use [`Self::connect_with_tls`] instead.  Bare
+    /// `https://` URLs through this method rely on tonic's default
+    /// trust roots, which may not include the cluster CA.
     pub async fn connect(endpoint: impl Into<String>) -> Result<Self> {
-        let endpoint_str = endpoint.into();
-        let channel = Endpoint::from_shared(endpoint_str.clone())
+        Self::connect_inner(endpoint.into(), None).await
+    }
+
+    /// R-2.3 Phase C2.2: connect with explicit TLS configuration.
+    ///
+    /// Use this when the noetl-server Flight endpoint is TLS-fronted
+    /// (Phase C2.1) and the server cert chains to a CA that isn't in
+    /// tonic's default trust roots — almost always the case in
+    /// cluster-internal deployments where a private CA signs the
+    /// Flight cert.
+    ///
+    /// The endpoint URL must use the `https://` scheme; an `http://`
+    /// URL with TLS config attached will fail at the tonic layer.
+    /// Bare `https://` without a TLS config relies on the default
+    /// trust roots — fine for public TLS, not for private CAs.
+    ///
+    /// See [`FlightTlsConfig`] for the builder; [Phase C2 umbrella][issue]
+    /// for the wider trust-boundary plan (bearer-token middleware is
+    /// C2.3, mTLS client identity is C2.4).
+    ///
+    /// [issue]: https://github.com/noetl/ai-meta/issues/33
+    pub async fn connect_with_tls(endpoint: impl Into<String>, tls: FlightTlsConfig) -> Result<Self> {
+        Self::connect_inner(endpoint.into(), Some(tls)).await
+    }
+
+    async fn connect_inner(endpoint_str: String, tls: Option<FlightTlsConfig>) -> Result<Self> {
+        let mut endpoint = Endpoint::from_shared(endpoint_str.clone())
             .with_context(|| format!("parse Flight endpoint {endpoint_str}"))?
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30));
+
+        if let Some(tls) = tls {
+            endpoint = endpoint
+                .tls_config(tls.to_tonic())
+                .with_context(|| format!("configure TLS for Flight endpoint {endpoint_str}"))?;
+        }
+
+        let channel = endpoint
             .connect()
             .await
             .with_context(|| format!("connect to Flight endpoint {endpoint_str}"))?;
