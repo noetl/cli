@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.7.0](https://github.com/noetl/cli/compare/v4.6.0...v4.7.0) (2026-06-01)
+
+### Features
+
+* **arrow-flight-client:** mTLS client identity (R-2.3 Phase C2.4) ([ef1e867](https://github.com/noetl/cli/commit/ef1e867e1e6f53256e918e291a7a8bf66e72e065)), closes [noetl/noetl#648](https://github.com/noetl/noetl/issues/648) [noetl/noetl#648](https://github.com/noetl/noetl/issues/648) [noetl/ai-meta#33](https://github.com/noetl/ai-meta/issues/33)
+
 ## [4.6.0](https://github.com/noetl/cli/compare/v4.5.0...v4.6.0) (2026-06-01)
 
 ### Features

@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "noetl"
-version = "4.6.0"
+version = "4.7.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2722,9 +2722,9 @@ dependencies = [
 
 [[package]]
 name = "noetl-arrow-flight-client"
-version = "0.1.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e35abeed8ecb6358a62ce83526cda802f1080ef046b807072136343e189ce2e"
+checksum = "569459e83be25e065285d6b0df9734cda53183acdc248715dcf25e1e8bb97603"
 dependencies = [
  "anyhow",
  "arrow 53.4.1",
@@ -2774,9 +2774,9 @@ dependencies = [
 
 [[package]]
 name = "noetl-tools"
-version = "2.12.0"
+version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b658c7a4bb97b01365171f9b6d07c758941caaf6c1727737fec3825f3dcccdb"
+checksum = "cb9be877aa7d619f66247841430343b048bdcfc293b1b786feecc91ab06b6f19"
 dependencies = [
  "anyhow",
  "arrow 53.4.1",
@@ -2791,7 +2791,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "minijinja",
- "noetl-arrow-flight-client 0.1.0",
+ "noetl-arrow-flight-client 0.4.0",
  "regex",
  "reqwest",
  "rhai",
