@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.5.0](https://github.com/noetl/cli/compare/v4.4.0...v4.5.0) (2026-06-01)
+
+### Features
+
+* **arrow-flight-client:** TLS client config (R-2.3 Phase C2.2) ([7aa2c36](https://github.com/noetl/cli/commit/7aa2c36d5f0d55a5c7194d6e5981723178fbce7a)), closes [noetl/noetl#646](https://github.com/noetl/noetl/issues/646) [noetl/noetl#646](https://github.com/noetl/noetl/issues/646) [noetl/ai-meta#33](https://github.com/noetl/ai-meta/issues/33)
+
 ## [4.4.0](https://github.com/noetl/cli/compare/v4.3.0...v4.4.0) (2026-06-01)
 
 ### Features

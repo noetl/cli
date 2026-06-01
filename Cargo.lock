@@ -1939,7 +1939,7 @@ dependencies = [
  "hyper-util",
  "log",
  "rustls",
- "rustls-native-certs 0.8.3",
+ "rustls-native-certs 0.8.4",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "noetl"
-version = "4.4.0"
+version = "4.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2722,6 +2722,23 @@ dependencies = [
 
 [[package]]
 name = "noetl-arrow-flight-client"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e35abeed8ecb6358a62ce83526cda802f1080ef046b807072136343e189ce2e"
+dependencies = [
+ "anyhow",
+ "arrow 53.4.1",
+ "arrow-flight",
+ "futures",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "noetl-arrow-flight-client"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -2757,9 +2774,9 @@ dependencies = [
 
 [[package]]
 name = "noetl-tools"
-version = "2.10.0"
+version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a220edbc86d32a564dfe7dfbf9f53645dfe090ea36cab462c0bbcc0088d6f2eb"
+checksum = "6b658c7a4bb97b01365171f9b6d07c758941caaf6c1727737fec3825f3dcccdb"
 dependencies = [
  "anyhow",
  "arrow 53.4.1",
@@ -2774,6 +2791,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "minijinja",
+ "noetl-arrow-flight-client 0.1.0",
  "regex",
  "reqwest",
  "rhai",
@@ -3747,9 +3765,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-native-certs"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "612460d5f7bea540c490b2b6395d8e34a953e52b491accd6c86c8164c5932a63"
+checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
 dependencies = [
  "openssl-probe 0.2.1",
  "rustls-pki-types",
@@ -4787,9 +4805,9 @@ checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
 
 [[package]]
 name = "unicode-segmentation"
-version = "1.13.2"
+version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-truncate"
