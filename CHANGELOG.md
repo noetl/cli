@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.0](https://github.com/noetl/cli/compare/v4.3.0...v4.4.0) (2026-06-01)
+
+### Features
+
+* **arrow-flight-client:** get_flight_info discovery surface (R-2.3 Phase C1) ([0378e72](https://github.com/noetl/cli/commit/0378e72bc78155564f40b7be3876da975fcfca56)), closes [noetl/noetl#644](https://github.com/noetl/noetl/issues/644) [#41](https://github.com/noetl/cli/issues/41) [noetl/noetl#644](https://github.com/noetl/noetl/issues/644) [noetl/ai-meta#30](https://github.com/noetl/ai-meta/issues/30)
+
 ## [4.3.0](https://github.com/noetl/cli/compare/v4.2.0...v4.3.0) (2026-06-01)
 
 ### Features
