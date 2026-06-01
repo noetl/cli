@@ -1,0 +1,46 @@
+[package]
+name = "noetl-arrow-flight-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/noetl/cli"
+homepage = "https://noetl.io"
+description = "NoETL Arrow Flight client — Rust consumer for the noetl-server's /api/result Flight gRPC endpoint (R-2.3 Phase B)"
+keywords = ["arrow", "flight", "grpc", "noetl"]
+categories = ["api-bindings", "data-structures"]
+readme = "README.md"
+
+[dependencies]
+# Arrow Flight gRPC client.  Same version family the workspace's
+# sibling crate `noetl-arrow-cache` uses for the on-the-wire Arrow IPC
+# decoder, so RecordBatch types interop without conversion.
+arrow-flight = "53"
+arrow = "53"
+
+# Async runtime + tonic transport.  arrow-flight 53 builds on
+# tonic 0.12 + tokio; pin them explicitly so the compile graph
+# is stable.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tonic = "0.12"
+futures = "0.3"
+
+# Error handling — Anyhow for the public API + thiserror for typed
+# errors that callers can match on.
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Tracing for the resolve span (per agents/rules/observability.md
+# Principle 1 — every boundary call ships a span).
+tracing = "0.1"
+
+# JSON conversion for the row-shape convenience helper.
+serde_json = "1.0"
+
+[dev-dependencies]
+# Spinning up an in-test Flight server requires the full server side
+# of arrow-flight (the encoder/server stubs).  tokio_stream wraps the
+# TcpListener for use with `Server::serve_with_incoming_shutdown`.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+arrow-flight = { version = "53", features = ["flight-sql-experimental"] }
+futures = "0.3"
