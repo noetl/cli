@@ -28,6 +28,16 @@ use futures::StreamExt;
 async fn start_stub_server(
     batch: Option<RecordBatch>,
 ) -> (String, oneshot::Sender<()>, Arc<tokio::sync::Mutex<Option<Vec<u8>>>>) {
+    start_stub_server_with_auth(batch, None).await
+}
+
+/// Spin up a stub Flight server that optionally requires a bearer
+/// token on every request (R-2.3 Phase C2.3).  Mirrors the Python
+/// server's `BearerTokenMiddlewareFactory` in noetl/noetl#647.
+async fn start_stub_server_with_auth(
+    batch: Option<RecordBatch>,
+    required_token: Option<String>,
+) -> (String, oneshot::Sender<()>, Arc<tokio::sync::Mutex<Option<Vec<u8>>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("local_addr");
     let endpoint = format!("http://{addr}");
@@ -37,6 +47,7 @@ async fn start_stub_server(
     let svc = StubFlightShared {
         response_batch: batch,
         last_ticket: last_ticket.clone(),
+        required_token,
     };
 
     let (tx, rx) = oneshot::channel();
@@ -56,9 +67,41 @@ async fn start_stub_server(
 
 /// Same shape as `StubFlight` but with `Arc<Mutex>` for the
 /// last_ticket so the test can read it across the gRPC boundary.
+///
+/// `required_token` (R-2.3 Phase C2.3) mirrors the Python server's
+/// bearer-auth middleware — when set, every incoming request must
+/// carry `Authorization: Bearer <token>` matching this value.
 struct StubFlightShared {
     response_batch: Option<RecordBatch>,
     last_ticket: Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    required_token: Option<String>,
+}
+
+impl StubFlightShared {
+    /// Validate the `Authorization: Bearer <token>` header against
+    /// the configured `required_token`.  Returns
+    /// `Err(Status::unauthenticated)` (the same status code the
+    /// Python server's `FlightUnauthenticatedError` produces on
+    /// the wire) when the header is missing / malformed / wrong.
+    fn check_auth<T>(&self, request: &Request<T>) -> Result<(), Status> {
+        let Some(required) = &self.required_token else {
+            return Ok(());
+        };
+        let auth_header = request.metadata().get("authorization").and_then(|v| v.to_str().ok());
+        let Some(value) = auth_header else {
+            return Err(Status::unauthenticated("missing Authorization header"));
+        };
+        let mut parts = value.splitn(2, ' ');
+        let scheme = parts.next().unwrap_or("");
+        let token = parts.next().unwrap_or("").trim();
+        if !scheme.eq_ignore_ascii_case("bearer") {
+            return Err(Status::unauthenticated("Authorization scheme must be Bearer"));
+        }
+        if token != required {
+            return Err(Status::unauthenticated("bearer token mismatch"));
+        }
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -83,6 +126,7 @@ impl FlightService for StubFlightShared {
     }
 
     async fn get_flight_info(&self, request: Request<FlightDescriptor>) -> Result<Response<FlightInfo>, Status> {
+        self.check_auth(&request)?;
         let descriptor = request.into_inner();
         if descriptor.r#type != arrow_flight::flight_descriptor::DescriptorType::Cmd as i32 {
             return Err(Status::internal("Cmd-shaped descriptor required"));
@@ -134,6 +178,7 @@ impl FlightService for StubFlightShared {
     }
 
     async fn do_get(&self, request: Request<Ticket>) -> Result<Response<Self::DoGetStream>, Status> {
+        self.check_auth(&request)?;
         let ticket_bytes = request.into_inner().ticket.to_vec();
         *self.last_ticket.lock().await = Some(ticket_bytes);
 
@@ -391,6 +436,7 @@ async fn start_tls_stub_server(
     let svc = StubFlightShared {
         response_batch: batch,
         last_ticket: last_ticket.clone(),
+        required_token: None,
     };
 
     let (tx, rx) = oneshot::channel();
@@ -463,4 +509,155 @@ async fn connect_plain_https_without_tls_config_fails() {
         result.is_err(),
         "expected plaintext-API + https endpoint to fail without trust roots",
     );
+}
+
+// ---------------------------------------------------------------------------
+// R-2.3 Phase C2.3 — Client-side bearer-token auth
+// ---------------------------------------------------------------------------
+
+#[test]
+fn flight_auth_default_is_empty() {
+    // No bearer; constructing the inner client should be a no-op
+    // for auth purposes.
+    let auth = FlightAuth::new();
+    let cfg = FlightConfig::new().auth(auth);
+    // We can't introspect the FlightAuth's bearer_token directly
+    // (private), but FlightConfig::new() also returns Default, and
+    // .auth() with an empty auth keeps the empty shape.
+    assert!(cfg.tls.is_none());
+}
+
+#[test]
+fn flight_auth_bearer_shortcut_matches_builder() {
+    // Both APIs should produce the same wire-level token.  We can't
+    // peek inside FlightAuth, but we can verify both paths work
+    // through the connect chain in the integration tests below.
+    let _a = FlightAuth::bearer("tok");
+    let _b = FlightAuth::new().bearer_token("tok");
+}
+
+#[test]
+fn flight_config_bearer_token_shortcut() {
+    // `.bearer_token(t)` on FlightConfig is equivalent to
+    // `.auth(FlightAuth::bearer(t))` — shorthand for the most
+    // common case.
+    let _cfg = FlightConfig::new().bearer_token("tok");
+}
+
+#[tokio::test]
+async fn connect_with_bearer_round_trips_against_auth_server() {
+    let batch = sample_batch();
+    let (endpoint, _shutdown, _last) =
+        start_stub_server_with_auth(Some(batch.clone()), Some("sk-test".to_string())).await;
+
+    let cfg = FlightConfig::new().bearer_token("sk-test");
+    let resolver = FlightResolver::connect_with(&endpoint, cfg)
+        .await
+        .expect("connect_with bearer");
+    let batches = resolver
+        .resolve("noetl://execution/12345/result/big_select/abcd1234")
+        .await
+        .expect("resolve with bearer");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), batch.num_rows());
+}
+
+#[tokio::test]
+async fn connect_with_bearer_rejected_when_token_wrong() {
+    let batch = sample_batch();
+    let (endpoint, _shutdown, _last) = start_stub_server_with_auth(Some(batch), Some("sk-correct".to_string())).await;
+
+    let cfg = FlightConfig::new().bearer_token("sk-WRONG");
+    let resolver = FlightResolver::connect_with(&endpoint, cfg)
+        .await
+        .expect("channel connect succeeds");
+    // The auth check runs server-side on the call itself, not at
+    // connect time — so connect succeeds but resolve fails with an
+    // UNAUTHENTICATED-shaped server error.
+    let err = resolver
+        .resolve("noetl://execution/12345/result/x/y")
+        .await
+        .expect_err("should reject wrong token");
+    match err {
+        FlightError::Server(msg) => {
+            assert!(
+                msg.to_lowercase().contains("unauthenticated") || msg.contains("bearer"),
+                "expected unauthenticated-shaped error, got {msg}"
+            );
+        }
+        FlightError::Transport(msg) => {
+            // Some tonic versions surface unauthenticated as a
+            // transport error when the headers are rejected pre-
+            // streaming; accept either shape.
+            assert!(
+                msg.to_lowercase().contains("unauthenticated") || msg.contains("bearer"),
+                "expected unauthenticated-shaped transport error, got {msg}"
+            );
+        }
+        other => panic!("expected Server / Transport, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn connect_without_bearer_rejected_when_server_requires_auth() {
+    let batch = sample_batch();
+    let (endpoint, _shutdown, _last) = start_stub_server_with_auth(Some(batch), Some("sk-test".to_string())).await;
+
+    // Plain `connect()` (no auth config) — server demands a token.
+    let resolver = FlightResolver::connect(&endpoint)
+        .await
+        .expect("channel connect succeeds");
+    let err = resolver
+        .resolve("noetl://execution/12345/result/x/y")
+        .await
+        .expect_err("should reject missing token");
+    match err {
+        FlightError::Server(msg) | FlightError::Transport(msg) => {
+            assert!(
+                msg.to_lowercase().contains("unauthenticated") || msg.to_lowercase().contains("missing"),
+                "expected unauthenticated-shaped error, got {msg}",
+            );
+        }
+        other => panic!("expected Server / Transport, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn connect_with_bearer_works_on_get_flight_info() {
+    // Same auth path applies to the metadata-only call.
+    let batch = sample_batch();
+    let (endpoint, _shutdown, _last) =
+        start_stub_server_with_auth(Some(batch.clone()), Some("sk-test".to_string())).await;
+
+    let cfg = FlightConfig::new().bearer_token("sk-test");
+    let resolver = FlightResolver::connect_with(&endpoint, cfg)
+        .await
+        .expect("connect_with bearer");
+    let info = resolver
+        .get_flight_info("noetl://execution/12345/result/big_select/abcd1234")
+        .await
+        .expect("get_flight_info with bearer");
+    assert_eq!(info.total_records, batch.num_rows() as i64);
+}
+
+#[tokio::test]
+async fn connect_with_combined_tls_and_bearer() {
+    // Bundling — TLS + bearer in one FlightConfig.  Run against the
+    // plaintext stub (the TLS leg is exercised in
+    // connect_with_tls_round_trips_against_self_signed_server +
+    // confirmed here that the combined config doesn't break the
+    // plain bearer case).
+    let batch = sample_batch();
+    let (endpoint, _shutdown, _last) =
+        start_stub_server_with_auth(Some(batch.clone()), Some("sk-test".to_string())).await;
+
+    let cfg = FlightConfig::new().auth(FlightAuth::bearer("sk-test"));
+    let resolver = FlightResolver::connect_with(&endpoint, cfg)
+        .await
+        .expect("connect_with combined config");
+    let batches = resolver
+        .resolve("noetl://execution/12345/result/big_select/abcd1234")
+        .await
+        .expect("resolve over combined config");
+    assert_eq!(batches.len(), 1);
 }

@@ -27,16 +27,18 @@
 //! `resolve_rows` for materialising tabular results into typed
 //! `RecordBatch`es / JSON-shaped row dicts.  Phase C1 (0.2.0) adds
 //! `get_flight_info` for schema + row-count discovery without
-//! materialising the payload — useful for sizing buffers or
-//! skipping the fetch entirely for non-tabular refs.  Phase C2.2
-//! (0.3.0, this version) adds [`FlightTlsConfig`] +
-//! [`FlightResolver::connect_with_tls`] so the client can talk to a
-//! TLS-fronted Flight endpoint (the server side opted into via
-//! `NOETL_FLIGHT_TLS_CERT` + `NOETL_FLIGHT_TLS_KEY` in Phase C2.1).
+//! materialising the payload.  Phase C2.2 (0.3.0) adds
+//! [`FlightTlsConfig`] + [`FlightResolver::connect_with_tls`] so the
+//! client can talk to a TLS-fronted Flight endpoint (the server side
+//! opted into via `NOETL_FLIGHT_TLS_CERT` + `NOETL_FLIGHT_TLS_KEY` in
+//! Phase C2.1).  Phase C2.3 (0.4.0, this version) adds
+//! [`FlightAuth`] + [`FlightConfig`] + [`FlightResolver::connect_with`]
+//! so the client can send `Authorization: Bearer <token>` on every
+//! gRPC call, validated by the server's bearer-token middleware
+//! (`NOETL_FLIGHT_BEARER_TOKENS`).
 //!
-//! Bearer-token middleware (C2.3) + mTLS client identity (C2.4) ride
-//! on top of this configuration surface — see the Phase C2 umbrella
-//! at noetl/ai-meta#33.
+//! mTLS client identity (C2.4) rides on the same `FlightTlsConfig`
+//! builder — see the Phase C2 umbrella at noetl/ai-meta#33.
 //!
 //! Wiring the client into a concrete consumer (the noetl-worker for
 //! cross-node tabular reads, the Rust noetl-server once it gains a
@@ -206,6 +208,111 @@ impl FlightTlsConfig {
     }
 }
 
+/// Per-call auth configuration — R-2.3 Phase C2.3.
+///
+/// The token (or future credential variants) is attached to every
+/// outgoing gRPC request via tonic metadata, so the server's bearer-
+/// token middleware (Phase C2.3 server side, noetl/noetl#647) can
+/// validate it.
+///
+/// Auth is independent of TLS: bearer-on + plaintext is a valid combo
+/// for in-cluster deployments behind a separate TLS terminator;
+/// bearer-on + TLS is the typical externally-exposed shape.
+///
+/// Per [`agents/rules/execution-model.md`][exec] the token is a
+/// business-logic credential — the caller should resolve it from the
+/// NoETL keychain by alias rather than embedding the literal value
+/// in playbook config.
+///
+/// [exec]: https://github.com/noetl/ai-meta/blob/main/agents/rules/execution-model.md
+#[derive(Debug, Default, Clone)]
+pub struct FlightAuth {
+    bearer_token: Option<String>,
+}
+
+impl FlightAuth {
+    /// New empty auth config (anonymous calls — no `Authorization`
+    /// header).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct directly from a bearer token (convenience for the
+    /// common case).  Equivalent to
+    /// `FlightAuth::new().bearer_token(token)`.
+    pub fn bearer(token: impl Into<String>) -> Self {
+        Self::new().bearer_token(token)
+    }
+
+    /// Set the bearer token sent as `Authorization: Bearer <token>`
+    /// on every outgoing gRPC request.  Repeated calls overwrite the
+    /// previous value.
+    pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(token.into());
+        self
+    }
+}
+
+/// Combined connect-time configuration — R-2.3 Phase C2.3.
+///
+/// Bundles [`FlightTlsConfig`] + [`FlightAuth`] so a caller can
+/// describe the full channel shape (TLS trust + bearer token) in one
+/// builder, rather than chaining different connect methods.  Both
+/// fields are optional and independently controllable.
+///
+/// ## Example — TLS + bearer
+///
+/// ```no_run
+/// # use noetl_arrow_flight_client::{FlightResolver, FlightConfig, FlightTlsConfig, FlightAuth};
+/// # async fn run() -> anyhow::Result<()> {
+/// let tls = FlightTlsConfig::new()
+///     .ca_certificate(std::fs::read("/etc/noetl/flight-ca.pem")?)
+///     .domain_name("noetl-flight.svc.cluster.local");
+/// let auth = FlightAuth::bearer("sk-ant-...");
+/// let cfg = FlightConfig::new().tls(tls).auth(auth);
+///
+/// let resolver = FlightResolver::connect_with(
+///     "https://noetl.example.com:8083",
+///     cfg,
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Default, Clone)]
+pub struct FlightConfig {
+    tls: Option<FlightTlsConfig>,
+    auth: Option<FlightAuth>,
+}
+
+impl FlightConfig {
+    /// New empty config — equivalent to [`FlightResolver::connect`]
+    /// without any extras.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attach a TLS configuration.  See [`FlightTlsConfig`] for the
+    /// individual knobs.
+    pub fn tls(mut self, tls: FlightTlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Attach an auth configuration.  See [`FlightAuth`].
+    pub fn auth(mut self, auth: FlightAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Convenience: attach a bearer token without constructing
+    /// a [`FlightAuth`] explicitly.  Equivalent to
+    /// `cfg.auth(FlightAuth::bearer(token))`.
+    pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth = Some(self.auth.unwrap_or_default().bearer_token(token));
+        self
+    }
+}
+
 /// Thin wrapper around `arrow_flight::FlightServiceClient` that
 /// turns ref URIs into `RecordBatch` streams.
 ///
@@ -216,6 +323,7 @@ impl FlightTlsConfig {
 pub struct FlightResolver {
     client: FlightServiceClient<Channel>,
     endpoint: String,
+    bearer_token: Option<String>,
 }
 
 impl FlightResolver {
@@ -242,7 +350,7 @@ impl FlightResolver {
     /// `https://` URLs through this method rely on tonic's default
     /// trust roots, which may not include the cluster CA.
     pub async fn connect(endpoint: impl Into<String>) -> Result<Self> {
-        Self::connect_inner(endpoint.into(), None).await
+        Self::connect_inner(endpoint.into(), FlightConfig::new()).await
     }
 
     /// R-2.3 Phase C2.2: connect with explicit TLS configuration.
@@ -259,21 +367,47 @@ impl FlightResolver {
     /// trust roots — fine for public TLS, not for private CAs.
     ///
     /// See [`FlightTlsConfig`] for the builder; [Phase C2 umbrella][issue]
-    /// for the wider trust-boundary plan (bearer-token middleware is
-    /// C2.3, mTLS client identity is C2.4).
+    /// for the wider trust-boundary plan.
+    ///
+    /// For combined TLS + bearer-token connections, prefer
+    /// [`Self::connect_with`] with a [`FlightConfig`].
     ///
     /// [issue]: https://github.com/noetl/ai-meta/issues/33
     pub async fn connect_with_tls(endpoint: impl Into<String>, tls: FlightTlsConfig) -> Result<Self> {
-        Self::connect_inner(endpoint.into(), Some(tls)).await
+        Self::connect_inner(endpoint.into(), FlightConfig::new().tls(tls)).await
     }
 
-    async fn connect_inner(endpoint_str: String, tls: Option<FlightTlsConfig>) -> Result<Self> {
+    /// R-2.3 Phase C2.3: connect with full channel configuration.
+    ///
+    /// Accepts a [`FlightConfig`] that bundles optional TLS +
+    /// optional bearer-token auth.  Both knobs are independently
+    /// opt-in:
+    ///
+    /// - `FlightConfig::new()` — equivalent to [`Self::connect`].
+    /// - `FlightConfig::new().tls(tls)` — equivalent to
+    ///   [`Self::connect_with_tls`].
+    /// - `FlightConfig::new().bearer_token("…")` — bearer-token only
+    ///   (plaintext h2c with bearer is a valid combo when a separate
+    ///   TLS terminator fronts the Flight port).
+    /// - `FlightConfig::new().tls(tls).bearer_token("…")` —
+    ///   TLS + bearer, the typical externally-exposed shape.
+    ///
+    /// When a bearer token is set, every outgoing gRPC request
+    /// includes an `authorization: Bearer <token>` header.  The
+    /// server side (noetl/noetl#647) validates the token against
+    /// `NOETL_FLIGHT_BEARER_TOKENS` and rejects with
+    /// `FlightUnauthenticatedError` on mismatch.
+    pub async fn connect_with(endpoint: impl Into<String>, config: FlightConfig) -> Result<Self> {
+        Self::connect_inner(endpoint.into(), config).await
+    }
+
+    async fn connect_inner(endpoint_str: String, config: FlightConfig) -> Result<Self> {
         let mut endpoint = Endpoint::from_shared(endpoint_str.clone())
             .with_context(|| format!("parse Flight endpoint {endpoint_str}"))?
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30));
 
-        if let Some(tls) = tls {
+        if let Some(tls) = config.tls {
             endpoint = endpoint
                 .tls_config(tls.to_tonic())
                 .with_context(|| format!("configure TLS for Flight endpoint {endpoint_str}"))?;
@@ -284,10 +418,27 @@ impl FlightResolver {
             .await
             .with_context(|| format!("connect to Flight endpoint {endpoint_str}"))?;
         let client = FlightServiceClient::new(channel);
+        let bearer_token = config.auth.and_then(|a| a.bearer_token);
         Ok(Self {
             client,
             endpoint: endpoint_str,
+            bearer_token,
         })
+    }
+
+    /// Attach the configured `Authorization: Bearer <token>` header
+    /// to a tonic Request when bearer auth is enabled.  No-op when
+    /// the resolver was constructed without auth.
+    fn apply_auth<T>(&self, req: &mut tonic::Request<T>) -> Result<(), FlightError> {
+        let Some(token) = &self.bearer_token else {
+            return Ok(());
+        };
+        let value_str = format!("Bearer {token}");
+        let metadata_value: tonic::metadata::MetadataValue<_> = value_str
+            .parse()
+            .map_err(|e| FlightError::Transport(format!("invalid bearer token (must be ASCII-safe): {e}")))?;
+        req.metadata_mut().insert("authorization", metadata_value);
+        Ok(())
     }
 
     /// Endpoint this resolver is connected to.  Useful for logging.
@@ -328,8 +479,10 @@ impl FlightResolver {
             cmd: ref_uri.as_bytes().to_vec().into(),
             path: Vec::new(),
         };
+        let mut req = tonic::Request::new(descriptor);
+        self.apply_auth(&mut req)?;
         let mut client = self.client.clone();
-        let info: FlightInfo = match client.get_flight_info(descriptor).await {
+        let info: FlightInfo = match client.get_flight_info(req).await {
             Ok(response) => response.into_inner(),
             Err(status) => return Err(classify_status(ref_uri, &status)),
         };
@@ -399,9 +552,11 @@ impl FlightResolver {
         let ticket = Ticket {
             ticket: ref_uri.as_bytes().to_vec().into(),
         };
+        let mut req = tonic::Request::new(ticket);
+        self.apply_auth(&mut req)?;
 
         let mut client = self.client.clone();
-        let stream = match client.do_get(ticket).await {
+        let stream = match client.do_get(req).await {
             Ok(response) => response.into_inner(),
             Err(status) => {
                 return Err(classify_status(ref_uri, &status));
