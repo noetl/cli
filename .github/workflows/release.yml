@@ -159,6 +159,57 @@ jobs:
         if: ${{ steps.arrow_cache_check.outputs.already_published == 'true' }}
         run: echo "noetl-arrow-cache version ${{ steps.arrow_cache_version.outputs.version }} already on crates.io; skipping."
 
+      # ---- noetl-arrow-flight-client (workspace member) --------------
+      # R-2.3 Phase B: same shape as the noetl-arrow-cache block above.
+      # Independent version (tracks the Arrow Flight client API, not
+      # the CLI's release cadence).  Pairs with the Python server in
+      # noetl/noetl#643 + the wiki page
+      # https://github.com/noetl/noetl/wiki/arrow_flight_result_fetch.
+      - name: Get noetl-arrow-flight-client version
+        id: arrow_flight_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARROW_FLIGHT_VERSION=$(grep -E '^version = ' arrow-flight-client/Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=${ARROW_FLIGHT_VERSION}" >> "${GITHUB_OUTPUT}"
+      - name: Check noetl-arrow-flight-client version on crates.io
+        id: arrow_flight_check
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.arrow_flight_version.outputs.version }}"
+          if curl -fsS -H "User-Agent: noetl-cli-release" "https://crates.io/api/v1/crates/noetl-arrow-flight-client/${VERSION}" >/dev/null; then
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Publish noetl-arrow-flight-client
+        if: ${{ env.CRATES_IO_TOKEN != '' && steps.arrow_flight_check.outputs.already_published != 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ env.CRATES_IO_TOKEN }}
+        shell: bash
+        run: |
+          set +e
+          OUTPUT="$(cargo publish -p noetl-arrow-flight-client 2>&1)"
+          STATUS=$?
+          set -e
+
+          echo "${OUTPUT}"
+
+          if [[ ${STATUS} -eq 0 ]]; then
+            exit 0
+          fi
+
+          if echo "${OUTPUT}" | grep -Eqi "already uploaded|already exists"; then
+            echo "noetl-arrow-flight-client version already published; continuing."
+            exit 0
+          fi
+
+          exit ${STATUS}
+      - name: Skip noetl-arrow-flight-client publish (already on crates.io)
+        if: ${{ steps.arrow_flight_check.outputs.already_published == 'true' }}
+        run: echo "noetl-arrow-flight-client version ${{ steps.arrow_flight_version.outputs.version }} already on crates.io; skipping."
+
       # ---- noetl + ntl binaries (workspace root) ----------------------
       - name: Check crate version on crates.io
         id: crate_check
