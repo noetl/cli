@@ -13,8 +13,6 @@ use serde_yaml;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-
 // ---------------------------------------------------------------------------
 // YAML playbook types (R-1.1 PR-2a, see Appendix H of the global hybrid
 // cloud blueprint).
@@ -1119,7 +1117,19 @@ impl PlaybookRunner {
                             eprintln!("   Sink to GCS: {}", gcs_uri);
                         }
 
-                        self.sink_to_gcs(&gcs_uri, &formatted_data)?;
+                        // R-3, noetl/ai-meta#31: replaced `gsutil cp` subprocess
+                        // with `object_store` crate via the executor bridge helper.
+                        // Auth flows through ADC / workload-identity — same chain as
+                        // `resolve_auth_to_bearer` and the former gsutil call.
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(
+                                noetl_executor::tools_bridge::gcs_upload(
+                                    &rendered_bucket,
+                                    &rendered_path,
+                                    &formatted_data,
+                                ),
+                            )
+                        })?;
                         Ok(Some(format!("Uploaded to {}", gcs_uri)))
                     }
                 }
@@ -1282,26 +1292,6 @@ impl PlaybookRunner {
                 Ok(())
             }
         }
-    }
-
-    /// Sink data to GCS using gsutil
-    fn sink_to_gcs(&self, gcs_uri: &str, data: &str) -> Result<()> {
-        // Write to temp file first
-        let temp_file = tempfile::NamedTempFile::new()?;
-        fs::write(temp_file.path(), data)?;
-
-        // Use gsutil to copy
-        let output = Command::new("gsutil")
-            .args(["cp", temp_file.path().to_str().unwrap(), gcs_uri])
-            .output()
-            .context("Failed to upload to GCS (gsutil not available?)")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to upload to GCS: {}", stderr);
-        }
-
-        Ok(())
     }
 
     fn render_template(&self, template: &str, context: &ExecutionContext) -> Result<String> {
