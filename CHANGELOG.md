@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.8.0](https://github.com/noetl/cli/compare/v4.7.0...v4.8.0) (2026-06-02)
+
+### Features
+
+* **executor:** replace gsutil shellout with object_store GCS helper ([d5f26ff](https://github.com/noetl/cli/commit/d5f26ff2b98c90332b426ab9a7ff7c6229c060cb)), closes [noetl/ai-meta#31](https://github.com/noetl/ai-meta/issues/31)
+
 ## [4.7.0](https://github.com/noetl/cli/compare/v4.6.0...v4.7.0) (2026-06-01)
 
 ### Features
