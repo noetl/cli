@@ -52,5 +52,16 @@ rhai = { version = "1.18", features = ["sync"] }
 # semantic differences surface incrementally instead of all at once.
 noetl-tools = "2.8.7"
 
+# GCS uploads in `tools_bridge::gcs_upload` (R-3 GCS sink migration,
+# noetl/ai-meta#31).  The `gcp` feature pulls in
+# `object_store::gcp::GoogleCloudStorageBuilder` and the required
+# `reqwest`-backed HTTP transport.  No `aws` / `azure` features —
+# those adapters ship in separate follow-up issues.
+object_store = { version = "0.11", features = ["gcp"] }
+# bytes::Bytes is the upload payload type for object_store; listed
+# explicitly so the version contract is visible and to avoid relying
+# on the transitive dep from object_store.
+bytes = "1"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
