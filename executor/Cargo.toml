@@ -1,6 +1,12 @@
 [package]
 name = "noetl-executor"
-version = "0.3.1"
+# 0.4.0 — EE-4 PR 2 (noetl/ai-meta#49 follow-up): the events module
+# now re-exports from the sibling `noetl-events` crate rather than
+# defining ExecutorEvent / EventSink inline.  Wire shape is
+# preserved verbatim (every test moved 1:1), but the dependency
+# graph changes (executor now pulls in noetl-events), so the bump
+# is minor-semver per the published-crate change-tracking rule.
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
