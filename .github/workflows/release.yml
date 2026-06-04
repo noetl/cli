@@ -56,6 +56,59 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
+      # ---- noetl-events (workspace member) ----------------------------
+      # EE-4 PR 2 (noetl/ai-meta#49): the event-envelope crate must
+      # publish BEFORE noetl-executor because the executor's
+      # `events` module re-exports its surface via a path+version
+      # dep.  Once the crate ships its 0.1.0 here, noetl-server can
+      # adopt it directly in EE-4 PR 3 instead of carrying a
+      # hand-aligned EventRequest type.  Independent version (tracks
+      # the wire-envelope shape, not the CLI's release cadence).
+      - name: Get noetl-events version
+        id: events_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVENTS_VERSION=$(grep -E '^version = ' events/Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=${EVENTS_VERSION}" >> "${GITHUB_OUTPUT}"
+      - name: Check noetl-events version on crates.io
+        id: events_check
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.events_version.outputs.version }}"
+          if curl -fsS -H "User-Agent: noetl-cli-release" "https://crates.io/api/v1/crates/noetl-events/${VERSION}" >/dev/null; then
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Publish noetl-events
+        if: ${{ env.CRATES_IO_TOKEN != '' && steps.events_check.outputs.already_published != 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ env.CRATES_IO_TOKEN }}
+        shell: bash
+        run: |
+          set +e
+          OUTPUT="$(cargo publish -p noetl-events 2>&1)"
+          STATUS=$?
+          set -e
+
+          echo "${OUTPUT}"
+
+          if [[ ${STATUS} -eq 0 ]]; then
+            exit 0
+          fi
+
+          if echo "${OUTPUT}" | grep -Eqi "already uploaded|already exists"; then
+            echo "noetl-events version already published; continuing."
+            exit 0
+          fi
+
+          exit ${STATUS}
+      - name: Skip noetl-events publish (already on crates.io)
+        if: ${{ steps.events_check.outputs.already_published == 'true' }}
+        run: echo "noetl-events version ${{ steps.events_version.outputs.version }} already on crates.io; skipping."
+
       # ---- noetl-executor (workspace member) --------------------------
       # R-1.2 PR-1: noetl-executor must publish before the noetl bin
       # because the bin depends on it from crates.io.  The executor's
