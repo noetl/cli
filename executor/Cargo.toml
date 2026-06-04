@@ -33,6 +33,16 @@ thiserror = "1.0"
 # Time + UUID for event ids and timestamps.
 chrono = { version = "0.4", features = ["serde"] }
 
+# EE-4 (noetl/ai-meta#49 follow-up): canonical event envelope +
+# sink lives in the sibling `noetl-events` crate.  The executor's
+# `events` module re-exports its surface verbatim so existing
+# call sites (cli local-mode runner, noetl-worker via
+# `pub use noetl_executor::events::ExecutorEvent`) keep working.
+# Path dep within the workspace; once `noetl-events` ships on
+# crates.io (EE-4 PR 2) this can flip to a versioned dep with a
+# fallback path.
+noetl-events = { version = "0.1.0", path = "../events" }
+
 # Tracing.
 tracing = "0.1"
 

@@ -13,7 +13,13 @@
 # - `arrow-flight-client` — Rust client for the noetl-server's
 #   Arrow Flight `do_get` endpoint.  R-2.3 Phase B; pairs with the
 #   Python server in noetl/noetl#643.
-members = ["executor", "arrow-cache", "arrow-flight-client"]
+# - `events` — shared `ExecutorEvent` envelope + `EventSink` trait.
+#   Carved out of `executor::events` as EE-4 of noetl/ai-meta#49 so
+#   noetl-server can link the canonical event-envelope shape
+#   without dragging in the rest of the executor's surface.
+#   `noetl-executor::events` re-exports every symbol verbatim so
+#   existing call sites in the cli + noetl-worker work unchanged.
+members = ["events", "executor", "arrow-cache", "arrow-flight-client"]
 
 [package]
 name = "noetl"
