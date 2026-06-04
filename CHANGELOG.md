@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.9.0](https://github.com/noetl/cli/compare/v4.8.0...v4.9.0) (2026-06-04)
+
+### Features
+
+* **events:** extract noetl-events workspace crate (EE-4 PR 1) ([a2d9cc1](https://github.com/noetl/cli/commit/a2d9cc105ba50a56d2486034937f94859a5f4a64)), closes [noetl/ai-meta#49](https://github.com/noetl/ai-meta/issues/49) [noetl/ai-meta#49](https://github.com/noetl/ai-meta/issues/49)
+
 ## [4.8.0](https://github.com/noetl/cli/compare/v4.7.0...v4.8.0) (2026-06-02)
 
 ### Features
