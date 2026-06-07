@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.10.0](https://github.com/noetl/cli/compare/v4.9.0...v4.10.0) (2026-06-07)
+
+### Features
+
+* **executor:** propagate ToolResult.pending_callback (noetl-tools 2.21 compat) ([8eb0087](https://github.com/noetl/cli/commit/8eb00876e6ab5f41e2ea0346e8e84f32a28f5f1c)), closes [noetl/tools#37](https://github.com/noetl/tools/issues/37) [noetl/cli#55](https://github.com/noetl/cli/issues/55) [noetl/ai-meta#43](https://github.com/noetl/ai-meta/issues/43)
+
 ## [4.9.0](https://github.com/noetl/cli/compare/v4.8.0...v4.9.0) (2026-06-04)
 
 ### Features
