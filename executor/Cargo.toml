@@ -1,12 +1,16 @@
 [package]
 name = "noetl-executor"
-# 0.4.0 — EE-4 PR 2 (noetl/ai-meta#49 follow-up): the events module
-# now re-exports from the sibling `noetl-events` crate rather than
-# defining ExecutorEvent / EventSink inline.  Wire shape is
-# preserved verbatim (every test moved 1:1), but the dependency
-# graph changes (executor now pulls in noetl-events), so the bump
-# is minor-semver per the published-crate change-tracking rule.
-version = "0.4.0"
+# 0.4.1 — noetl/ai-meta#43 Round 4 follow-up.  noetl-tools 2.21
+# added a new `pending_callback: Option<bool>` field on
+# `ToolResult` (the marker the new `Tool::Container` sets to
+# signal that `call.done` arrives asynchronously via a server-side
+# callback path).  Adding a non-Default field to a public struct
+# breaks struct-literal call sites — the bridge's
+# `reshape_duckdb_result` reconstructs a `ToolResult` by-field, so
+# this patch bump just propagates `result.pending_callback` through
+# the bridge unchanged.  No API surface change on the executor
+# itself, hence patch-level rather than minor.
+version = "0.4.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
@@ -66,7 +70,7 @@ rhai = { version = "1.18", features = ["sync"] }
 # Subsequent sub-PRs (PR-2c-2 onwards per Strategy B) replace one
 # inline tool implementation in playbook_runner.rs at a time so
 # semantic differences surface incrementally instead of all at once.
-noetl-tools = "2.8.7"
+noetl-tools = "2.21"
 
 # GCS uploads in `tools_bridge::gcs_upload` (R-3 GCS sink migration,
 # noetl/ai-meta#31).  The `gcp` feature pulls in

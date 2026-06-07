@@ -575,6 +575,10 @@ fn reshape_duckdb_result(result: ToolResult) -> Result<BridgeOutcome> {
         stderr: result.stderr,
         exit_code: result.exit_code,
         duration_ms: result.duration_ms,
+        // noetl-tools 2.21 added this marker field; the executor
+        // bridge has nothing to attach here (DuckDB doesn't dispatch
+        // async work), so it always falls through as `None`.
+        pending_callback: result.pending_callback,
     })
 }
 
@@ -1395,6 +1399,7 @@ mod tests {
             stderr: None,
             exit_code: Some(1),
             duration_ms: Some(5),
+            pending_callback: None,
         };
         result.exit_code = Some(1);
         let outcome = reshape_http_result(result).unwrap();
