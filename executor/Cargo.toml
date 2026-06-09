@@ -1,16 +1,11 @@
 [package]
 name = "noetl-executor"
-# 0.4.1 — noetl/ai-meta#43 Round 4 follow-up.  noetl-tools 2.21
-# added a new `pending_callback: Option<bool>` field on
-# `ToolResult` (the marker the new `Tool::Container` sets to
-# signal that `call.done` arrives asynchronously via a server-side
-# callback path).  Adding a non-Default field to a public struct
-# breaks struct-literal call sites — the bridge's
-# `reshape_duckdb_result` reconstructs a `ToolResult` by-field, so
-# this patch bump just propagates `result.pending_callback` through
-# the bridge unchanged.  No API surface change on the executor
-# itself, hence patch-level rather than minor.
-version = "0.4.1"
+# 0.5.0 — noetl/ai-meta#77 (explicit input:/set: forward-only data
+# binding).  noetl-tools v3.0.0 is a breaking change: TaskSequenceTool
+# replaces _prev/_results injection with explicit set:/input: forward-
+# only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
+# CLI and noetl-worker resolve to the same major version.
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
@@ -70,7 +65,7 @@ rhai = { version = "1.18", features = ["sync"] }
 # Subsequent sub-PRs (PR-2c-2 onwards per Strategy B) replace one
 # inline tool implementation in playbook_runner.rs at a time so
 # semantic differences surface incrementally instead of all at once.
-noetl-tools = "2.21"
+noetl-tools = "3"
 
 # GCS uploads in `tools_bridge::gcs_upload` (R-3 GCS sink migration,
 # noetl/ai-meta#31).  The `gcp` feature pulls in
