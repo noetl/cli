@@ -501,7 +501,7 @@ enum GetResource {
     /// Get credential details with optional data inclusion
     /// Examples:
     ///     noetl get credential my-db-creds
-    ///     noetl get credential google_oauth --include_data=false
+    ///     noetl get credential google_oauth --include-data=false
     ///     noetl --host=localhost --port=8082 get credential aws-credentials
     #[command(verbatim_doc_comment)]
     Credential {
