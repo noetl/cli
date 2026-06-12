@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.11.0](https://github.com/noetl/cli/compare/v4.10.0...v4.11.0) (2026-06-12)
+
+### Features
+
+* noetl subscribe — local-mode subscription listener (RFC [#90](https://github.com/noetl/cli/issues/90) Phase 6) ([a005e32](https://github.com/noetl/cli/commit/a005e32213b4ba6d1b0c6674eacc928f91802fe4)), closes [noetl/cli#59](https://github.com/noetl/cli/issues/59)
+
 ## [4.10.0](https://github.com/noetl/cli/compare/v4.9.0...v4.10.0) (2026-06-07)
 
 ### Features
