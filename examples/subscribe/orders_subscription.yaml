@@ -1,0 +1,30 @@
+# `noetl subscribe` example — pure-local NATS listener (RFC noetl/ai-meta#90 Phase 6).
+#
+# Holds a NATS JetStream pull consumer open in-process and runs the target
+# playbook locally for each message, emitting an event-sourced JSONL trail.
+#
+#   # prepare a stream + durable consumer + publish a few messages, then:
+#   noetl subscribe examples/subscribe/orders_subscription.yaml \
+#     --events ./orders-trail.jsonl --max-messages 5
+#
+# The source's credentials are explicit `user` / `password` fields (NATS does
+# not honor user:pass embedded in the URL when connecting via ConnectOptions);
+# alternatively pass `auth: <alias>` + `--credential cred.json`.
+apiVersion: noetl.io/v1
+kind: Subscription
+metadata:
+  name: orders_local
+spec:
+  source: nats
+  url: nats://localhost:4222
+  user: noetl
+  password: noetl
+  stream: ORDERS_LOCAL
+  consumer: orders-local
+  runtime:
+    batch: 50
+    timeout_ms: 3000
+  dispatch:
+    playbook: ./process_order.yaml
+    payload_from: message.json
+    execution_pool: local

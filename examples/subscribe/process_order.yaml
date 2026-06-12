@@ -1,0 +1,24 @@
+# Target playbook run in-process for each subscription message.
+#
+# The message body is merged to the top level of the workload, so a JSON
+# message `{"order_id": 1, "amount": 10, "region": "us"}` exposes
+# `{{ workload.order_id }}` etc.  The full normalized envelope is also available
+# under `{{ workload.message }}` (id / data / headers / attributes / metadata).
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: process_order_local
+workload:
+  order_id: "0"
+  amount: "0"
+  region: "unknown"
+workflow:
+  - step: start
+    desc: "Process one order received from the subscription"
+    next:
+      - step: log_order
+  - step: log_order
+    tool:
+      kind: shell
+      cmds:
+        - echo "processed order_id={{ workload.order_id }} amount={{ workload.amount }} region={{ workload.region }}"
