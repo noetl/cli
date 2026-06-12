@@ -1,0 +1,50 @@
+# `noetl subscribe` example — local listener WITH a local_disk store-and-forward
+# spool (RFC noetl/ai-meta#90 Phase 6, §8.6).
+#
+# When the declared downstream (`warehouse`) is unreachable, the circuit opens
+# and each message is buffered durably to the local_disk spool instead of being
+# dropped; when the downstream recovers, the spool drains and replays the
+# buffered messages in receive order (idempotent, dead-lettered after
+# max_replay_attempts).  The whole outage is reconstructable from the JSONL
+# event trail (subscription.circuit.opened / message.spooled / circuit.closed /
+# spool.draining / message.replayed).
+#
+#   noetl subscribe examples/subscribe/orders_spool_subscription.yaml \
+#     --events ./spool-trail.jsonl --spool-dir ./spooldir
+#
+# The spool backend is forced to `local_disk` in local mode regardless of what
+# the spec declares (§8.6) — a spec authored for the in-cluster `nats_object`
+# / `gcs` backend runs locally unchanged.
+apiVersion: noetl.io/v1
+kind: Subscription
+metadata:
+  name: orders_spool_local
+spec:
+  source: nats
+  url: nats://localhost:4222
+  user: noetl
+  password: noetl
+  stream: ORDERS_LOCAL
+  consumer: orders-local
+  runtime:
+    batch: 50
+    timeout_ms: 2000
+  dispatch:
+    playbook: ./process_order.yaml
+    payload_from: message.json
+    execution_pool: warehouse
+  spool:
+    mode: buffer_and_ack
+    backend: local_disk
+    ordering: global
+    circuit:
+      trip_after: 1
+      probe_after_ms: 500
+      probe_interval_ms: 400
+      downstream:
+        - name: warehouse
+          type: tcp
+          target: "127.0.0.1:19099"
+    drain:
+      max_replay_attempts: 5
+      on_recovery: ordered_then_live

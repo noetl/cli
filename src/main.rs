@@ -1,5 +1,6 @@
 mod config;
 mod playbook_runner;
+mod subscribe;
 
 use anyhow::{bail, Context as AnyhowContext, Result};
 use base64::prelude::*;
@@ -148,6 +149,63 @@ enum Commands {
         /// Emit only JSON response (distributed runtime)
         #[arg(short, long)]
         json: bool,
+    },
+    /// Run a kind:Subscription listener standalone in local mode (no k8s, no server)
+    ///
+    /// Holds the subscription's source (NATS / Pub/Sub / Kafka) open
+    /// in-process and turns each received message into one local playbook run
+    /// (the pure-local default) or a POST /api/execute (--dispatch server),
+    /// honoring header directives and a local_disk store-and-forward spool.
+    /// Emits the SAME event envelope the in-cluster runtime emits — to a local
+    /// JSONL FileEventSink — so the run produces a replayable event-sourced
+    /// log on disk.  (RFC noetl/ai-meta#90 Phase 6.)
+    ///
+    /// Examples:
+    ///     noetl subscribe ./subscriptions/orders.yaml
+    ///     noetl subscribe orders.yaml --events ./trail.jsonl --once
+    ///     noetl subscribe iot.yaml --max-messages 6 --spool-dir /tmp/spool
+    ///     noetl subscribe orders.yaml --dispatch server --server-url http://localhost:8082
+    #[command(verbatim_doc_comment)]
+    Subscribe {
+        /// Path to a kind:Subscription YAML spec
+        #[arg(value_name = "SPEC")]
+        reference: String,
+
+        /// Dispatch model: local (in-process PlaybookRunner) or server (POST /api/execute)
+        #[arg(long, default_value = "local")]
+        dispatch: String,
+
+        /// Server URL for --dispatch server (defaults to the resolved base URL)
+        #[arg(long)]
+        server_url: Option<String>,
+
+        /// JSONL event-sink path (defaults to ./<name>-events.jsonl)
+        #[arg(long, value_name = "PATH")]
+        events: Option<PathBuf>,
+
+        /// Override the local_disk spool directory
+        #[arg(long, value_name = "DIR")]
+        spool_dir: Option<String>,
+
+        /// Base dir for resolving relative dispatch.playbook refs (default: spec dir)
+        #[arg(long, value_name = "DIR")]
+        playbook_dir: Option<PathBuf>,
+
+        /// Local credential JSON file injected for the source's auth alias
+        #[arg(long, value_name = "FILE")]
+        credential: Option<PathBuf>,
+
+        /// Stop after N handled messages (0 = run continuously)
+        #[arg(long, default_value_t = 0)]
+        max_messages: u64,
+
+        /// Drain the source once then exit
+        #[arg(long)]
+        once: bool,
+
+        /// Verbose dispatch output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Legacy run command (deprecated, use 'exec')
     #[command(name = "run-legacy", hide = true)]
@@ -2271,6 +2329,41 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Some(Commands::Subscribe {
+            reference,
+            dispatch,
+            server_url,
+            events,
+            spool_dir,
+            playbook_dir,
+            credential,
+            max_messages,
+            once,
+            verbose,
+        }) => {
+            // Default the server URL (for --dispatch server) to the resolved
+            // base URL when not given explicitly.
+            let server_url = server_url.or_else(|| {
+                if dispatch == "server" {
+                    Some(base_url.clone())
+                } else {
+                    None
+                }
+            });
+            subscribe::run(subscribe::SubscribeArgs {
+                reference,
+                dispatch,
+                server_url,
+                events,
+                spool_dir,
+                playbook_dir,
+                credential,
+                max_messages,
+                once,
+                verbose,
+            })
+            .await?;
         }
         Some(Commands::RunLegacy {
             reference,

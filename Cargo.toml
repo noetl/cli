@@ -55,6 +55,19 @@ path = "src/main.rs"
 # so this dependency can be satisfied from crates.io.
 noetl-executor = { path = "executor", version = "0.5" }
 
+# noetl/ai-meta#90 Phase 6 — the `noetl subscribe` local-mode listener
+# reuses the same source clients (`build_source`), header-directive engine,
+# and store-and-forward spool engine the in-cluster worker runtime uses, so
+# the event model is identical across CLI-local / in-cluster / Cloud Run.
+# `noetl-tools` "3" resolves to the published crate (v3.5.0+) that carries
+# the Phase 1–5 `tools::source` + `spool` surface; default features pull in
+# the pubsub + kafka + gcs source/backends.  `noetl-events` is the shared
+# `EventSink` trait + `ExecutorEvent` envelope the local `FileEventSink`
+# implements (same wire shape as the worker's NATS/HTTP sinks).
+noetl-tools = "3"
+noetl-events = { path = "events", version = "0.1.0" }
+async-trait = "0.1"
+
 clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
