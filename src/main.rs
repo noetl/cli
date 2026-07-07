@@ -461,6 +461,91 @@ enum Commands {
         #[command(subcommand)]
         command: IapCommand,
     },
+    /// EHDB Data Query Interface - read-only queries over NoETL platform data
+    ///
+    /// Thin read-only client of the server's `/api/ehdb/*` endpoints. Queries
+    /// NoETL's own platform read-model (executions, events, state) — never
+    /// business data. All output is secret-free.
+    ///
+    /// Examples:
+    ///     noetl ehdb query executions
+    ///     noetl ehdb query executions --status COMPLETED --limit 20
+    ///     noetl ehdb query execution 1234567890
+    ///     noetl ehdb query events 1234567890 --json
+    #[command(verbatim_doc_comment)]
+    Ehdb {
+        #[command(subcommand)]
+        command: EhdbCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum EhdbCommand {
+    /// Read-only queries over the NoETL platform read-model
+    Query {
+        #[command(subcommand)]
+        command: EhdbQueryCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum EhdbQueryCommand {
+    /// List executions (projection read-model)
+    /// Examples:
+    ///     noetl ehdb query executions
+    ///     noetl ehdb query executions --status RUNNING --limit 20 --json
+    #[command(verbatim_doc_comment)]
+    Executions {
+        /// Filter by status (e.g. RUNNING, COMPLETED, FAILED, CANCELLED)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Max rows to return (bounded server-side; default 50)
+        #[arg(long)]
+        limit: Option<i32>,
+
+        /// Row offset for pagination
+        #[arg(long)]
+        offset: Option<i32>,
+
+        /// Emit only the JSON response
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// Get one execution's derived-state read-model
+    /// Examples:
+    ///     noetl ehdb query execution 1234567890
+    ///     noetl ehdb query execution 1234567890 --json
+    #[command(verbatim_doc_comment)]
+    Execution {
+        /// Execution ID
+        execution_id: String,
+
+        /// Emit only the JSON response
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// Get the event read-model for one execution
+    /// Examples:
+    ///     noetl ehdb query events 1234567890
+    ///     noetl ehdb query events 1234567890 --limit 200 --after 1234567900 --json
+    #[command(verbatim_doc_comment)]
+    Events {
+        /// Execution ID
+        execution_id: String,
+
+        /// Max events to return (bounded server-side; default 100)
+        #[arg(long)]
+        limit: Option<i32>,
+
+        /// Forward cursor: return events with event_id > after
+        #[arg(long)]
+        after: Option<i64>,
+
+        /// Emit only the JSON response
+        #[arg(short, long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2547,6 +2632,48 @@ async fn main() -> Result<()> {
         Some(Commands::Query { query, schema, format }) => {
             execute_query(&client, &base_url, use_gateway_proxy, &query, &schema, &format).await?;
         }
+        Some(Commands::Ehdb { command }) => match command {
+            EhdbCommand::Query { command } => match command {
+                EhdbQueryCommand::Executions {
+                    status,
+                    limit,
+                    offset,
+                    json,
+                } => {
+                    ehdb_query_executions(
+                        &client,
+                        &base_url,
+                        use_gateway_proxy,
+                        status.as_deref(),
+                        limit,
+                        offset,
+                        json,
+                    )
+                    .await?;
+                }
+                EhdbQueryCommand::Execution { execution_id, json } => {
+                    ehdb_query_execution(&client, &base_url, use_gateway_proxy, &execution_id, json)
+                        .await?;
+                }
+                EhdbQueryCommand::Events {
+                    execution_id,
+                    limit,
+                    after,
+                    json,
+                } => {
+                    ehdb_query_events(
+                        &client,
+                        &base_url,
+                        use_gateway_proxy,
+                        &execution_id,
+                        limit,
+                        after,
+                        json,
+                    )
+                    .await?;
+                }
+            },
+        },
         Some(Commands::Server { command }) => match command {
             ServerCommand::Start { init_db } => {
                 start_server(init_db).await?;
@@ -5218,6 +5345,231 @@ async fn get_credential(
         let status = response.status();
         let text = response.text().await?;
         eprintln!("Failed to get credential: {} - {}", status, text);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// EHDB Data Query Interface — read-only client of the server's `/api/ehdb/*`.
+//
+// Thin client: builds the URL, issues a GET, parses the JSON, and renders a
+// table (or raw JSON with `--json`). All server responses are secret-free by
+// construction (projected read-model columns only), so there is nothing to
+// mask client-side. Read-only — no EHDB subcommand mutates.
+// ---------------------------------------------------------------------------
+
+/// Issue a read-only GET against an `/api/ehdb/...` endpoint and return the
+/// parsed JSON body. On a non-success status, print the error and exit 1
+/// (mirrors the existing CLI error handling in `execute_query` / `get_status`).
+async fn ehdb_get(
+    client: &Client,
+    base_url: &str,
+    use_gateway_proxy: bool,
+    path: &str,
+) -> Result<serde_json::Value> {
+    let url = api_url(base_url, path, use_gateway_proxy);
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .context("Failed to send EHDB query request")?;
+    if response.status().is_success() {
+        let value: serde_json::Value = response.json().await.context("Failed to parse EHDB response")?;
+        Ok(value)
+    } else {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        eprintln!("EHDB query failed: {} - {}", status, text);
+        std::process::exit(1);
+    }
+}
+
+/// Render a simple box-drawing table from string headers + rows. Mirrors the
+/// visual style of `format_as_table` but works on already-stringified cells.
+fn render_ehdb_table(headers: &[&str], rows: &[Vec<String>]) {
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.chars().count());
+            }
+        }
+    }
+
+    let sep = |left: &str, mid: &str, right: &str| {
+        let mut line = String::from(left);
+        for (i, w) in widths.iter().enumerate() {
+            line.push_str(&"─".repeat(w + 2));
+            line.push_str(if i < widths.len() - 1 { mid } else { right });
+        }
+        line
+    };
+
+    println!("{}", sep("┌", "┬", "┐"));
+    let mut header_line = String::from("│");
+    for (i, h) in headers.iter().enumerate() {
+        header_line.push_str(&format!(" {:<width$} │", h, width = widths[i]));
+    }
+    println!("{}", header_line);
+    println!("{}", sep("├", "┼", "┤"));
+    for row in rows {
+        let mut line = String::from("│");
+        for (i, w) in widths.iter().enumerate() {
+            let cell = row.get(i).map(String::as_str).unwrap_or("");
+            line.push_str(&format!(" {:<width$} │", cell, width = *w));
+        }
+        println!("{}", line);
+    }
+    println!("{}", sep("└", "┴", "┘"));
+    println!("({} rows)", rows.len());
+}
+
+/// Render an optional JSON string field, mapping absent/null to a placeholder.
+fn ehdb_field(value: &serde_json::Value, key: &str) -> String {
+    match value.get(key) {
+        Some(serde_json::Value::Null) | None => "-".to_string(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+    }
+}
+
+/// `noetl ehdb query executions` — list executions.
+async fn ehdb_query_executions(
+    client: &Client,
+    base_url: &str,
+    use_gateway_proxy: bool,
+    status: Option<&str>,
+    limit: Option<i32>,
+    offset: Option<i32>,
+    json: bool,
+) -> Result<()> {
+    let mut params: Vec<String> = Vec::new();
+    if let Some(s) = status {
+        params.push(format!("status={}", s));
+    }
+    if let Some(l) = limit {
+        params.push(format!("limit={}", l));
+    }
+    if let Some(o) = offset {
+        params.push(format!("offset={}", o));
+    }
+    let path = if params.is_empty() {
+        "ehdb/executions".to_string()
+    } else {
+        format!("ehdb/executions?{}", params.join("&"))
+    };
+
+    let body = ehdb_get(client, base_url, use_gateway_proxy, &path).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    let empty = Vec::new();
+    let executions = body.get("executions").and_then(|e| e.as_array()).unwrap_or(&empty);
+    let rows: Vec<Vec<String>> = executions
+        .iter()
+        .map(|e| {
+            vec![
+                ehdb_field(e, "execution_id"),
+                ehdb_field(e, "status"),
+                ehdb_field(e, "path"),
+                ehdb_field(e, "event_count"),
+                ehdb_field(e, "started_at"),
+            ]
+        })
+        .collect();
+    render_ehdb_table(
+        &["execution_id", "status", "path", "events", "started_at"],
+        &rows,
+    );
+    Ok(())
+}
+
+/// `noetl ehdb query execution <id>` — one execution's state read-model.
+async fn ehdb_query_execution(
+    client: &Client,
+    base_url: &str,
+    use_gateway_proxy: bool,
+    execution_id: &str,
+    json: bool,
+) -> Result<()> {
+    let path = format!("ehdb/executions/{}", execution_id);
+    let body = ehdb_get(client, base_url, use_gateway_proxy, &path).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    let exists = body.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !exists {
+        println!("Execution {} not found (no read-model rows).", execution_id);
+        return Ok(());
+    }
+    let null = serde_json::Value::Null;
+    let state = body.get("state").unwrap_or(&null);
+    println!("Execution {}", ehdb_field(state, "execution_id"));
+    println!("  status:       {}", ehdb_field(state, "status"));
+    println!("  terminal:     {}", ehdb_field(state, "terminal"));
+    println!("  current_node: {}", ehdb_field(state, "current_node"));
+    println!("  path:         {}", ehdb_field(state, "path"));
+    println!("  catalog_id:   {}", ehdb_field(state, "catalog_id"));
+    println!("  parent:       {}", ehdb_field(state, "parent_execution_id"));
+    println!("  event_count:  {}", ehdb_field(state, "event_count"));
+    println!("  started_at:   {}", ehdb_field(state, "started_at"));
+    println!("  completed_at: {}", ehdb_field(state, "completed_at"));
+    Ok(())
+}
+
+/// `noetl ehdb query events <id>` — event read-model for one execution.
+async fn ehdb_query_events(
+    client: &Client,
+    base_url: &str,
+    use_gateway_proxy: bool,
+    execution_id: &str,
+    limit: Option<i32>,
+    after: Option<i64>,
+    json: bool,
+) -> Result<()> {
+    let mut params: Vec<String> = Vec::new();
+    if let Some(l) = limit {
+        params.push(format!("limit={}", l));
+    }
+    if let Some(a) = after {
+        params.push(format!("after={}", a));
+    }
+    let path = if params.is_empty() {
+        format!("ehdb/executions/{}/events", execution_id)
+    } else {
+        format!("ehdb/executions/{}/events?{}", execution_id, params.join("&"))
+    };
+
+    let body = ehdb_get(client, base_url, use_gateway_proxy, &path).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    let empty = Vec::new();
+    let events = body.get("events").and_then(|e| e.as_array()).unwrap_or(&empty);
+    let rows: Vec<Vec<String>> = events
+        .iter()
+        .map(|e| {
+            vec![
+                ehdb_field(e, "event_id"),
+                ehdb_field(e, "event_type"),
+                ehdb_field(e, "node_name"),
+                ehdb_field(e, "status"),
+                ehdb_field(e, "created_at"),
+            ]
+        })
+        .collect();
+    render_ehdb_table(
+        &["event_id", "event_type", "node_name", "status", "created_at"],
+        &rows,
+    );
+    if let Some(cursor) = body.get("next_cursor").and_then(|c| c.as_str()) {
+        println!("next_cursor: {} (pass --after {})", cursor, cursor);
     }
     Ok(())
 }
