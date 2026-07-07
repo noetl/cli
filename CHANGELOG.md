@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.12.0](https://github.com/noetl/cli/compare/v4.11.0...v4.12.0) (2026-07-07)
+
+### Features
+
+* **ehdb:** noetl ehdb query — read-only CLI console for the EHDB Query Interface ([#61](https://github.com/noetl/cli/issues/61)) ([78c139b](https://github.com/noetl/cli/commit/78c139bad30cb65ed710d4a1641c323112ddb0ab)), closes [noetl/ai-meta#178](https://github.com/noetl/ai-meta/issues/178) [noetl/server#277](https://github.com/noetl/server/issues/277) [noetl/ai-meta#178](https://github.com/noetl/ai-meta/issues/178)
+
 ## [4.11.0](https://github.com/noetl/cli/compare/v4.10.0...v4.11.0) (2026-06-12)
 
 ### Features
