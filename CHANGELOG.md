@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.13.0](https://github.com/noetl/cli/compare/v4.12.0...v4.13.0) (2026-07-11)
+
+### Features
+
+* **ehdb:** `noetl ehdb query tier` raw data-plane tier console ([#178](https://github.com/noetl/cli/issues/178)) ([#62](https://github.com/noetl/cli/issues/62)) ([c168f42](https://github.com/noetl/cli/commit/c168f4266516e0ee4fe9f11df3b13e64b8da208c))
+
 ## [4.12.0](https://github.com/noetl/cli/compare/v4.11.0...v4.12.0) (2026-07-07)
 
 ### Features
