@@ -546,6 +546,75 @@ enum EhdbQueryCommand {
         #[arg(short, long)]
         json: bool,
     },
+    /// Query a raw data-plane tier (eventlog | kv | object | vector)
+    ///
+    /// Relayed by the server to the worker data-plane (worker-service:9090).
+    /// Read-only + secret-free; disabled unless EHDB is enabled on the worker.
+    /// Examples:
+    ///     noetl ehdb query tier eventlog --limit 20
+    ///     noetl ehdb query tier eventlog --execution 1234567890
+    ///     noetl ehdb query tier kv --bucket noetl-state --prefix exec/
+    ///     noetl ehdb query tier kv --bucket noetl-state --key exec/123/status
+    ///     noetl ehdb query tier object --prefix noetl/ --limit 50
+    ///     noetl ehdb query tier object --key noetl/123/state --op locate
+    ///     noetl ehdb query tier vector --collection c --model-id m --vector 0.1,0.2,0.3 --top-k 5
+    #[command(verbatim_doc_comment)]
+    Tier {
+        /// Tier to query: eventlog | kv | object | vector
+        tier: String,
+
+        /// (eventlog) read one execution's ordered log instead of a global scan
+        #[arg(long)]
+        execution: Option<String>,
+
+        /// (kv) bucket to read
+        #[arg(long)]
+        bucket: Option<String>,
+
+        /// (kv get / object get|locate) the key to read
+        #[arg(long)]
+        key: Option<String>,
+
+        /// (kv scan / object list) key prefix filter
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// (object) op: get | list | locate (default: get if --key, else list)
+        #[arg(long)]
+        op: Option<String>,
+
+        /// (vector) collection name
+        #[arg(long)]
+        collection: Option<String>,
+
+        /// (vector) embedding model id
+        #[arg(long)]
+        model_id: Option<String>,
+
+        /// (vector) query embedding as comma-separated floats (e.g. 0.1,0.2,-0.3)
+        #[arg(long)]
+        vector: Option<String>,
+
+        /// (vector) number of top hits to return
+        #[arg(long)]
+        top_k: Option<usize>,
+
+        /// Forward cursor for eventlog scan/read (global_sequence > after)
+        #[arg(long)]
+        after: Option<u64>,
+
+        /// Max rows to return (bounded worker-side; default 100)
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Correlation id echoed into the worker query span (traceability)
+        #[arg(long)]
+        execution_id: Option<String>,
+
+        /// Emit only the JSON response
+        #[arg(short, long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2671,6 +2740,39 @@ async fn main() -> Result<()> {
                         json,
                     )
                     .await?;
+                }
+                EhdbQueryCommand::Tier {
+                    tier,
+                    execution,
+                    bucket,
+                    key,
+                    prefix,
+                    op,
+                    collection,
+                    model_id,
+                    vector,
+                    top_k,
+                    after,
+                    limit,
+                    execution_id,
+                    json,
+                } => {
+                    let args = EhdbTierArgs {
+                        execution,
+                        bucket,
+                        key,
+                        prefix,
+                        op,
+                        collection,
+                        model_id,
+                        vector,
+                        top_k,
+                        after,
+                        limit,
+                        execution_id,
+                    };
+                    ehdb_query_tier(&client, &base_url, use_gateway_proxy, &tier, &args, json)
+                        .await?;
                 }
             },
         },
@@ -5570,6 +5672,195 @@ async fn ehdb_query_events(
     );
     if let Some(cursor) = body.get("next_cursor").and_then(|c| c.as_str()) {
         println!("next_cursor: {} (pass --after {})", cursor, cursor);
+    }
+    Ok(())
+}
+
+/// Minimal percent-encoder for a query-string value: keeps the unreserved set
+/// (`A-Za-z0-9-_.~`) verbatim and `%XX`-encodes every other byte. Enough for the
+/// EHDB tier params (keys, prefixes with `/`, comma-separated vectors) without
+/// pulling in a URL-encoding dependency.
+fn urlencode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for &b in value.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Optional per-tier args for `noetl ehdb query tier`, grouped so the dispatch
+/// signature stays readable (clippy::too_many_arguments).
+struct EhdbTierArgs {
+    execution: Option<String>,
+    bucket: Option<String>,
+    key: Option<String>,
+    prefix: Option<String>,
+    op: Option<String>,
+    collection: Option<String>,
+    model_id: Option<String>,
+    vector: Option<String>,
+    top_k: Option<usize>,
+    after: Option<u64>,
+    limit: Option<usize>,
+    execution_id: Option<String>,
+}
+
+/// `noetl ehdb query tier <eventlog|kv|object|vector> ...` — raw data-plane tier
+/// query.  The server relays this to the worker data-plane; the response is the
+/// tier `*Outcome` (secret-free).  Renders a per-tier table (or `--json`).
+async fn ehdb_query_tier(
+    client: &Client,
+    base_url: &str,
+    use_gateway_proxy: bool,
+    tier: &str,
+    args: &EhdbTierArgs,
+    json: bool,
+) -> Result<()> {
+    let tier_l = tier.trim().to_ascii_lowercase();
+    // Build the forwarded query string (only set params get forwarded).
+    let mut params: Vec<(&str, String)> = Vec::new();
+    let mut push = |k: &'static str, v: &Option<String>| {
+        if let Some(val) = v {
+            params.push((k, val.clone()));
+        }
+    };
+    push("execution", &args.execution);
+    push("bucket", &args.bucket);
+    push("key", &args.key);
+    push("prefix", &args.prefix);
+    push("op", &args.op);
+    push("collection", &args.collection);
+    push("model_id", &args.model_id);
+    push("vector", &args.vector);
+    push("execution_id", &args.execution_id);
+    if let Some(t) = args.top_k {
+        params.push(("top_k", t.to_string()));
+    }
+    if let Some(a) = args.after {
+        params.push(("after", a.to_string()));
+    }
+    if let Some(l) = args.limit {
+        params.push(("limit", l.to_string()));
+    }
+
+    let query = params
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, urlencode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let path = if query.is_empty() {
+        format!("ehdb/tiers/{}", tier_l)
+    } else {
+        format!("ehdb/tiers/{}?{}", tier_l, query)
+    };
+
+    let body = ehdb_get(client, base_url, use_gateway_proxy, &path).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    let outcome = body.get("outcome").and_then(|v| v.as_str()).unwrap_or("?");
+    let op = body.get("op").and_then(|v| v.as_str()).unwrap_or("?");
+    println!("tier={tier_l} op={op} outcome={outcome}");
+    let null = serde_json::Value::Null;
+    let result = body.get("result").unwrap_or(&null);
+
+    match tier_l.as_str() {
+        "eventlog" => {
+            let empty = Vec::new();
+            let records = result.get("records").and_then(|r| r.as_array()).unwrap_or(&empty);
+            let rows: Vec<Vec<String>> = records
+                .iter()
+                .map(|r| {
+                    vec![
+                        ehdb_field(r, "global_sequence"),
+                        ehdb_field(r, "execution_id"),
+                        ehdb_field(r, "transaction_id"),
+                        ehdb_field(r, "byte_len"),
+                    ]
+                })
+                .collect();
+            render_ehdb_table(
+                &["global_seq", "execution_id", "transaction_id", "byte_len"],
+                &rows,
+            );
+        }
+        "kv" => {
+            // `get` returns a single `entry`; `scan` returns `entries`.
+            if let Some(entry) = result.get("entry").filter(|e| !e.is_null()) {
+                render_ehdb_table(
+                    &["bucket", "key", "version", "value"],
+                    &[vec![
+                        ehdb_field(entry, "bucket"),
+                        ehdb_field(entry, "key"),
+                        ehdb_field(entry, "version"),
+                        ehdb_field(entry, "value"),
+                    ]],
+                );
+            } else {
+                let empty = Vec::new();
+                let entries = result.get("entries").and_then(|e| e.as_array()).unwrap_or(&empty);
+                let rows: Vec<Vec<String>> = entries
+                    .iter()
+                    .map(|e| {
+                        vec![
+                            ehdb_field(e, "bucket"),
+                            ehdb_field(e, "key"),
+                            ehdb_field(e, "version"),
+                            ehdb_field(e, "value"),
+                        ]
+                    })
+                    .collect();
+                render_ehdb_table(&["bucket", "key", "version", "value"], &rows);
+            }
+        }
+        "object" => {
+            // `list` returns `entries`; `get`/`locate` return top-level metadata.
+            if let Some(entries) = result.get("entries").and_then(|e| e.as_array()) {
+                let rows: Vec<Vec<String>> = entries
+                    .iter()
+                    .map(|e| {
+                        vec![
+                            ehdb_field(e, "key"),
+                            ehdb_field(e, "digest"),
+                            ehdb_field(e, "byte_len"),
+                            ehdb_field(e, "version"),
+                        ]
+                    })
+                    .collect();
+                render_ehdb_table(&["key", "digest", "byte_len", "version"], &rows);
+            } else {
+                render_ehdb_table(
+                    &["key", "found", "digest", "byte_len", "uri"],
+                    &[vec![
+                        ehdb_field(result, "key"),
+                        ehdb_field(result, "found"),
+                        ehdb_field(result, "digest"),
+                        ehdb_field(result, "byte_len"),
+                        ehdb_field(result, "uri"),
+                    ]],
+                );
+            }
+        }
+        "vector" => {
+            let empty = Vec::new();
+            let hits = result.get("hits").and_then(|h| h.as_array()).unwrap_or(&empty);
+            let rows: Vec<Vec<String>> = hits
+                .iter()
+                .map(|h| vec![ehdb_field(h, "point_id"), ehdb_field(h, "score")])
+                .collect();
+            render_ehdb_table(&["point_id", "score"], &rows);
+        }
+        _ => {
+            // Unknown tier (or an error body) — show the structured result.
+            println!("{}", serde_json::to_string_pretty(result)?);
+        }
     }
     Ok(())
 }
