@@ -462,7 +462,9 @@ jobs:
           git push origin HEAD:main
       - name: Skip tap publish
         if: ${{ steps.homebrew_token.outputs.usable == 'false' }}
-        run: echo "HOMEBREW_TAP_PUSH_TOKEN is not set or cannot access noetl/homebrew-tap; skipping Homebrew tap update."
+        run: |
+          echo "::warning title=Homebrew tap not updated::HOMEBREW_TAP_PUSH_TOKEN is not set or cannot access noetl/homebrew-tap; skipping Homebrew tap update. The tap formula was NOT bumped for this release. Set/authorize the secret to publish."
+          echo "HOMEBREW_TAP_PUSH_TOKEN is not set or cannot access noetl/homebrew-tap; skipping Homebrew tap update."
 
   update-apt-repo:
     runs-on: ubuntu-latest
@@ -524,4 +526,6 @@ jobs:
           git push origin HEAD:main
       - name: Skip APT publish
         if: ${{ steps.apt_token.outputs.usable == 'false' }}
-        run: echo "APT_REPO_PUSH_TOKEN is not set or cannot access noetl/apt; skipping APT repo update."
+        run: |
+          echo "::warning title=APT repo not updated::APT_REPO_PUSH_TOKEN is not set or cannot access noetl/apt; skipping APT repo update. The .deb was attached to the GitHub release but the apt repository index was NOT updated for this release. Set/authorize the secret to publish."
+          echo "APT_REPO_PUSH_TOKEN is not set or cannot access noetl/apt; skipping APT repo update."
