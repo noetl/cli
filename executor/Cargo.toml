@@ -78,5 +78,18 @@ object_store = { version = "0.11", features = ["gcp"] }
 # on the transitive dep from object_store.
 bytes = "1"
 
+[features]
+# DuckDB integration — passthrough to `noetl-tools/duckdb-integration`.
+# noetl-tools >= 3.20.0 gates the DuckDB C++ engine (libduckdb-sys) behind a
+# non-default feature (noetl/ai-meta#185) so builds that never run duckdb steps
+# skip the multi-hour C++ compile.  noetl-executor routes `duckdb` steps through
+# `noetl_tools::tools::DuckdbTool` in `tools_bridge`, so its DuckDB path is a
+# stub unless that feature is enabled.  Off by default here (matching
+# noetl-worker's fast-build default); the cli enables it via its own default
+# passthrough, and feature unification turns it on for the whole cli build
+# graph.  The bridge's real-duckdb dispatch test is gated on this feature.
+default = []
+duckdb-integration = ["noetl-tools/duckdb-integration"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

@@ -61,9 +61,9 @@ use object_store::ObjectStore;
 use object_store::PutPayload;
 use noetl_tools::auth::GcpAuth;
 use noetl_tools::context::ExecutionContext as ToolsExecutionContext;
-use noetl_tools::registry::{Tool as ToolsRegistryTool, ToolConfig};
+use noetl_tools::registry::{AuthConfig as ToolsAuthConfig, Tool as ToolsRegistryTool, ToolConfig};
 use noetl_tools::result::{ToolResult, ToolStatus};
-use noetl_tools::tools::{DuckdbTool, HttpTool, RhaiTool, ShellTool};
+use noetl_tools::tools::{DuckdbTool, HttpTool, ProviderTool, RhaiTool, ShellTool};
 use tracing::{info_span, Instrument};
 
 use crate::playbook::{AuthConfig as CliAuthConfig, CmdsList, SinkFormat, Tool};
@@ -342,6 +342,41 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
                 "format": format!("{:?}", format).to_lowercase(),
             }),
         ),
+        Tool::Provider {
+            provider,
+            runtime,
+            action,
+            service,
+            dry_run,
+            input,
+            poll,
+            // `auth` is mapped to ToolConfig.auth in the dispatch arm, not into
+            // the config body (the ProviderSpec ignores an `auth` config key).
+            auth: _,
+        } => {
+            // Assemble the provider config body the noetl-tools ProviderSpec
+            // deserializes.  Optional fields are omitted when absent so the
+            // tool's own serde defaults (e.g. runtime=rest, dry_run=true) apply.
+            let mut cfg = serde_json::Map::new();
+            cfg.insert("provider".into(), serde_json::json!(provider));
+            cfg.insert("action".into(), serde_json::json!(action));
+            if let Some(r) = runtime {
+                cfg.insert("runtime".into(), serde_json::json!(r));
+            }
+            if let Some(s) = service {
+                cfg.insert("service".into(), serde_json::json!(s));
+            }
+            if let Some(d) = dry_run {
+                cfg.insert("dry_run".into(), yaml_to_json(d));
+            }
+            if let Some(i) = input {
+                cfg.insert("input".into(), yaml_to_json(i));
+            }
+            if let Some(p) = poll {
+                cfg.insert("poll".into(), yaml_to_json(p));
+            }
+            ("provider", serde_json::Value::Object(cfg))
+        }
         Tool::Unsupported => ("unsupported", serde_json::json!({})),
     };
 
@@ -1193,10 +1228,57 @@ pub async fn dispatch_via_registry(
                  is tracked as a separate follow-up."
             );
         }
+        Tool::Provider { auth, .. } => {
+            // Dispatch through noetl-tools' ProviderTool — the SAME tool the
+            // distributed worker runs.  Local mode therefore executes the cloud
+            // provider action grammar, plan/apply, and LRO polling identically;
+            // there is no CLI-side reimplementation.
+            //
+            // Dry-run (the default, and the credential-free plan path) needs no
+            // auth.  For an apply-mode call the provider's `auth:` block is
+            // mapped into the noetl-tools AuthConfig here; the ProviderTool
+            // refuses an apply with no auth (no ambient ADC fallback).
+            let mut config = to_tools_config(tool);
+            config.auth = match auth {
+                Some(a) => Some(provider_auth_to_tools(a)?),
+                None => None,
+            };
+            let ctx = to_tools_context(bridge);
+            let provider_tool = ProviderTool::new();
+            let result = provider_tool
+                .execute(&config, &ctx)
+                .await
+                .map_err(|e| anyhow::anyhow!("provider dispatch failed: {}", e))?;
+            from_tools_result(result)
+        }
         Tool::Unsupported => {
             anyhow::bail!("unsupported tool kind");
         }
     }
+}
+
+/// Convert a `serde_yaml::Value` to a `serde_json::Value` for the noetl-tools
+/// config body.  Provider config sub-blocks (`input`, `poll`, `dry_run`) arrive
+/// as YAML values from the CLI playbook parse; the tool consumes JSON.
+fn yaml_to_json(v: &serde_yaml::Value) -> serde_json::Value {
+    serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+}
+
+/// Map a provider `auth:` block (raw YAML) into the noetl-tools `AuthConfig`.
+///
+/// The provider auth shape (`type: gcp_adc`, `credential:`, `scopes:`) maps
+/// directly onto the noetl-tools `AuthConfig` serde surface, so this is a
+/// convert-through-JSON.  A malformed block is reported rather than silently
+/// dropped — an apply-mode step with a broken `auth:` should fail loudly.
+fn provider_auth_to_tools(auth: &serde_yaml::Value) -> Result<ToolsAuthConfig> {
+    let json = yaml_to_json(auth);
+    serde_json::from_value::<ToolsAuthConfig>(json).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid provider `auth:` block (expected e.g. `type: gcp_adc`, \
+             `credential: <alias>`, `scopes: [...]`): {}",
+            e
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,6 +1330,124 @@ mod tests {
         assert_eq!(cfg.config["shell"], "bash");
         assert_eq!(cfg.config["capture"], true);
         assert!(cfg.timeout.is_none());
+    }
+
+    #[test]
+    fn to_tools_config_provider_assembles_config_body() {
+        let tool = Tool::Provider {
+            provider: "google".into(),
+            runtime: Some("rest".into()),
+            action: "google.cloudresourcemanager.folders.list".into(),
+            service: None,
+            dry_run: Some(serde_yaml::Value::Bool(true)),
+            input: Some(serde_yaml::to_value(serde_json::json!({
+                "parent": "organizations/1"
+            }))
+            .unwrap()),
+            poll: Some(serde_yaml::to_value(serde_json::json!({
+                "max_attempts": 5
+            }))
+            .unwrap()),
+            auth: None,
+        };
+        let cfg = to_tools_config(&tool);
+        assert_eq!(cfg.kind, "provider");
+        assert_eq!(cfg.config["provider"], "google");
+        assert_eq!(
+            cfg.config["action"],
+            "google.cloudresourcemanager.folders.list"
+        );
+        assert_eq!(cfg.config["runtime"], "rest");
+        assert_eq!(cfg.config["dry_run"], true);
+        assert_eq!(cfg.config["input"]["parent"], "organizations/1");
+        assert_eq!(cfg.config["poll"]["max_attempts"], 5);
+        // Absent optionals are omitted so the tool's serde defaults apply.
+        assert!(cfg.config.get("service").is_none());
+        // Auth is threaded through ToolConfig.auth by the dispatch arm, never
+        // into the config body.
+        assert!(cfg.config.get("auth").is_none());
+    }
+
+    #[test]
+    fn provider_auth_to_tools_maps_gcp_adc_block() {
+        let auth = serde_yaml::to_value(serde_json::json!({
+            "type": "gcp_adc",
+            "credential": "gcp_org_admin",
+            "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
+        }))
+        .unwrap();
+        let mapped = provider_auth_to_tools(&auth).unwrap();
+        assert_eq!(mapped.credential.as_deref(), Some("gcp_org_admin"));
+        assert_eq!(
+            mapped.scopes.as_deref(),
+            Some(&["https://www.googleapis.com/auth/cloud-platform".to_string()][..])
+        );
+
+        // A malformed block is reported, not silently dropped.
+        let bad = serde_yaml::to_value(serde_json::json!({ "type": "not_a_real_type" })).unwrap();
+        assert!(provider_auth_to_tools(&bad).is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_provider_dry_run_returns_would_call_no_auth() {
+        // Dry-run provider dispatch through the bridge: no auth needed, no
+        // network, returns the plan the tool would send.
+        let tool = Tool::Provider {
+            provider: "google".into(),
+            runtime: None,
+            action: "google.cloudresourcemanager.folders.list".into(),
+            service: None,
+            dry_run: Some(serde_yaml::Value::Bool(true)),
+            input: Some(
+                serde_yaml::to_value(serde_json::json!({ "parent": "organizations/42" })).unwrap(),
+            ),
+            poll: None,
+            auth: None,
+        };
+        let vars = empty_vars();
+        let outcome = dispatch_via_registry(&tool, &bridge_ctx(&vars))
+            .await
+            .unwrap();
+        let result = outcome.result.expect("provider dry-run returns a result");
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["dry_run"], serde_json::json!(true));
+        assert_eq!(json["would_call"]["method"], serde_json::json!("GET"));
+        assert_eq!(
+            json["would_call"]["url"],
+            serde_json::json!(
+                "https://cloudresourcemanager.googleapis.com/v3/folders?parent=organizations/42"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_provider_apply_without_auth_errors_no_network() {
+        // Apply mode (dry_run=false) with no auth block → the tool refuses with
+        // a Configuration error and makes no network call.  The bridge surfaces
+        // it as a dispatch error rather than a silent empty outcome.
+        let tool = Tool::Provider {
+            provider: "google".into(),
+            runtime: None,
+            action: "google.serviceusage.services.enable".into(),
+            service: None,
+            dry_run: Some(serde_yaml::Value::Bool(false)),
+            input: Some(
+                serde_yaml::to_value(serde_json::json!({
+                    "project_id": "p", "service_name": "youtube.googleapis.com"
+                }))
+                .unwrap(),
+            ),
+            poll: None,
+            auth: None,
+        };
+        let vars = empty_vars();
+        let err = dispatch_via_registry(&tool, &bridge_ctx(&vars))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("apply mode") || err.to_string().contains("auth"),
+            "error names the missing auth: {err}"
+        );
     }
 
     #[test]
@@ -1509,6 +1709,11 @@ mod tests {
         assert_eq!(outcome.result.as_deref(), Some(r#"{"status": "ok"}"#));
     }
 
+    // Requires the real DuckDB engine — noetl-tools >= 3.20.0 gates it behind
+    // `duckdb-integration`, so without the feature this dispatch hits the stub.
+    // The cli enables the feature by default; run
+    // `cargo test -p noetl-executor --features duckdb-integration` for this test.
+    #[cfg(feature = "duckdb-integration")]
     #[tokio::test]
     async fn dispatch_duckdb_select_returns_rows_array() {
         let vars = empty_vars();

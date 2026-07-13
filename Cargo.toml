@@ -41,6 +41,26 @@ path = "src/main.rs"
 name = "ntl"
 path = "src/main.rs"
 
+[features]
+# Enabled by default so every cli build path (cargo install, apt, homebrew)
+# keeps the DuckDB capability.
+default = ["duckdb-integration"]
+# DuckDB integration — passthrough to `noetl-tools/duckdb-integration`.  The cli
+# routes `duckdb` / `ducklake` tool steps through `noetl_tools::tools::DuckdbTool`
+# (via noetl-executor's tools_bridge — see playbook_runner.rs).  noetl-tools
+# >= 3.20.0 gates the DuckDB C++ engine (`libduckdb-sys`) behind this non-default
+# feature (noetl/ai-meta#185); enabling it here keeps cli's noetl-tools DuckDB
+# path REAL after cli re-pins to 3.20.0 (otherwise DuckdbTool becomes a stub
+# that errors at dispatch).
+#
+# In `default` (unlike noetl/worker#183, which keeps it out of default for a fast
+# dev build): the cli already compiles DuckDB via its own `duckdb` dependency
+# below, so this passthrough adds ZERO build cost — the same libduckdb-sys node
+# is shared by feature unification.  Keeping it off default would pay the DuckDB
+# compile anyway AND leave the noetl-tools path a stub — worst of both.
+# REQUIRES noetl-tools >= 3.20.0 (the version that introduced the feature).
+duckdb-integration = ["noetl-tools/duckdb-integration"]
+
 [dependencies]
 # Workspace member crate shipping the shared execution core.  R-1.1
 # PR-2a moves the YAML playbook types out of playbook_runner.rs into

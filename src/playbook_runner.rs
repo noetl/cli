@@ -1174,12 +1174,116 @@ impl PlaybookRunner {
                 })?;
                 Ok(outcome.result)
             }
+            Tool::Provider {
+                provider,
+                runtime,
+                action,
+                service,
+                dry_run,
+                input,
+                poll,
+                auth,
+            } => {
+                // Render every template in the provider block with the CLI's
+                // renderer first (same contract as the http / rhai arms — the
+                // bridge dispatches against already-rendered input), then hand
+                // the rendered Tool::Provider to the noetl-tools ProviderTool
+                // via the bridge.  The tool owns plan/apply + LRO polling; the
+                // CLI local runtime runs the identical tool the worker does.
+                let rendered_dry_run = match dry_run {
+                    Some(v) => Some(self.render_yaml_value(v, context)?),
+                    None => None,
+                };
+                let rendered_input = match input {
+                    Some(v) => Some(self.render_yaml_value(v, context)?),
+                    None => None,
+                };
+                let rendered_poll = match poll {
+                    Some(v) => Some(self.render_yaml_value(v, context)?),
+                    None => None,
+                };
+                let rendered_auth = match auth {
+                    Some(v) => Some(self.render_yaml_value(v, context)?),
+                    None => None,
+                };
+                let rendered_service = match service {
+                    Some(s) => Some(self.render_template(s, context)?),
+                    None => None,
+                };
+
+                if self.verbose {
+                    eprintln!("   ☁️  Executing provider action: {}", action);
+                }
+
+                let rendered_tool = Tool::Provider {
+                    provider: self.render_template(provider, context)?,
+                    runtime: match runtime {
+                        Some(r) => Some(self.render_template(r, context)?),
+                        None => None,
+                    },
+                    action: self.render_template(action, context)?,
+                    service: rendered_service,
+                    dry_run: rendered_dry_run,
+                    input: rendered_input,
+                    poll: rendered_poll,
+                    auth: rendered_auth,
+                };
+                let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
+                    execution_id: 0, // CLI local mode doesn't carry a snowflake id
+                    step: "<cli-local>",
+                    variables: &context.variables,
+                    server_url: String::new(),
+                    worker_id: None,
+                    command_id: None,
+                };
+                let outcome = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                        noetl_executor::tools_bridge::dispatch_via_registry(
+                            &rendered_tool,
+                            &bridge_ctx,
+                        ),
+                    )
+                })?;
+                Ok(outcome.result)
+            }
             Tool::Unsupported => {
                 eprintln!("   Tool not supported in local execution mode");
-                eprintln!("   Supported tools: shell, http, playbook, duckdb, auth, sink");
+                eprintln!("   Supported tools: shell, http, playbook, duckdb, auth, sink, provider");
                 eprintln!("   For other tools (postgres, python, iterator, etc.), use distributed execution");
                 Ok(None)
             }
+        }
+    }
+
+    /// Recursively render every string leaf in a `serde_yaml::Value` with the
+    /// CLI template renderer.  Used to render provider tool config sub-blocks
+    /// (`input`, `poll`, `dry_run`, `auth`) before bridge dispatch.  Mapping
+    /// keys are left verbatim; only values are rendered.
+    fn render_yaml_value(
+        &self,
+        value: &serde_yaml::Value,
+        context: &ExecutionContext,
+    ) -> Result<serde_yaml::Value> {
+        match value {
+            serde_yaml::Value::String(s) => {
+                Ok(serde_yaml::Value::String(self.render_template(s, context)?))
+            }
+            serde_yaml::Value::Sequence(seq) => {
+                let mut out = Vec::with_capacity(seq.len());
+                for item in seq {
+                    out.push(self.render_yaml_value(item, context)?);
+                }
+                Ok(serde_yaml::Value::Sequence(out))
+            }
+            serde_yaml::Value::Mapping(map) => {
+                let mut out = serde_yaml::Mapping::new();
+                for (k, v) in map {
+                    out.insert(k.clone(), self.render_yaml_value(v, context)?);
+                }
+                Ok(serde_yaml::Value::Mapping(out))
+            }
+            // Scalars (bool / number / null / tagged) carry no template.
+            other => Ok(other.clone()),
         }
     }
 
