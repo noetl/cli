@@ -385,6 +385,31 @@ pub enum Tool {
         #[serde(default)]
         args: HashMap<String, String>,
     },
+    /// Cloud provider operation (`kind: provider`) — dispatched through the
+    /// noetl-tools `ProviderTool`.  The CLI captures the provider block's
+    /// fields loosely (`serde_yaml::Value` for the nested / polymorphic ones)
+    /// and hands the assembled, template-rendered config to the tool, which
+    /// owns the action grammar, plan/apply, and LRO polling.  Local mode runs
+    /// the same tool the distributed worker does — see `tools_bridge`.
+    Provider {
+        provider: String,
+        #[serde(default)]
+        runtime: Option<String>,
+        action: String,
+        #[serde(default)]
+        service: Option<String>,
+        /// `bool` or a template string (`"{{ ... }}"`) — resolved by the tool.
+        #[serde(default)]
+        dry_run: Option<serde_yaml::Value>,
+        #[serde(default)]
+        input: Option<serde_yaml::Value>,
+        #[serde(default)]
+        poll: Option<serde_yaml::Value>,
+        /// Provider auth block (apply mode only).  Captured raw and mapped to
+        /// the noetl-tools `AuthConfig` at dispatch; dry-run ignores it.
+        #[serde(default)]
+        auth: Option<serde_yaml::Value>,
+    },
     #[serde(other)]
     Unsupported,
 }
