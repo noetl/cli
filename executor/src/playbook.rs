@@ -414,10 +414,20 @@ pub enum Tool {
         /// ownership + drift + orphan projection.
         #[serde(default)]
         stack: Option<String>,
-        /// Destroy confirmation digest (Round 3, Fork 2) — required to apply a
-        /// destroy verb; must equal the `plan_digest` from a reviewed dry-run.
+        /// Destroy / adopt confirmation digest (Round 3 destroy + Round 4 adopt)
+        /// — required to apply a destroy verb or an `adopt`; must equal the
+        /// `plan_digest` from a reviewed dry-run.
         #[serde(default)]
         confirm: Option<String>,
+        /// Reconciliation policy (Round 4) — `report` (default) / `enforce` /
+        /// `adopt`.  Governs how a drifted mutating ensure action is handled.
+        #[serde(default)]
+        reconcile: Option<String>,
+        /// Last-known-desired spec for this resource's URN (Round 4), supplied by
+        /// the caller's EHDB raw-eventlog-tier fold.  Used by `report` / `adopt`
+        /// to compute the desired-vs-actual diff; absent → untracked / import.
+        #[serde(default)]
+        known_desired: Option<serde_yaml::Value>,
         /// Provider auth block (apply mode only).  Captured raw and mapped to
         /// the noetl-tools `AuthConfig` at dispatch; dry-run ignores it.
         #[serde(default)]
