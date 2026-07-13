@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.15.1](https://github.com/noetl/cli/compare/v4.15.0...v4.15.1) (2026-07-13)
+
+### Bug Fixes
+
+* **release:** bump noetl-executor to 0.6.0 so Tool::Provider publishes to crates.io ([#67](https://github.com/noetl/cli/issues/67)) ([287bbd1](https://github.com/noetl/cli/commit/287bbd162b28ef1c3590001d145b2253b24a5888)), closes [noetl/ai-meta#190](https://github.com/noetl/ai-meta/issues/190)
+
 ## [4.15.0](https://github.com/noetl/cli/compare/v4.14.0...v4.15.0) (2026-07-13)
 
 ### Features
