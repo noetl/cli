@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.14.0](https://github.com/noetl/cli/compare/v4.13.0...v4.14.0) (2026-07-13)
+
+### Features
+
+* **provider:** dispatch kind: provider through the local CLI runtime + noetl-tools 3.22.0 ([#64](https://github.com/noetl/cli/issues/64)) ([75edc68](https://github.com/noetl/cli/commit/75edc68cc9bb5ceddb13be4f70b74766cea76f33)), closes [noetl/ai-meta#185](https://github.com/noetl/ai-meta/issues/185) [noetl/worker#183](https://github.com/noetl/worker/issues/183) [noetl/worker#183](https://github.com/noetl/worker/issues/183) [noetl/ai-meta#185](https://github.com/noetl/ai-meta/issues/185) [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189) [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189) [noetl/ai-meta#185](https://github.com/noetl/ai-meta/issues/185) [noetl/tools#87](https://github.com/noetl/tools/issues/87) [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189)
+
 ## [4.13.0](https://github.com/noetl/cli/compare/v4.12.0...v4.13.0) (2026-07-11)
 
 ### Features
