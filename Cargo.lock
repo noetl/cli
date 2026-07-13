@@ -2976,9 +2976,9 @@ checksum = "fcdc9657471e917de19608a327a65eafb0d4bef5df5271c991c85982a5ccdf07"
 
 [[package]]
 name = "noetl-tools"
-version = "3.21.0"
+version = "3.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74bf1f0da7c2a8d650b90778e05a6731a20730e4862be1e028c3253749f411d4"
+checksum = "3159e17b81756c7a6f81494e01d213f3ed9a62f94a719615926073867c1577a2"
 dependencies = [
  "anyhow",
  "arrow 53.4.1",
@@ -3504,7 +3504,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
