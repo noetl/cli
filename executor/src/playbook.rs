@@ -405,6 +405,19 @@ pub enum Tool {
         input: Option<serde_yaml::Value>,
         #[serde(default)]
         poll: Option<serde_yaml::Value>,
+        /// Config-level API endpoint override (Round 3) — testing / emulators
+        /// only.  A base URL string or `{crm,billing,serviceusage}` object; lets
+        /// a playbook be validated offline against wiremock / an emulator.
+        #[serde(default)]
+        endpoint: Option<serde_yaml::Value>,
+        /// Ownership / stack label (Round 3, Fork 1) — scopes the resource
+        /// ownership + drift + orphan projection.
+        #[serde(default)]
+        stack: Option<String>,
+        /// Destroy confirmation digest (Round 3, Fork 2) — required to apply a
+        /// destroy verb; must equal the `plan_digest` from a reviewed dry-run.
+        #[serde(default)]
+        confirm: Option<String>,
         /// Provider auth block (apply mode only).  Captured raw and mapped to
         /// the noetl-tools `AuthConfig` at dispatch; dry-run ignores it.
         #[serde(default)]

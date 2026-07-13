@@ -350,6 +350,9 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             dry_run,
             input,
             poll,
+            endpoint,
+            stack,
+            confirm,
             // `auth` is mapped to ToolConfig.auth in the dispatch arm, not into
             // the config body (the ProviderSpec ignores an `auth` config key).
             auth: _,
@@ -374,6 +377,15 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             }
             if let Some(p) = poll {
                 cfg.insert("poll".into(), yaml_to_json(p));
+            }
+            if let Some(e) = endpoint {
+                cfg.insert("endpoint".into(), yaml_to_json(e));
+            }
+            if let Some(s) = stack {
+                cfg.insert("stack".into(), serde_json::json!(s));
+            }
+            if let Some(c) = confirm {
+                cfg.insert("confirm".into(), serde_json::json!(c));
             }
             ("provider", serde_json::Value::Object(cfg))
         }
@@ -1348,6 +1360,9 @@ mod tests {
                 "max_attempts": 5
             }))
             .unwrap()),
+            endpoint: None,
+            stack: None,
+            confirm: None,
             auth: None,
         };
         let cfg = to_tools_config(&tool);
@@ -1402,6 +1417,9 @@ mod tests {
                 serde_yaml::to_value(serde_json::json!({ "parent": "organizations/42" })).unwrap(),
             ),
             poll: None,
+            endpoint: None,
+            stack: None,
+            confirm: None,
             auth: None,
         };
         let vars = empty_vars();
@@ -1438,6 +1456,9 @@ mod tests {
                 .unwrap(),
             ),
             poll: None,
+            endpoint: None,
+            stack: None,
+            confirm: None,
             auth: None,
         };
         let vars = empty_vars();

@@ -1182,6 +1182,9 @@ impl PlaybookRunner {
                 dry_run,
                 input,
                 poll,
+                endpoint,
+                stack,
+                confirm,
                 auth,
             } => {
                 // Render every template in the provider block with the CLI's
@@ -1210,6 +1213,18 @@ impl PlaybookRunner {
                     Some(s) => Some(self.render_template(s, context)?),
                     None => None,
                 };
+                let rendered_endpoint = match endpoint {
+                    Some(v) => Some(self.render_yaml_value(v, context)?),
+                    None => None,
+                };
+                let rendered_stack = match stack {
+                    Some(s) => Some(self.render_template(s, context)?),
+                    None => None,
+                };
+                let rendered_confirm = match confirm {
+                    Some(s) => Some(self.render_template(s, context)?),
+                    None => None,
+                };
 
                 if self.verbose {
                     eprintln!("   ☁️  Executing provider action: {}", action);
@@ -1226,6 +1241,9 @@ impl PlaybookRunner {
                     dry_run: rendered_dry_run,
                     input: rendered_input,
                     poll: rendered_poll,
+                    endpoint: rendered_endpoint,
+                    stack: rendered_stack,
+                    confirm: rendered_confirm,
                     auth: rendered_auth,
                 };
                 let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
