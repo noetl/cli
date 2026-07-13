@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.15.0](https://github.com/noetl/cli/compare/v4.14.0...v4.15.0) (2026-07-13)
+
+### Features
+
+* **provider:** local-mode passthrough for endpoint / stack / confirm (round 3) ([#65](https://github.com/noetl/cli/issues/65)) ([8436790](https://github.com/noetl/cli/commit/8436790c380a613bef6b4cb7b8920c712bde60bb)), closes [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189) [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189)
+
 ## [4.14.0](https://github.com/noetl/cli/compare/v4.13.0...v4.14.0) (2026-07-13)
 
 ### Features
