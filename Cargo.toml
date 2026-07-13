@@ -73,7 +73,7 @@ duckdb-integration = ["noetl-tools/duckdb-integration"]
 # dev uses the path; `cargo publish` resolves against the crates.io
 # version constraint.  R-1.2 PR-1 set the executor's `publish = true`
 # so this dependency can be satisfied from crates.io.
-noetl-executor = { path = "executor", version = "0.5" }
+noetl-executor = { path = "executor", version = "0.6" }
 
 # noetl/ai-meta#90 Phase 6 — the `noetl subscribe` local-mode listener
 # reuses the same source clients (`build_source`), header-directive engine,

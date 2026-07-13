@@ -1,11 +1,24 @@
 [package]
 name = "noetl-executor"
+# 0.6.0 — noetl/ai-meta#189 provider tool.  Adds the `Tool::Provider`
+# variant to `playbook::Tool` (cli commits 75edc68 + 8436790, shipped in
+# noetl v4.14.0 / v4.15.0).  `Tool` is a plain (non-#[non_exhaustive])
+# enum, so a new variant is a breaking API change → minor bump under 0.x
+# SemVer.  THIS BUMP IS LOAD-BEARING FOR THE RELEASE: the source gained
+# the variant in v4.14.0 but the version stayed 0.5.0, which was already
+# on crates.io *without* the variant.  The release-cli `publish-crate`
+# job skips republishing an existing version, so the `noetl` bin's
+# `cargo publish` verify build kept resolving noetl-executor 0.5.0 from
+# crates.io and failing with `E0599: no variant named Provider`.  Any
+# future change to this crate's public surface MUST bump this version in
+# the same change set, or the bin publish silently breaks again.
+#
 # 0.5.0 — noetl/ai-meta#77 (explicit input:/set: forward-only data
 # binding).  noetl-tools v3.0.0 is a breaking change: TaskSequenceTool
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
