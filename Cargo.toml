@@ -79,12 +79,14 @@ noetl-executor = { path = "executor", version = "0.5" }
 # reuses the same source clients (`build_source`), header-directive engine,
 # and store-and-forward spool engine the in-cluster worker runtime uses, so
 # the event model is identical across CLI-local / in-cluster / Cloud Run.
-# `noetl-tools` "3" resolves to the published crate (v3.5.0+) that carries
-# the Phase 1–5 `tools::source` + `spool` surface; default features pull in
-# the pubsub + kafka + gcs source/backends.  `noetl-events` is the shared
+# `noetl-tools` "3.23" pins the round-3 provider surface (confirm-gated
+# destroy + endpoint override + ownership fact/`provider_state` fold) so
+# `noetl exec --runtime local` runs the same round-3 tool the worker does —
+# not just the field passthrough against 3.22.0.  Default features pull in the
+# pubsub + kafka + gcs source/backends.  `noetl-events` is the shared
 # `EventSink` trait + `ExecutorEvent` envelope the local `FileEventSink`
 # implements (same wire shape as the worker's NATS/HTTP sinks).
-noetl-tools = "3"
+noetl-tools = "3.23"
 noetl-events = { path = "events", version = "0.1.0" }
 async-trait = "0.1"
 
