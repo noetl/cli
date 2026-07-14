@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.17.0](https://github.com/noetl/cli/compare/v4.16.0...v4.17.0) (2026-07-14)
+
+### Features
+
+* **provider:** noetl provider {plan,drift,orphans,adopt} CLI verbs ([#68](https://github.com/noetl/cli/issues/68)) ([ca7e19b](https://github.com/noetl/cli/commit/ca7e19b6a3fa38ee1f647ac88cb879de2f7d1ce8)), closes [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189) [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189)
+
 ## [4.16.0](https://github.com/noetl/cli/compare/v4.15.1...v4.16.0) (2026-07-14)
 
 ### Features
