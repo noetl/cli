@@ -405,15 +405,34 @@ jobs:
           GH_TOKEN: ${{ env.HOMEBREW_TAP_PUSH_TOKEN }}
         shell: bash
         run: |
-          if [[ -n "${HOMEBREW_TAP_PUSH_TOKEN}" ]]; then
-            if gh api repos/noetl/homebrew-tap >/dev/null 2>&1; then
-              echo "usable=true" >> "${GITHUB_OUTPUT}"
-            else
-              echo "usable=false" >> "${GITHUB_OUTPUT}"
-            fi
-          else
+          set -uo pipefail
+          # Three-state gate:
+          #   absent  -> secret not provided (fork / build without the org
+          #              secret): skip green.
+          #   broken  -> secret present but the token cannot access the tap
+          #              repo (expired / revoked / not granted): FAIL red, so
+          #              a dead publish token turns the release red instead of
+          #              silently freezing the tap behind a green run.
+          #   usable  -> token authenticates: proceed and push.
+          if [[ -z "${HOMEBREW_TAP_PUSH_TOKEN:-}" ]]; then
             echo "usable=false" >> "${GITHUB_OUTPUT}"
+            echo "HOMEBREW_TAP_PUSH_TOKEN secret is absent; will skip Homebrew tap update."
+            exit 0
           fi
+          # Secret present: probe real access.  Capture gh's own error text
+          # and HTTP status (never the token) so 401 (dead token) is
+          # distinguishable from 404 (token not granted this repo) and from a
+          # transient GitHub outage.
+          PROBE_OUT="$(gh api repos/noetl/homebrew-tap --jq '.full_name' 2>&1)"
+          PROBE_STATUS=$?
+          if [[ ${PROBE_STATUS} -eq 0 ]]; then
+            echo "usable=true" >> "${GITHUB_OUTPUT}"
+            echo "HOMEBREW_TAP_PUSH_TOKEN can access ${PROBE_OUT}; proceeding."
+            exit 0
+          fi
+          HTTP_CODE="$(printf '%s' "${PROBE_OUT}" | grep -oE 'HTTP [0-9]{3}' | head -1 || true)"
+          echo "::error title=Homebrew tap publish token unusable::HOMEBREW_TAP_PUSH_TOKEN is set but cannot access noetl/homebrew-tap (gh exit ${PROBE_STATUS}, ${HTTP_CODE:-status unknown}). The token is likely expired, revoked, or not granted access to the repo. Regenerate it and update the org secret, then re-run this release. gh reported: ${PROBE_OUT}"
+          exit 1
       - name: Checkout tap repo
         if: ${{ steps.homebrew_token.outputs.usable == 'true' }}
         uses: actions/checkout@v4
@@ -460,11 +479,11 @@ jobs:
           git add Formula/noetl.rb
           git commit -m "noetl ${{ needs.verify-version.outputs.version }}" || exit 0
           git push origin HEAD:main
-      - name: Skip tap publish
+      - name: Skip tap publish (no secret)
         if: ${{ steps.homebrew_token.outputs.usable == 'false' }}
         run: |
-          echo "::warning title=Homebrew tap not updated::HOMEBREW_TAP_PUSH_TOKEN is not set or cannot access noetl/homebrew-tap; skipping Homebrew tap update. The tap formula was NOT bumped for this release. Set/authorize the secret to publish."
-          echo "HOMEBREW_TAP_PUSH_TOKEN is not set or cannot access noetl/homebrew-tap; skipping Homebrew tap update."
+          echo "::warning title=Homebrew tap not updated::HOMEBREW_TAP_PUSH_TOKEN is not provided (e.g. a fork or a build without the org secret); skipping Homebrew tap update. The tap formula was NOT bumped for this release. This is expected for forks; on the noetl/cli release pipeline it means the secret is missing. (A token that is present but unusable fails the job instead of reaching this step.)"
+          echo "HOMEBREW_TAP_PUSH_TOKEN is not provided; skipping Homebrew tap update."
 
   update-apt-repo:
     runs-on: ubuntu-latest
@@ -478,15 +497,34 @@ jobs:
           GH_TOKEN: ${{ env.APT_REPO_PUSH_TOKEN }}
         shell: bash
         run: |
-          if [[ -n "${APT_REPO_PUSH_TOKEN}" ]]; then
-            if gh api repos/noetl/apt >/dev/null 2>&1; then
-              echo "usable=true" >> "${GITHUB_OUTPUT}"
-            else
-              echo "usable=false" >> "${GITHUB_OUTPUT}"
-            fi
-          else
+          set -uo pipefail
+          # Three-state gate:
+          #   absent  -> secret not provided (fork / build without the org
+          #              secret): skip green.
+          #   broken  -> secret present but the token cannot access the apt
+          #              repo (expired / revoked / not granted): FAIL red, so
+          #              a dead publish token turns the release red instead of
+          #              silently freezing the apt index behind a green run.
+          #   usable  -> token authenticates: proceed and push.
+          if [[ -z "${APT_REPO_PUSH_TOKEN:-}" ]]; then
             echo "usable=false" >> "${GITHUB_OUTPUT}"
+            echo "APT_REPO_PUSH_TOKEN secret is absent; will skip APT repo update."
+            exit 0
           fi
+          # Secret present: probe real access.  Capture gh's own error text
+          # and HTTP status (never the token) so 401 (dead token) is
+          # distinguishable from 404 (token not granted this repo) and from a
+          # transient GitHub outage.
+          PROBE_OUT="$(gh api repos/noetl/apt --jq '.full_name' 2>&1)"
+          PROBE_STATUS=$?
+          if [[ ${PROBE_STATUS} -eq 0 ]]; then
+            echo "usable=true" >> "${GITHUB_OUTPUT}"
+            echo "APT_REPO_PUSH_TOKEN can access ${PROBE_OUT}; proceeding."
+            exit 0
+          fi
+          HTTP_CODE="$(printf '%s' "${PROBE_OUT}" | grep -oE 'HTTP [0-9]{3}' | head -1 || true)"
+          echo "::error title=APT publish token unusable::APT_REPO_PUSH_TOKEN is set but cannot access noetl/apt (gh exit ${PROBE_STATUS}, ${HTTP_CODE:-status unknown}). The token is likely expired, revoked, or not granted access to the repo. Regenerate it and update the org secret, then re-run this release. gh reported: ${PROBE_OUT}"
+          exit 1
       - uses: actions/download-artifact@v4
         if: ${{ steps.apt_token.outputs.usable == 'true' }}
         with:
@@ -524,8 +562,8 @@ jobs:
           git add pool dists
           git commit -m "noetl ${{ needs.verify-version.outputs.version }}" || exit 0
           git push origin HEAD:main
-      - name: Skip APT publish
+      - name: Skip APT publish (no secret)
         if: ${{ steps.apt_token.outputs.usable == 'false' }}
         run: |
-          echo "::warning title=APT repo not updated::APT_REPO_PUSH_TOKEN is not set or cannot access noetl/apt; skipping APT repo update. The .deb was attached to the GitHub release but the apt repository index was NOT updated for this release. Set/authorize the secret to publish."
-          echo "APT_REPO_PUSH_TOKEN is not set or cannot access noetl/apt; skipping APT repo update."
+          echo "::warning title=APT repo not updated::APT_REPO_PUSH_TOKEN is not provided (e.g. a fork or a build without the org secret); skipping APT repo update. The .deb was attached to the GitHub release but the apt repository index was NOT updated for this release. This is expected for forks; on the noetl/cli release pipeline it means the secret is missing. (A token that is present but unusable fails the job instead of reaching this step.)"
+          echo "APT_REPO_PUSH_TOKEN is not provided; skipping APT repo update."
