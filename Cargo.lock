@@ -2850,7 +2850,7 @@ dependencies = [
 
 [[package]]
 name = "noetl"
-version = "4.15.1"
+version = "4.16.0"
 dependencies = [
  "anyhow",
  "async-trait",

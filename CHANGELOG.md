@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.16.0](https://github.com/noetl/cli/compare/v4.15.1...v4.16.0) (2026-07-14)
+
+### Features
+
+* **provider:** local-mode passthrough for reconcile policy + known_desired ([#66](https://github.com/noetl/cli/issues/66)) ([30fbd06](https://github.com/noetl/cli/commit/30fbd0696ebaa1ed2d859b568142f18643cd083d)), closes [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189) [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189) [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189) [#190](https://github.com/noetl/cli/issues/190) [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189)
+
 ## [4.15.1](https://github.com/noetl/cli/compare/v4.15.0...v4.15.1) (2026-07-13)
 
 ### Bug Fixes
