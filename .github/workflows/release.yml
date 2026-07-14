@@ -546,11 +546,23 @@ jobs:
         run: |
           set -euo pipefail
           cd apt
-          mkdir -p pool/main dists/jammy/main/binary-amd64
+          # Ubuntu suites served from the shared pool/main.  Add a new
+          # codename here (e.g. plucky) and it is indexed on the next
+          # release automatically -- no per-suite block to copy.  This loop
+          # replaces a hardcoded jammy-only block; dists/noble silently
+          # rotted at 2.13.0 for months because the old block only ever
+          # regenerated jammy while the .deb landed in the shared pool.
+          DISTS="jammy noble"
+          mkdir -p pool/main
           cp ../dist/*.deb pool/main/
-          dpkg-scanpackages pool/main /dev/null > dists/jammy/main/binary-amd64/Packages
-          gzip -9c dists/jammy/main/binary-amd64/Packages > dists/jammy/main/binary-amd64/Packages.gz
-          apt-ftparchive release dists/jammy > dists/jammy/Release
+          for DIST in ${DISTS}; do
+            mkdir -p "dists/${DIST}/main/binary-amd64"
+            dpkg-scanpackages pool/main /dev/null \
+              > "dists/${DIST}/main/binary-amd64/Packages"
+            gzip -9c "dists/${DIST}/main/binary-amd64/Packages" \
+              > "dists/${DIST}/main/binary-amd64/Packages.gz"
+            apt-ftparchive release "dists/${DIST}" > "dists/${DIST}/Release"
+          done
       - name: Commit and push
         if: ${{ steps.apt_token.outputs.usable == 'true' }}
         shell: bash
