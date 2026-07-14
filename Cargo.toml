@@ -79,14 +79,17 @@ noetl-executor = { path = "executor", version = "0.7" }
 # reuses the same source clients (`build_source`), header-directive engine,
 # and store-and-forward spool engine the in-cluster worker runtime uses, so
 # the event model is identical across CLI-local / in-cluster / Cloud Run.
-# `noetl-tools` "3.24" pins the round-4 provider surface (reconcile policy
-# report/enforce/adopt + confirm-gated drift adoption) so
-# `noetl exec --runtime local` runs the same round-4 tool the worker does —
-# not just the `reconcile`/`known_desired` field passthrough against 3.23.
+# `noetl-tools` "3.25" pins the round-5 provider surface — the query I/O
+# adapter halves the `noetl provider {plan,drift,orphans,adopt}` CLI verbs call:
+# `provider_state::extract_facts_from_tier_records` (raw eventlog-tier fold that
+# unwraps the wire `payload` string + finds the deeply-nested fact),
+# `detect_orphans_scoped` + `detect_stack_conflicts` (stack-scoped ownership).
+# This is a HARD compile dependency (not the round-2..4 serde-ignored field
+# passthrough) — the CLI PR needs noetl-tools 3.25 on crates.io to build.
 # Default features pull in the pubsub + kafka + gcs source/backends.
 # `noetl-events` is the shared `EventSink` trait + `ExecutorEvent` envelope the
 # local `FileEventSink` implements (same wire shape as the worker's NATS/HTTP sinks).
-noetl-tools = "3.24"
+noetl-tools = "3.25"
 noetl-events = { path = "events", version = "0.1.0" }
 async-trait = "0.1"
 

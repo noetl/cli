@@ -1,5 +1,6 @@
 mod config;
 mod playbook_runner;
+mod provider_cli;
 mod subscribe;
 
 use anyhow::{bail, Context as AnyhowContext, Result};
@@ -476,6 +477,29 @@ enum Commands {
     Ehdb {
         #[command(subcommand)]
         command: EhdbCommand,
+    },
+
+    /// Infrastructure plan / drift / orphans / adopt over `kind: provider`
+    /// resources — the Terraform-style CLI (noetl/ai-meta#189).
+    ///
+    /// Reads the provider resources a playbook declares and drives the same
+    /// noetl-tools provider tool the worker runs.  Works in local mode: the
+    /// live cloud GET goes straight to the provider API (or a mock via
+    /// `--endpoint`); last-known-desired is read from the EHDB raw eventlog
+    /// tier (`--server`) or an offline `--facts-file`.  The gates are the
+    /// tool's own — explicit `auth:` for real calls, dry-run defaults,
+    /// digest-bound confirm for adopt.
+    ///
+    /// Examples:
+    ///     noetl provider plan    --playbook infra.yaml
+    ///     noetl provider drift   --playbook infra.yaml --stack prod --auth-token $TOK
+    ///     noetl provider orphans --playbook infra.yaml --stack prod --server http://localhost:8082
+    ///     noetl provider adopt   --playbook infra.yaml --step ensure_folder --auth-token $TOK
+    ///     noetl provider adopt   --playbook infra.yaml --step ensure_folder --auth-token $TOK --apply --confirm <digest>
+    #[command(verbatim_doc_comment)]
+    Provider {
+        #[command(subcommand)]
+        command: provider_cli::ProviderCommand,
     },
 }
 
@@ -2776,6 +2800,9 @@ async fn main() -> Result<()> {
                 }
             },
         },
+        Some(Commands::Provider { command }) => {
+            provider_cli::run(&client, command).await?;
+        }
         Some(Commands::Server { command }) => match command {
             ServerCommand::Start { init_db } => {
                 start_server(init_db).await?;
