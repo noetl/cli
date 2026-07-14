@@ -1,5 +1,15 @@
 [package]
 name = "noetl-executor"
+# 0.7.0 — noetl/ai-meta#189 provider tool round 4 (drift adoption).  Adds
+# `reconcile` + `known_desired` fields to the `Tool::Provider` variant of
+# `playbook::Tool`.  New public fields on a non-#[non_exhaustive] struct
+# variant are a breaking API change → minor bump under 0.x SemVer.  Per the
+# 0.6.0 note below, this bump is LOAD-BEARING for the release: executor 0.6.0
+# is already on crates.io *without* these fields, and the `publish-crate` job
+# skips republishing an existing version — so leaving 0.6.0 would make the
+# `noetl` bin resolve the round-4-less executor from crates.io and ship the
+# reconcile/adopt surface dead.
+#
 # 0.6.0 — noetl/ai-meta#189 provider tool.  Adds the `Tool::Provider`
 # variant to `playbook::Tool` (cli commits 75edc68 + 8436790, shipped in
 # noetl v4.14.0 / v4.15.0).  `Tool` is a plain (non-#[non_exhaustive])
@@ -18,7 +28,7 @@ name = "noetl-executor"
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
