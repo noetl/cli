@@ -5,7 +5,7 @@ mod subscribe;
 
 use anyhow::{bail, Context as AnyhowContext, Result};
 use base64::prelude::*;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use config::{Config, Context};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -83,9 +83,74 @@ struct Cli {
     context: Option<String>,
 }
 
+/// Shared argument set for `run` and its deprecated aliases (`exec`).
+#[derive(Args)]
+struct RunArgs {
+    /// Playbook reference: file path, catalog://name@version, db ID, or catalog path
+    #[arg(value_name = "REF")]
+    reference: String,
+
+    /// Runtime mode: local (Rust interpreter), distributed (server-worker), auto
+    #[arg(short = 'r', long, default_value = "auto")]
+    runtime: String,
+
+    /// Target step to start execution from (local runtime only)
+    #[arg(short = 't', long)]
+    target: Option<String>,
+
+    /// Set variables (format: key=value), can be repeated
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    variables: Vec<String>,
+
+    /// Payload/workload as JSON string (merges with playbook workload)
+    #[arg(long = "payload", value_name = "JSON", alias = "workload")]
+    payload: Option<String>,
+
+    /// Path to JSON file with input parameters
+    #[arg(short, long)]
+    input: Option<PathBuf>,
+
+    /// Catalog version (for catalog:// refs without @version)
+    #[arg(short = 'V', long)]
+    version: Option<String>,
+
+    /// Server endpoint for distributed runtime (default: from config)
+    #[arg(long)]
+    endpoint: Option<String>,
+
+    /// Enable verbose output
+    #[arg(short, long)]
+    verbose: bool,
+
+    /// Dry-run mode: validate and show plan without executing
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Git-backed state sink: append each successful `kind: provider` apply's
+    /// ownership fact to this JSONL file (sensitive identifiers masked).
+    /// Read back with `noetl provider drift/orphans --facts-file <path>`.
+    #[arg(long)]
+    facts_out: Option<PathBuf>,
+
+    /// Emit only JSON response (distributed runtime)
+    #[arg(short, long)]
+    json: bool,
+}
+
+/// Where the resolved runtime came from, for the one-line provenance echo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeSource {
+    /// Explicit `--runtime` on the command line (rung 1).
+    Flag,
+    /// The active context's `runtime` field (rung 2).
+    Context,
+    /// The CLI-first default: local (rung 3).
+    Default,
+}
+
 #[derive(Subcommand)]
 enum Commands {
-    /// Execute a playbook (unified command for local and distributed execution)
+    /// Run a playbook (locally in-process, or submitted to the distributed runtime)
     ///
     /// The <ref> can be:
     ///   - A file path: ./playbooks/foo.yaml, automation/deploy.yaml
@@ -93,70 +158,26 @@ enum Commands {
     ///   - A database ID: pbk_01J... (playbook ID from catalog)
     ///   - A catalog path: workflows/etl-pipeline (requires --runtime distributed)
     ///
-    /// Runtime modes:
-    ///   - local: Execute directly using Rust interpreter (no server required)
-    ///   - distributed: Execute via NoETL server-worker architecture
-    ///   - auto (default): Choose based on ref type and playbook executor.profile
+    /// Where it runs is resolved by a precedence ladder (flag > context > default).
+    /// 1. --runtime local|distributed on the command line always wins.
+    /// 2. the active context's runtime, if it defines one.
+    /// 3. default: local (noetl is a CLI tool; local is the priority default).
+    ///
+    /// Every run prints one line to stderr naming the resolved runtime and where
+    /// it came from, e.g. `runtime: distributed (from context 'prod')`.
     ///
     /// Examples:
-    ///     noetl exec ./playbooks/http_test.yaml                    # auto runtime
-    ///     noetl exec ./playbooks/http_test.yaml -r local           # force local
-    ///     noetl exec catalog://amadeus_ai_api@2.0 -r distributed   # catalog + distributed
-    ///     noetl exec my-playbook --runtime distributed             # catalog path
-    ///     noetl exec ./foo.yaml --set key=value --verbose          # with variables
-    ///     noetl exec pbk_01J... -r distributed                     # by db ID
-    #[command(verbatim_doc_comment, alias = "run")]
-    Exec {
-        /// Playbook reference: file path, catalog://name@version, db ID, or catalog path
-        #[arg(value_name = "REF")]
-        reference: String,
-
-        /// Runtime mode: local (Rust interpreter), distributed (server-worker), auto
-        #[arg(short = 'r', long, default_value = "auto")]
-        runtime: String,
-
-        /// Target step to start execution from (local runtime only)
-        #[arg(short = 't', long)]
-        target: Option<String>,
-
-        /// Set variables (format: key=value), can be repeated
-        #[arg(long = "set", value_name = "KEY=VALUE")]
-        variables: Vec<String>,
-
-        /// Payload/workload as JSON string (merges with playbook workload)
-        #[arg(long = "payload", value_name = "JSON", alias = "workload")]
-        payload: Option<String>,
-
-        /// Path to JSON file with input parameters
-        #[arg(short, long)]
-        input: Option<PathBuf>,
-
-        /// Catalog version (for catalog:// refs without @version)
-        #[arg(short = 'V', long)]
-        version: Option<String>,
-
-        /// Server endpoint for distributed runtime (default: from config)
-        #[arg(long)]
-        endpoint: Option<String>,
-
-        /// Enable verbose output
-        #[arg(short, long)]
-        verbose: bool,
-
-        /// Dry-run mode: validate and show plan without executing
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Git-backed state sink: append each successful `kind: provider` apply's
-        /// ownership fact to this JSONL file (sensitive identifiers masked).
-        /// Read back with `noetl provider drift/orphans --facts-file <path>`.
-        #[arg(long)]
-        facts_out: Option<PathBuf>,
-
-        /// Emit only JSON response (distributed runtime)
-        #[arg(short, long)]
-        json: bool,
-    },
+    ///     noetl run ./playbooks/http_test.yaml                     # local (default)
+    ///     noetl run ./playbooks/http_test.yaml -r local            # force local
+    ///     noetl run catalog://amadeus_ai_api@2.0 -r distributed    # catalog + distributed
+    ///     noetl run my-playbook --runtime distributed              # catalog path
+    ///     noetl run ./foo.yaml --set key=value --verbose           # with variables
+    ///     noetl run pbk_01J... -r distributed                      # by db ID
+    #[command(verbatim_doc_comment)]
+    Run(RunArgs),
+    /// Deprecated alias for `run` (still works; will be removed in a future major).
+    #[command(hide = true)]
+    Exec(RunArgs),
     /// Run a kind:Subscription listener standalone in local mode (no k8s, no server)
     ///
     /// Holds the subscription's source (NATS / Pub/Sub / Kafka) open
@@ -214,7 +235,7 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Legacy run command (deprecated, use 'exec')
+    /// Legacy run command (deprecated, use 'run')
     #[command(name = "run-legacy", hide = true)]
     RunLegacy {
         /// Playbook reference: file path, catalog://name@version, db ID, or catalog path
@@ -344,7 +365,7 @@ enum Commands {
         #[command(subcommand)]
         command: CatalogCommand,
     },
-    /// Legacy execution management (use 'exec' instead)
+    /// Legacy execution management (deprecated, use 'run' instead)
     #[command(hide = true)]
     Execute {
         #[command(subcommand)]
@@ -1639,41 +1660,215 @@ fn parse_exec_reference(reference: &str, version_override: Option<&str>) -> Resu
 /// 1. CLI flag (--runtime local|distributed) - highest priority if explicitly set
 /// 2. If --runtime auto (default): use context config runtime preference
 /// 3. If context runtime is also auto: auto-detect from reference type
-fn resolve_runtime(
-    runtime_flag: &str,
-    context_runtime: Option<&str>,
-    ctx: &ExecContext,
-    verbose: bool,
-) -> Result<String> {
-    // CLI flag takes precedence if explicitly set (not "auto")
+/// Resolve the runtime placement via the precedence ladder
+/// (flag > context > default) and report where the decision came from.
+///
+/// 1. An explicit `--runtime` flag (anything other than the `"auto"`
+///    sentinel) always wins — this is the per-invocation escape hatch and
+///    is what the provider provisioning path (`--runtime local`) relies on.
+/// 2. Otherwise, the active context's runtime wins *iff it defines one*.
+///    A context that omits `runtime:` deserializes to the `"auto"` sentinel
+///    (see [`crate::config`]), which is treated as "unset" and falls through.
+/// 3. Otherwise the default is `local`: noetl is a CLI tool, so local
+///    (command-line) execution is the priority default. There is no
+///    reference-type guessing — a catalog/db ref with no placement selected
+///    resolves to local and fails loudly with a hint (better than silently
+///    enqueuing to a server the user didn't ask for).
+fn resolve_runtime(runtime_flag: &str, context_runtime: Option<&str>) -> Result<(String, RuntimeSource)> {
+    // Rung 1 — explicit --runtime flag wins.
     if runtime_flag != "auto" {
-        if verbose {
-            println!("Runtime: {} (from --runtime flag)", runtime_flag);
-        }
-        return Ok(runtime_flag.to_string());
+        return Ok((runtime_flag.to_string(), RuntimeSource::Flag));
     }
 
-    // --runtime auto (default): check context config preference
+    // Rung 2 — active context's runtime, iff it defines one.
+    // "auto" (which is also what a missing `runtime:` field becomes) means
+    // "context does not pin a runtime" → fall through.
     if let Some(ctx_runtime) = context_runtime {
         if ctx_runtime != "auto" {
-            if verbose {
-                println!("Runtime: {} (from context config)", ctx_runtime);
-            }
-            return Ok(ctx_runtime.to_string());
+            return Ok((ctx_runtime.to_string(), RuntimeSource::Context));
         }
     }
 
-    // Context runtime is also "auto": auto-resolve based on reference type
-    let resolved = match &ctx.ref_type {
-        RefType::File(_) => "local",
-        RefType::Catalog { .. } => "distributed",
-        RefType::DatabaseId(_) => "distributed",
-        RefType::CatalogPath(_) => "distributed",
-    };
-    if verbose {
-        println!("Runtime: {} (auto-detected from reference type)", resolved);
+    // Rung 3 — CLI-first default: local.
+    Ok(("local".to_string(), RuntimeSource::Default))
+}
+
+/// Shared handler for `run` and its deprecated aliases.  `deprecated_as` is
+/// `Some("exec")` when invoked via a deprecated alias (prints a one-line
+/// nudge), `None` for the canonical `run`.
+async fn run_playbook(
+    args: RunArgs,
+    deprecated_as: Option<&str>,
+    client: &Client,
+    base_url: &str,
+    use_gateway_proxy: bool,
+    context_override: Option<&str>,
+    config: &Config,
+) -> Result<()> {
+    let RunArgs {
+        reference,
+        runtime,
+        target,
+        variables,
+        payload,
+        input,
+        version,
+        endpoint,
+        verbose,
+        dry_run,
+        facts_out,
+        json,
+    } = args;
+
+    if let Some(alias) = deprecated_as {
+        eprintln!(
+            "note: '{alias}' is a deprecated alias for 'run'; it still works but will be removed in a future major release. Use 'noetl run'."
+        );
     }
-    Ok(resolved.to_string())
+
+    // Resolve the active context once so we can name it in the provenance echo.
+    let eff_ctx = effective_context(context_override, config);
+    let context_name: Option<String> = eff_ctx.map(|(name, _)| name.clone());
+    let context_runtime: Option<String> = eff_ctx.map(|(_, ctx)| ctx.runtime.clone());
+
+    // Parse the reference to determine type and resolve runtime via the ladder.
+    let exec_ctx = parse_exec_reference(&reference, version.as_deref())?;
+    let (effective_runtime, runtime_source) = resolve_runtime(&runtime, context_runtime.as_deref())?;
+
+    // Provenance echo — one line to stderr on every run, so a stale context
+    // can never silently enqueue what the user expected to run locally.
+    // stderr keeps stdout clean for `--json` consumers.
+    let provenance = match runtime_source {
+        RuntimeSource::Flag => "--runtime flag".to_string(),
+        RuntimeSource::Context => {
+            format!("from context '{}'", context_name.as_deref().unwrap_or("?"))
+        }
+        RuntimeSource::Default => "default".to_string(),
+    };
+    eprintln!("runtime: {} ({})", effective_runtime, provenance);
+
+    let effective_endpoint = endpoint.unwrap_or_else(|| base_url.to_string());
+    let effective_gateway_proxy = use_gateway_proxy || is_gateway_url(&effective_endpoint);
+
+    // Build variables from payload and --set flags
+    let vars = build_variables(payload.as_deref(), &variables)?;
+
+    if verbose {
+        println!("Execution Context:");
+        println!("  Reference: {}", reference);
+        println!("  Type: {:?}", exec_ctx.ref_type);
+        println!("  Runtime: {}", effective_runtime);
+        if let Some(v) = &exec_ctx.version {
+            println!("  Version: {}", v);
+        }
+        if let Some(t) = &target {
+            println!("  Target: {}", t);
+        } else if let Some(t) = &exec_ctx.inferred_target {
+            println!("  Target: {} (inferred from noetl.yaml)", t);
+        }
+    }
+
+    if dry_run {
+        println!("\n[DRY RUN] Would execute with:");
+        println!("  Runtime: {}", effective_runtime);
+        match &exec_ctx.ref_type {
+            RefType::File(path) => println!("  File: {}", path.display()),
+            RefType::Catalog { name, version } => {
+                println!("  Catalog: {}", name);
+                if let Some(v) = version {
+                    println!("  Version: {}", v);
+                }
+            }
+            RefType::DatabaseId(id) => println!("  DB ID: {}", id),
+            RefType::CatalogPath(path) => println!("  Path: {}", path),
+        }
+        return Ok(());
+    }
+
+    match effective_runtime.as_str() {
+        "local" => {
+            // Local execution using Rust interpreter
+            let playbook_path = match &exec_ctx.ref_type {
+                RefType::File(path) => path.clone(),
+                RefType::Catalog { .. } | RefType::DatabaseId(_) | RefType::CatalogPath(_) => {
+                    eprintln!("Error: Local runtime requires a file path reference");
+                    eprintln!("  Use: noetl run ./path/to/playbook.yaml");
+                    eprintln!("  For catalog/db references, select the distributed runtime:");
+                    eprintln!("    noetl run {} --runtime distributed", reference);
+                    eprintln!("  or set a distributed context: noetl context set-runtime distributed");
+                    std::process::exit(1);
+                }
+            };
+
+            // Use CLI target if provided, otherwise use inferred target (from noetl.yaml pattern)
+            let effective_target = target.or(exec_ctx.inferred_target.clone());
+
+            // The `--json` flag now does two things in local
+            // runtime mode (previously a no-op): (1) suppress
+            // human-readable progress on stdout — progress
+            // already routes to stderr from PlaybookRunner — and
+            // (2) emit a structured RunOutcome envelope on
+            // stdout when the playbook completes. This is what
+            // lets the agent bridge (and any other programmatic
+            // consumer) get clean JSON to pipe into `jq`.
+            let runner = playbook_runner::PlaybookRunner::new(playbook_path)
+                .with_variables(vars)
+                .with_verbose(verbose)
+                .with_target(effective_target)
+                .with_facts_out(facts_out.clone())
+                // When --json is set, suppress progress entirely
+                // so stdout = ONLY the JSON envelope. The user
+                // still sees errors via stderr.
+                .with_quiet(json)
+                .with_emit_json(json);
+
+            runner.run()?;
+        }
+        "distributed" => {
+            // Distributed execution via server
+            let (path, version) = match &exec_ctx.ref_type {
+                RefType::File(file_path) => {
+                    // For file refs, we need to register first or use a different approach
+                    eprintln!("Warning: Executing local file via distributed runtime");
+                    eprintln!(
+                        "  Consider registering with: noetl catalog register {}",
+                        file_path.display()
+                    );
+                    // Use filename as path for now
+                    let name = file_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "playbook".to_string());
+                    (name, None)
+                }
+                RefType::Catalog { name, version } => (name.clone(), version.clone()),
+                RefType::DatabaseId(id) => {
+                    (id.clone(), None) // Server handles ID lookup
+                }
+                RefType::CatalogPath(path) => (path.clone(), exec_ctx.version.clone()),
+            };
+
+            let request_payload = build_distributed_payload(input.as_ref(), payload.as_deref(), &variables)?;
+
+            execute_playbook_distributed(
+                client,
+                &effective_endpoint,
+                effective_gateway_proxy,
+                &path,
+                version.and_then(|v| v.parse().ok()),
+                request_payload,
+                ExecutionResourceKind::Playbook,
+                json,
+            )
+            .await?;
+        }
+        other => {
+            eprintln!("Error: Unknown runtime '{}'. Use: local, distributed, or auto", other);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
 }
 
 /// Build variables map from payload JSON and --set flags
@@ -2072,7 +2267,7 @@ fn print_console_help() {
     println!("  context use gke-prod");
     println!("  auth login --browser-pkce");
     println!("  --gateway catalog register tests/fixtures/playbooks/foo.yaml");
-    println!("  exec tests/quantum/cudaq_ai_pipeline -r distributed");
+    println!("  run tests/quantum/cudaq_ai_pipeline -r distributed");
 }
 
 fn print_console_where(cli: &Cli) -> Result<()> {
@@ -2374,147 +2569,29 @@ async fn main() -> Result<()> {
         Some(Commands::Ai { ref args }) => {
             run_ai_mode(&cli, &args)?;
         }
-        Some(Commands::Exec {
-            reference,
-            runtime,
-            target,
-            variables,
-            payload,
-            input,
-            version,
-            endpoint,
-            verbose,
-            dry_run,
-            facts_out,
-            json,
-        }) => {
-            // Get context runtime preference (honours --context override).
-            let context_runtime = effective_context(context_override.as_deref(), &config).map(|(_, ctx)| ctx.runtime.as_str());
-
-            // Parse the reference to determine type and resolve runtime
-            let exec_ctx = parse_exec_reference(&reference, version.as_deref())?;
-            let effective_runtime = resolve_runtime(&runtime, context_runtime, &exec_ctx, verbose)?;
-            let effective_endpoint = endpoint.unwrap_or_else(|| base_url.clone());
-            let effective_gateway_proxy = use_gateway_proxy || is_gateway_url(&effective_endpoint);
-
-            // Build variables from payload and --set flags
-            let vars = build_variables(payload.as_deref(), &variables)?;
-
-            if verbose {
-                println!("Execution Context:");
-                println!("  Reference: {}", reference);
-                println!("  Type: {:?}", exec_ctx.ref_type);
-                println!("  Runtime: {}", effective_runtime);
-                if let Some(v) = &exec_ctx.version {
-                    println!("  Version: {}", v);
-                }
-                if let Some(t) = &target {
-                    println!("  Target: {}", t);
-                } else if let Some(t) = &exec_ctx.inferred_target {
-                    println!("  Target: {} (inferred from noetl.yaml)", t);
-                }
-            }
-
-            if dry_run {
-                println!("\n[DRY RUN] Would execute with:");
-                println!("  Runtime: {}", effective_runtime);
-                match &exec_ctx.ref_type {
-                    RefType::File(path) => println!("  File: {}", path.display()),
-                    RefType::Catalog { name, version } => {
-                        println!("  Catalog: {}", name);
-                        if let Some(v) = version {
-                            println!("  Version: {}", v);
-                        }
-                    }
-                    RefType::DatabaseId(id) => println!("  DB ID: {}", id),
-                    RefType::CatalogPath(path) => println!("  Path: {}", path),
-                }
-                return Ok(());
-            }
-
-            match effective_runtime.as_str() {
-                "local" => {
-                    // Local execution using Rust interpreter
-                    let playbook_path = match &exec_ctx.ref_type {
-                        RefType::File(path) => path.clone(),
-                        RefType::Catalog { .. } | RefType::DatabaseId(_) | RefType::CatalogPath(_) => {
-                            eprintln!("Error: Local runtime requires a file path reference");
-                            eprintln!("  Use: noetl exec ./path/to/playbook.yaml -r local");
-                            eprintln!("  Or use: -r distributed for catalog/db references");
-                            std::process::exit(1);
-                        }
-                    };
-
-                    // Use CLI target if provided, otherwise use inferred target (from noetl.yaml pattern)
-                    let effective_target = target.or(exec_ctx.inferred_target.clone());
-
-                    // The `--json` flag now does two things in local
-                    // runtime mode (previously a no-op): (1) suppress
-                    // human-readable progress on stdout — progress
-                    // already routes to stderr from PlaybookRunner — and
-                    // (2) emit a structured RunOutcome envelope on
-                    // stdout when the playbook completes. This is what
-                    // lets the agent bridge (and any other programmatic
-                    // consumer) get clean JSON to pipe into `jq`.
-                    let runner = playbook_runner::PlaybookRunner::new(playbook_path)
-                        .with_variables(vars)
-                        .with_verbose(verbose)
-                        .with_target(effective_target)
-                        .with_facts_out(facts_out.clone())
-                        // When --json is set, suppress progress entirely
-                        // so stdout = ONLY the JSON envelope. The user
-                        // still sees errors via stderr.
-                        .with_quiet(json)
-                        .with_emit_json(json);
-
-                    runner.run()?;
-                }
-                "distributed" => {
-                    // Distributed execution via server
-                    let (path, version) = match &exec_ctx.ref_type {
-                        RefType::File(file_path) => {
-                            // For file refs, we need to register first or use a different approach
-                            eprintln!("Warning: Executing local file via distributed runtime");
-                            eprintln!(
-                                "  Consider registering with: noetl catalog register {}",
-                                file_path.display()
-                            );
-                            // Use filename as path for now
-                            let name = file_path
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "playbook".to_string());
-                            (name, None)
-                        }
-                        RefType::Catalog { name, version } => (name.clone(), version.clone()),
-                        RefType::DatabaseId(id) => {
-                            (id.clone(), None) // Server handles ID lookup
-                        }
-                        RefType::CatalogPath(path) => (path.clone(), exec_ctx.version.clone()),
-                    };
-
-                    let request_payload = build_distributed_payload(input.as_ref(), payload.as_deref(), &variables)?;
-
-                    execute_playbook_distributed(
-                        &client,
-                        &effective_endpoint,
-                        effective_gateway_proxy,
-                        &path,
-                        version.and_then(|v| v.parse().ok()),
-                        request_payload,
-                        ExecutionResourceKind::Playbook,
-                        json,
-                    )
-                    .await?;
-                }
-                _ => {
-                    eprintln!(
-                        "Error: Unknown runtime '{}'. Use: local, distributed, or auto",
-                        effective_runtime
-                    );
-                    std::process::exit(1);
-                }
-            }
+        Some(Commands::Run(args)) => {
+            run_playbook(
+                args,
+                None,
+                &client,
+                &base_url,
+                use_gateway_proxy,
+                context_override.as_deref(),
+                &config,
+            )
+            .await?;
+        }
+        Some(Commands::Exec(args)) => {
+            run_playbook(
+                args,
+                Some("exec"),
+                &client,
+                &base_url,
+                use_gateway_proxy,
+                context_override.as_deref(),
+                &config,
+            )
+            .await?;
         }
         Some(Commands::Subscribe {
             reference,
@@ -2700,31 +2777,36 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Some(Commands::Execute { command }) => match command {
-            ExecuteCommand::Playbook { path, input, json } => {
-                execute_playbook(&client, &base_url, use_gateway_proxy, &path, input, json).await?;
-            }
-            ExecuteCommand::Rerun {
-                execution_id,
-                input,
-                json,
-            } => {
-                let workload = build_distributed_payload(input.as_ref(), None, &[])?;
-                execute_rerun_distributed(
-                    &client,
-                    &base_url,
-                    use_gateway_proxy,
-                    &execution_id,
-                    workload,
-                    ExecutionResourceKind::Playbook,
+        Some(Commands::Execute { command }) => {
+            eprintln!(
+                "note: 'execute' is a deprecated command group; it still works but will be removed in a future major release. Use 'noetl run <ref> --runtime distributed' to submit a playbook, or 'noetl status <id>' for status."
+            );
+            match command {
+                ExecuteCommand::Playbook { path, input, json } => {
+                    execute_playbook(&client, &base_url, use_gateway_proxy, &path, input, json).await?;
+                }
+                ExecuteCommand::Rerun {
+                    execution_id,
+                    input,
                     json,
-                )
-                .await?;
+                } => {
+                    let workload = build_distributed_payload(input.as_ref(), None, &[])?;
+                    execute_rerun_distributed(
+                        &client,
+                        &base_url,
+                        use_gateway_proxy,
+                        &execution_id,
+                        workload,
+                        ExecutionResourceKind::Playbook,
+                        json,
+                    )
+                    .await?;
+                }
+                ExecuteCommand::Status { execution_id, json } => {
+                    get_status(&client, &base_url, use_gateway_proxy, &execution_id, json).await?;
+                }
             }
-            ExecuteCommand::Status { execution_id, json } => {
-                get_status(&client, &base_url, use_gateway_proxy, &execution_id, json).await?;
-            }
-        },
+        }
         Some(Commands::Get { resource }) => match resource {
             GetResource::Credential { name, include_data } => {
                 get_credential(&client, &base_url, use_gateway_proxy, &name, include_data).await?;
@@ -4895,7 +4977,7 @@ async fn execute_playbook_distributed(
             // Extract execution_id if available and show status command hint
             if let Some(exec_id) = result.get("execution_id") {
                 println!("\nTo check status:");
-                println!("  noetl execute status {}", exec_id);
+                println!("  noetl status {}", exec_id);
             }
         }
     } else {
@@ -4950,7 +5032,7 @@ async fn execute_rerun_distributed(
             println!("{}", serde_json::to_string_pretty(&result)?);
             if let Some(exec_id) = result.get("execution_id") {
                 println!("\nTo check status:");
-                println!("  noetl execute status {}", exec_id);
+                println!("  noetl status {}", exec_id);
             }
         }
     } else {
@@ -8267,6 +8349,67 @@ fn get_state_db_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- runtime precedence ladder: flag > context > local default ----
+
+    #[test]
+    fn ladder_rung1_flag_local_wins_over_distributed_context() {
+        // Rung 1: an explicit --runtime local always wins, even when the
+        // context pins distributed. This is the provider provisioning path.
+        let (rt, src) = resolve_runtime("local", Some("distributed")).unwrap();
+        assert_eq!(rt, "local");
+        assert_eq!(src, RuntimeSource::Flag);
+    }
+
+    #[test]
+    fn ladder_rung1_flag_distributed_wins_over_local_context() {
+        let (rt, src) = resolve_runtime("distributed", Some("local")).unwrap();
+        assert_eq!(rt, "distributed");
+        assert_eq!(src, RuntimeSource::Flag);
+    }
+
+    #[test]
+    fn ladder_rung2_context_wins_when_flag_is_auto() {
+        // Rung 2: no explicit flag (auto) → the context's runtime decides.
+        let (rt, src) = resolve_runtime("auto", Some("distributed")).unwrap();
+        assert_eq!(rt, "distributed");
+        assert_eq!(src, RuntimeSource::Context);
+
+        let (rt, src) = resolve_runtime("auto", Some("local")).unwrap();
+        assert_eq!(rt, "local");
+        assert_eq!(src, RuntimeSource::Context);
+    }
+
+    #[test]
+    fn ladder_rung3_default_local_when_no_flag_no_context() {
+        // Rung 3: no flag, no context at all → CLI-first default = local.
+        let (rt, src) = resolve_runtime("auto", None).unwrap();
+        assert_eq!(rt, "local");
+        assert_eq!(src, RuntimeSource::Default);
+    }
+
+    #[test]
+    fn fork_a_context_without_runtime_field_falls_through_to_local() {
+        // A context that omits `runtime:` deserializes to the "auto" sentinel
+        // (config::default_runtime). "auto" == unset → fall through to the
+        // local default. It must NOT error and must NOT force distributed.
+        let (rt, src) = resolve_runtime("auto", Some("auto")).unwrap();
+        assert_eq!(rt, "local");
+        assert_eq!(src, RuntimeSource::Default);
+    }
+
+    #[test]
+    fn fork_a_missing_field_deserializes_to_auto_sentinel() {
+        // Prove the representation Fork A relies on: a context YAML with no
+        // `runtime:` key loads as the "auto" sentinel, distinct from "local".
+        let ctx: crate::config::Context = serde_yaml::from_str("server_url: http://localhost:8082\n").unwrap();
+        assert_eq!(ctx.runtime, "auto");
+
+        let ctx_local: crate::config::Context =
+            serde_yaml::from_str("server_url: http://localhost:8082\nruntime: local\n").unwrap();
+        assert_eq!(ctx_local.runtime, "local");
+        assert_ne!(ctx.runtime, ctx_local.runtime);
+    }
 
     #[test]
     fn distributed_payload_accepts_workload_prefixed_overrides() {
