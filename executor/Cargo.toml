@@ -28,7 +28,7 @@ name = "noetl-executor"
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
@@ -88,7 +88,7 @@ rhai = { version = "1.18", features = ["sync"] }
 # Subsequent sub-PRs (PR-2c-2 onwards per Strategy B) replace one
 # inline tool implementation in playbook_runner.rs at a time so
 # semantic differences surface incrementally instead of all at once.
-noetl-tools = "3"
+noetl-tools = "3.26"
 
 # GCS uploads in `tools_bridge::gcs_upload` (R-3 GCS sink migration,
 # noetl/ai-meta#31).  The `gcp` feature pulls in

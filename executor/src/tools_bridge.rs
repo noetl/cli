@@ -355,6 +355,7 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             confirm,
             reconcile,
             known_desired,
+            guard,
             // `auth` is mapped to ToolConfig.auth in the dispatch arm, not into
             // the config body (the ProviderSpec ignores an `auth` config key).
             auth: _,
@@ -394,6 +395,9 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             }
             if let Some(k) = known_desired {
                 cfg.insert("known_desired".into(), yaml_to_json(k));
+            }
+            if let Some(g) = guard {
+                cfg.insert("guard".into(), yaml_to_json(g));
             }
             ("provider", serde_json::Value::Object(cfg))
         }
@@ -1373,6 +1377,7 @@ mod tests {
             confirm: None,
             reconcile: None,
             known_desired: None,
+            guard: None,
             auth: None,
         };
         let cfg = to_tools_config(&tool);
@@ -1432,6 +1437,7 @@ mod tests {
             confirm: None,
             reconcile: None,
             known_desired: None,
+            guard: None,
             auth: None,
         };
         let vars = empty_vars();
@@ -1473,6 +1479,7 @@ mod tests {
             confirm: None,
             reconcile: None,
             known_desired: None,
+            guard: None,
             auth: None,
         };
         let vars = empty_vars();
