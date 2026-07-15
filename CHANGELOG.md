@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.18.0](https://github.com/noetl/cli/compare/v4.17.0...v4.18.0) (2026-07-15)
+
+### Features
+
+* **provider:** wrong-target guard wiring + git-backed state sink (--facts-out) ([#71](https://github.com/noetl/cli/issues/71)) ([c7dc1e5](https://github.com/noetl/cli/commit/c7dc1e54eba65eff49124cfcbddc77b0053a34db)), closes [noetl/ai-meta#189](https://github.com/noetl/ai-meta/issues/189) [shastaratech/gcp-org-playbooks#12](https://github.com/shastaratech/gcp-org-playbooks/issues/12)
+
 ## [4.17.0](https://github.com/noetl/cli/compare/v4.16.0...v4.17.0) (2026-07-14)
 
 ### Features
