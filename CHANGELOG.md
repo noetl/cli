@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.19.0](https://github.com/noetl/cli/compare/v4.18.0...v4.19.0) (2026-07-15)
+
+### Features
+
+* **cli:** run is canonical; runtime ladder flag>context>local + provenance echo ([70990f0](https://github.com/noetl/cli/commit/70990f060ea603b7c932b17754fb5d85a0dcb09c))
+
 ## [4.18.0](https://github.com/noetl/cli/compare/v4.17.0...v4.18.0) (2026-07-15)
 
 ### Features
