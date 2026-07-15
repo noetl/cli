@@ -428,6 +428,12 @@ pub enum Tool {
         /// to compute the desired-vs-actual diff; absent → untracked / import.
         #[serde(default)]
         known_desired: Option<serde_yaml::Value>,
+        /// Multi-org / multi-billing wrong-target guard (Stage-1 safety) —
+        /// `{ require_org, require_org_display_name, require_billing_account }`.
+        /// Pins the organization + billing account a run may touch; a mismatch
+        /// is refused structurally (offline) and, in apply mode, live.
+        #[serde(default)]
+        guard: Option<serde_yaml::Value>,
         /// Provider auth block (apply mode only).  Captured raw and mapped to
         /// the noetl-tools `AuthConfig` at dispatch; dry-run ignores it.
         #[serde(default)]

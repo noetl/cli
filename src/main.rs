@@ -147,6 +147,12 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Git-backed state sink: append each successful `kind: provider` apply's
+        /// ownership fact to this JSONL file (sensitive identifiers masked).
+        /// Read back with `noetl provider drift/orphans --facts-file <path>`.
+        #[arg(long)]
+        facts_out: Option<PathBuf>,
+
         /// Emit only JSON response (distributed runtime)
         #[arg(short, long)]
         json: bool,
@@ -2379,6 +2385,7 @@ async fn main() -> Result<()> {
             endpoint,
             verbose,
             dry_run,
+            facts_out,
             json,
         }) => {
             // Get context runtime preference (honours --context override).
@@ -2453,6 +2460,7 @@ async fn main() -> Result<()> {
                         .with_variables(vars)
                         .with_verbose(verbose)
                         .with_target(effective_target)
+                        .with_facts_out(facts_out.clone())
                         // When --json is set, suppress progress entirely
                         // so stdout = ONLY the JSON envelope. The user
                         // still sees errors via stderr.

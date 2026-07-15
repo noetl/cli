@@ -89,6 +89,10 @@ pub struct PlaybookRunner {
     /// → progress on stderr (or nothing in --quiet), structured JSON
     /// envelope on stdout.
     emit_json: bool,
+    /// Git-backed state sink (`noetl exec --facts-out <path>`): after each
+    /// successful provider-step apply, the emitted `provider_fact` is appended
+    /// as JSONL (sensitive identifiers masked).  `None` disables persistence.
+    facts_out: Option<PathBuf>,
 }
 
 impl PlaybookRunner {
@@ -101,7 +105,13 @@ impl PlaybookRunner {
             merge: false,
             quiet: false,
             emit_json: false,
+            facts_out: None,
         }
+    }
+
+    pub fn with_facts_out(mut self, facts_out: Option<PathBuf>) -> Self {
+        self.facts_out = facts_out;
+        self
     }
 
     pub fn with_variables(mut self, vars: HashMap<String, String>) -> Self {
@@ -1187,6 +1197,7 @@ impl PlaybookRunner {
                 confirm,
                 reconcile,
                 known_desired,
+                guard,
                 auth,
             } => {
                 // Render every template in the provider block with the CLI's
@@ -1235,6 +1246,10 @@ impl PlaybookRunner {
                     Some(v) => Some(self.render_yaml_value(v, context)?),
                     None => None,
                 };
+                let rendered_guard = match guard {
+                    Some(v) => Some(self.render_yaml_value(v, context)?),
+                    None => None,
+                };
 
                 if self.verbose {
                     eprintln!("   ☁️  Executing provider action: {}", action);
@@ -1256,6 +1271,7 @@ impl PlaybookRunner {
                     confirm: rendered_confirm,
                     reconcile: rendered_reconcile,
                     known_desired: rendered_known_desired,
+                    guard: rendered_guard,
                     auth: rendered_auth,
                 };
                 let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
@@ -1274,6 +1290,15 @@ impl PlaybookRunner {
                         ),
                     )
                 })?;
+                // Git-backed state sink: persist the applied ownership fact.
+                // `outcome.result` is a JSON-serialized string; parse it, then
+                // `append_applied_fact` skips planned/dry-run outcomes (so a plan
+                // run writes nothing).
+                if let (Some(out), Some(data_str)) = (&self.facts_out, outcome.result.as_ref()) {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(data_str) {
+                        crate::provider_cli::append_applied_fact(out, &data)?;
+                    }
+                }
                 Ok(outcome.result)
             }
             Tool::Unsupported => {

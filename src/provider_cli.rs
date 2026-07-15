@@ -102,11 +102,19 @@ pub struct ProviderCommonArgs {
     /// prior state, or use `--facts-file` for an offline state source.
     #[arg(long)]
     pub server: Option<String>,
-    /// Offline last-known-desired source: a JSON file of raw eventlog-tier
-    /// records (or event bodies, or bare provider_facts).  Mutually exclusive
-    /// with `--server`.
+    /// Offline last-known-desired source: a file of raw eventlog-tier records
+    /// (or event bodies, or bare provider_facts).  Accepts either a JSON array
+    /// or newline-delimited JSON (JSONL — the append format `--facts-out`
+    /// writes).  Mutually exclusive with `--server`.
     #[arg(long)]
     pub facts_file: Option<PathBuf>,
+    /// Append the emitted `provider_fact` to this JSONL file after a successful
+    /// apply (adopt / converge) — the EHDB-less git-backed state sink.  One
+    /// applied fact per line; `planned` / dry-run outcomes are not written.
+    /// Read back with `--facts-file <same path>`.  The billing-account id and
+    /// IAM member identifiers are masked so a committed file stays clean.
+    #[arg(long)]
+    pub facts_out: Option<PathBuf>,
     /// Restrict the eventlog-tier fetch to one execution id.
     #[arg(long)]
     pub execution: Option<String>,
@@ -358,6 +366,10 @@ async fn adopt(
         .with_context(|| format!("adopt: dispatching provider step {:?}", target.step))?;
     let data = res.data.unwrap_or(serde_json::Value::Null);
 
+    // Git-backed state sink: an applied adopt writes an ownership fact.  Dry-run
+    // (outcome `planned`) is filtered out inside the helper.
+    maybe_append_applied_fact(common, &data)?;
+
     if common.json {
         print_json(&serde_json::json!({ "verb": "adopt", "step": target.step, "result": data }));
     } else if apply {
@@ -411,6 +423,92 @@ fn load_resources(path: &Path) -> Result<Vec<DeclaredResource>> {
         );
     }
     Ok(out)
+}
+
+/// Parse a facts file that is EITHER a JSON array (the historical form) OR
+/// newline-delimited JSON (JSONL — what `--facts-out` appends).  Detected by the
+/// first non-whitespace byte: `[` → array; otherwise parse each non-empty line.
+fn parse_facts_content(content: &str) -> Result<Vec<serde_json::Value>> {
+    let trimmed = content.trim_start();
+    if trimmed.starts_with('[') {
+        return Ok(serde_json::from_str(content)?);
+    }
+    let mut out = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line)
+            .with_context(|| format!("parsing JSONL line {}", i + 1))?;
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// Append one `provider_fact` to a JSONL file (create-if-absent, O_APPEND),
+/// masking the non-secret-but-policy-sensitive identifiers so a committed file
+/// stays clean.  Called only after a successful APPLY with an applied outcome.
+fn append_fact_jsonl(path: &Path, fact: &serde_json::Value) -> Result<()> {
+    use std::io::Write;
+    // Wrap under `provider_fact` so the read side (`fact_in_record`, which looks
+    // at `provider_fact` / `data.provider_fact` / `result.data.provider_fact`)
+    // recognizes each JSONL line.  Mask sensitive identifiers first.
+    let record = serde_json::json!({ "provider_fact": mask_fact_identifiers(fact) });
+    let mut line = serde_json::to_string(&record)?;
+    line.push('\n');
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening facts-out file {}", path.display()))?;
+    f.write_all(line.as_bytes())
+        .with_context(|| format!("appending to facts-out file {}", path.display()))?;
+    Ok(())
+}
+
+/// Mask the two identifiers that can appear in a fact's `desired` and are kept
+/// out of git by policy (neither is a credential): the billing account id and
+/// the IAM member email.  Everything else (URN, folder/project/service ids) is
+/// commit-safe.
+fn mask_fact_identifiers(fact: &serde_json::Value) -> serde_json::Value {
+    let mut f = fact.clone();
+    if let Some(desired) = f.get_mut("desired").and_then(|d| d.as_object_mut()) {
+        for k in [
+            "billing_account",
+            "billingAccount",
+            "billingAccountName",
+            "member",
+        ] {
+            if desired.contains_key(k) {
+                desired.insert(k.to_string(), serde_json::json!("<masked>"));
+            }
+        }
+    }
+    f
+}
+
+/// Append the applied `provider_fact` from a tool result to the JSONL sink, iff
+/// the outcome is an applied one (`planned` / dry-run is intent-only and is
+/// skipped).  Shared by the provider verbs and `noetl exec --facts-out` so both
+/// dispatch paths persist ownership identically.
+pub(crate) fn append_applied_fact(out: &Path, data: &serde_json::Value) -> Result<()> {
+    let Some(fact) = data.get("provider_fact") else {
+        return Ok(());
+    };
+    let outcome = fact.get("outcome").and_then(|o| o.as_str()).unwrap_or("");
+    if matches!(outcome, "changed" | "noop" | "adopted" | "deleted" | "absent") {
+        append_fact_jsonl(out, fact)?;
+    }
+    Ok(())
+}
+
+/// `--facts-out` convenience for the provider verbs (wraps [`append_applied_fact`]).
+fn maybe_append_applied_fact(common: &ProviderCommonArgs, data: &serde_json::Value) -> Result<()> {
+    if let Some(out) = &common.facts_out {
+        append_applied_fact(out, data)?;
+    }
+    Ok(())
 }
 
 /// Build the noetl-tools ToolConfig for a resource, applying the CLI's stack /
@@ -469,8 +567,8 @@ async fn load_facts(client: &Client, common: &ProviderCommonArgs) -> Result<Vec<
     if let Some(path) = &common.facts_file {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("reading facts file {}", path.display()))?;
-        let records: Vec<serde_json::Value> =
-            serde_json::from_str(&content).with_context(|| format!("parsing facts file {}", path.display()))?;
+        let records = parse_facts_content(&content)
+            .with_context(|| format!("parsing facts file {}", path.display()))?;
         // Accept raw tier records (payload-string), decoded bodies, or bare
         // provider_facts — the tier extractor handles all three.
         return Ok(provider_state::extract_facts_from_tier_records(&records));
@@ -581,4 +679,86 @@ fn str_field(v: &serde_json::Value, key: &str) -> String {
 
 fn print_json(v: &serde_json::Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+}
+
+#[cfg(test)]
+mod facts_sink_tests {
+    use super::*;
+
+    fn tmp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("noetl-facts-{}-{}.jsonl", tag, std::process::id()))
+    }
+
+    #[test]
+    fn append_then_read_back_round_trip_and_masking() {
+        let path = tmp_path("rt");
+        let _ = std::fs::remove_file(&path);
+
+        // An applied adopt fact (ownership) + an applied billing fact whose
+        // `desired` carries the billing-account id that must be masked.
+        let adopt = serde_json::json!({
+            "urn": "google:cloudresourcemanager:project:shastara",
+            "provider": "google", "service": "cloudresourcemanager",
+            "resource_type": "project", "verb": "adopt", "stack": "shastaratech-org-foundation",
+            "outcome": "adopted", "execution_id": 1,
+            "desired": { "project_id": "shastara", "display_name": "shastara" }
+        });
+        let billing = serde_json::json!({
+            "urn": "google:cloudbilling:billing_link:shastaratech-youtube-prod",
+            "provider": "google", "service": "cloudbilling",
+            "resource_type": "billing_link", "verb": "ensure", "stack": "shastaratech-org-foundation",
+            "outcome": "changed", "execution_id": 2,
+            "desired": { "project_id": "shastaratech-youtube-prod", "billing_account": "billingAccounts/AAAAAA-BBBBBB-CCCCCC" }
+        });
+        // A planned (dry-run) fact that maybe_append_applied_fact must NOT write.
+        let planned = serde_json::json!({
+            "urn": "google:cloudresourcemanager:folder:20-media",
+            "provider": "google", "service": "cloudresourcemanager",
+            "resource_type": "folder", "verb": "ensure", "stack": "shastaratech-org-foundation",
+            "outcome": "planned", "execution_id": 3, "desired": { "display_name": "20-media" }
+        });
+
+        append_fact_jsonl(&path, &adopt).unwrap();
+        append_fact_jsonl(&path, &billing).unwrap();
+
+        // Masking: the committed line must not carry the billing account id.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("AAAAAA-BBBBBB-CCCCCC"), "billing account id must be masked in the sink");
+        assert!(raw.contains("<masked>"), "masked placeholder present");
+        assert_eq!(raw.lines().count(), 2, "one JSONL line per appended fact");
+
+        // Read back exactly as `--facts-file` does (JSONL) and fold → ownership.
+        let records = parse_facts_content(&raw).unwrap();
+        let facts = provider_state::extract_facts_from_tier_records(&records);
+        let model = provider_state::fold_facts(&facts);
+        assert!(
+            model.owned.contains_key("google:cloudresourcemanager:project:shastara"),
+            "adopted project is owned after the append→read-back round-trip"
+        );
+        assert!(
+            model.owned.contains_key("google:cloudbilling:billing_link:shastaratech-youtube-prod"),
+            "billing link is owned after round-trip (masking does not break the fold)"
+        );
+
+        // The planned/dry-run fact is filtered out by the apply-only gate.
+        let planned_data = serde_json::json!({ "provider_fact": planned });
+        let common = ProviderCommonArgs {
+            playbook: path.clone(), stack: None, server: None,
+            facts_file: None, facts_out: Some(path.clone()), execution: None,
+            endpoint: None, workload: None, json: false,
+        };
+        maybe_append_applied_fact(&common, &planned_data).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after.lines().count(), 2, "planned/dry-run fact must NOT be appended");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn parse_facts_content_accepts_array_and_jsonl() {
+        let array = r#"[{"urn":"u1","provider":"google","service":"s","resource_type":"project","verb":"ensure","stack":"x","outcome":"changed","execution_id":1,"desired":{}}]"#;
+        assert_eq!(parse_facts_content(array).unwrap().len(), 1);
+        let jsonl = "{\"a\":1}\n\n{\"b\":2}\n";
+        assert_eq!(parse_facts_content(jsonl).unwrap().len(), 2, "JSONL: blank lines skipped");
+    }
 }
