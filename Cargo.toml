@@ -33,6 +33,15 @@ keywords = ["workflow", "automation", "etl", "mlops", "data-pipeline"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
+# The command tree lives in the library so embedders run the same code the
+# binaries do.  The PyO3 wheel published to PyPI as `noetl` links this lib and
+# calls `noetl::cli_main(argv)`; without the lib target it would have to
+# reimplement the dispatcher, which is exactly the failure mode this split
+# exists to prevent.
+[lib]
+name = "noetl"
+path = "src/lib.rs"
+
 [[bin]]
 name = "noetl"
 path = "src/main.rs"
@@ -93,7 +102,7 @@ noetl-tools = "3.26"
 noetl-events = { path = "events", version = "0.1.0" }
 async-trait = "0.1"
 
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "string"] }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
