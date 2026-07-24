@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.20.0](https://github.com/noetl/cli/compare/v4.19.0...v4.20.0) (2026-07-24)
+
+### Features
+
+* **cli:** extract the command tree into a library entrypoint ([#73](https://github.com/noetl/cli/issues/73)) ([cdcf4bf](https://github.com/noetl/cli/commit/cdcf4bf2d239eec5765d53aa27e024d958931b2d))
+
 ## [4.19.0](https://github.com/noetl/cli/compare/v4.18.0...v4.19.0) (2026-07-15)
 
 ### Features
