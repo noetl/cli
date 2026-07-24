@@ -20,6 +20,19 @@ Both binaries run the same CLI and are interchangeable.
 cargo install --bins noetl
 ```
 
+This builds without the embedded DuckDB engine, which keeps the build to a few
+minutes. The pre-built binaries (Homebrew, APT, the GitHub release tarballs)
+all ship *with* it, so this only affects `cargo install`. To match them:
+
+```bash
+cargo install --bins noetl --features duckdb-integration
+```
+
+That compiles DuckDB from its C++ amalgamation and takes considerably longer.
+Without it, `noetl iap` (whose workspace/state ledger is a local
+`state.duckdb`), the `sink: duckdb:` target, and `kind: duckdb` / `ducklake`
+playbook steps report a rebuild hint instead of running.
+
 ### Via Homebrew (macOS)
 
 ```bash

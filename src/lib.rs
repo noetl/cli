@@ -3028,8 +3028,21 @@ async fn dispatch(cli: Cli) -> Result<()> {
         }) => {
             cleanup_stuck_executions(&client, &base_url, use_gateway_proxy, older_than_minutes, dry_run, json).await?;
         }
+        // `noetl iap` keeps its workspace/state/sync/drift ledger in a local
+        // `state.duckdb`, so the whole family needs the embedded engine.  The
+        // subcommand stays in `--help` either way — `--help` output is
+        // identical across features — and reports a rebuild hint when the
+        // engine was compiled out.
+        #[cfg(feature = "duckdb-integration")]
         Some(Commands::Iap { command }) => {
             handle_iap_command(command).await?;
+        }
+        #[cfg(not(feature = "duckdb-integration"))]
+        Some(Commands::Iap { .. }) => {
+            bail!(
+                "`noetl iap` needs the embedded DuckDB engine, which this build was compiled \
+                 without.\n  Rebuild with: cargo install noetl --features duckdb-integration"
+            );
         }
         None => {
             println!("Use --help for usage information or --interactive for TUI mode");
@@ -7139,6 +7152,7 @@ fn update_deployment_image(file_path: &str, image: &str) -> Result<()> {
 // Infrastructure as Playbook (IaP) Command Handlers
 // =============================================================================
 
+#[cfg(feature = "duckdb-integration")]
 async fn handle_iap_command(command: IapCommand) -> Result<()> {
     match command {
         IapCommand::Init {
@@ -7167,6 +7181,7 @@ async fn handle_iap_command(command: IapCommand) -> Result<()> {
     }
 }
 
+#[cfg(feature = "duckdb-integration")]
 async fn handle_iap_state_command(command: IapStateCommand) -> Result<()> {
     match command {
         IapStateCommand::List { resource_type, format } => iap_state_list(resource_type.as_deref(), &format).await,
@@ -7176,6 +7191,7 @@ async fn handle_iap_state_command(command: IapStateCommand) -> Result<()> {
     }
 }
 
+#[cfg(feature = "duckdb-integration")]
 async fn handle_iap_sync_command(command: IapSyncCommand) -> Result<()> {
     match command {
         IapSyncCommand::Push { force } => iap_sync_push(force).await,
@@ -7184,6 +7200,7 @@ async fn handle_iap_sync_command(command: IapSyncCommand) -> Result<()> {
     }
 }
 
+#[cfg(feature = "duckdb-integration")]
 async fn handle_iap_drift_command(command: IapDriftCommand) -> Result<()> {
     match command {
         IapDriftCommand::Detect {
@@ -7194,6 +7211,7 @@ async fn handle_iap_drift_command(command: IapDriftCommand) -> Result<()> {
     }
 }
 
+#[cfg(feature = "duckdb-integration")]
 async fn handle_iap_workspace_command(command: IapWorkspaceCommand) -> Result<()> {
     match command {
         IapWorkspaceCommand::List { remote } => iap_workspace_list(remote).await,
@@ -7207,6 +7225,7 @@ async fn handle_iap_workspace_command(command: IapWorkspaceCommand) -> Result<()
 }
 
 /// Initialize IaP state database and configuration
+#[cfg(feature = "duckdb-integration")]
 async fn iap_init(
     project: &str,
     bucket: Option<&str>,
@@ -7358,6 +7377,7 @@ async fn iap_init(
 }
 
 /// Plan infrastructure changes (dry-run)
+#[cfg(feature = "duckdb-integration")]
 async fn iap_plan(playbook: &PathBuf, variables: &[String], verbose: bool) -> Result<()> {
     println!("Planning infrastructure changes...");
     println!("  Playbook: {}", playbook.display());
@@ -7391,6 +7411,7 @@ async fn iap_plan(playbook: &PathBuf, variables: &[String], verbose: bool) -> Re
 }
 
 /// Apply infrastructure changes
+#[cfg(feature = "duckdb-integration")]
 async fn iap_apply(playbook: &PathBuf, variables: &[String], auto_approve: bool, verbose: bool) -> Result<()> {
     if !auto_approve {
         println!("This will apply infrastructure changes.");
@@ -7427,11 +7448,13 @@ async fn iap_apply(playbook: &PathBuf, variables: &[String], auto_approve: bool,
 // =============================================================================
 
 /// Get workspace registry path
+#[cfg(feature = "duckdb-integration")]
 fn get_workspace_registry_path() -> PathBuf {
     PathBuf::from(".noetl/workspaces.json")
 }
 
 /// Workspace registry entry
+#[cfg(feature = "duckdb-integration")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct WorkspaceEntry {
     name: String,
@@ -7446,6 +7469,7 @@ struct WorkspaceEntry {
 }
 
 /// Load workspace registry
+#[cfg(feature = "duckdb-integration")]
 fn load_workspace_registry() -> Result<HashMap<String, WorkspaceEntry>> {
     let registry_path = get_workspace_registry_path();
     if registry_path.exists() {
@@ -7457,6 +7481,7 @@ fn load_workspace_registry() -> Result<HashMap<String, WorkspaceEntry>> {
 }
 
 /// Save workspace registry
+#[cfg(feature = "duckdb-integration")]
 fn save_workspace_registry(registry: &HashMap<String, WorkspaceEntry>) -> Result<()> {
     let registry_path = get_workspace_registry_path();
     if let Some(parent) = registry_path.parent() {
@@ -7468,6 +7493,7 @@ fn save_workspace_registry(registry: &HashMap<String, WorkspaceEntry>) -> Result
 }
 
 /// List workspaces
+#[cfg(feature = "duckdb-integration")]
 async fn iap_workspace_list(include_remote: bool) -> Result<()> {
     use duckdb::Connection;
 
@@ -7572,6 +7598,7 @@ async fn iap_workspace_list(include_remote: bool) -> Result<()> {
 }
 
 /// Switch to a different workspace
+#[cfg(feature = "duckdb-integration")]
 async fn iap_workspace_switch(name: &str, pull_after: bool) -> Result<()> {
     use duckdb::{params, Connection};
 
@@ -7705,6 +7732,7 @@ async fn iap_workspace_switch(name: &str, pull_after: bool) -> Result<()> {
 }
 
 /// Show current workspace info
+#[cfg(feature = "duckdb-integration")]
 async fn iap_workspace_current() -> Result<()> {
     use duckdb::Connection;
 
@@ -7771,6 +7799,7 @@ async fn iap_workspace_current() -> Result<()> {
 }
 
 /// Create a new workspace
+#[cfg(feature = "duckdb-integration")]
 async fn iap_workspace_create(name: &str, from: Option<&str>, switch_to: bool) -> Result<()> {
     use duckdb::Connection;
 
@@ -7873,6 +7902,7 @@ async fn iap_workspace_create(name: &str, from: Option<&str>, switch_to: bool) -
 }
 
 /// Delete a workspace from registry
+#[cfg(feature = "duckdb-integration")]
 async fn iap_workspace_delete(name: &str, delete_remote: bool, force: bool) -> Result<()> {
     use duckdb::Connection;
     use std::io::{self, Write};
@@ -7956,6 +7986,7 @@ async fn iap_workspace_delete(name: &str, delete_remote: bool, force: bool) -> R
 }
 
 /// List resources in state
+#[cfg(feature = "duckdb-integration")]
 async fn iap_state_list(resource_type: Option<&str>, format: &str) -> Result<()> {
     use duckdb::Connection;
 
@@ -8024,6 +8055,7 @@ async fn iap_state_list(resource_type: Option<&str>, format: &str) -> Result<()>
 }
 
 /// Show details for a specific resource
+#[cfg(feature = "duckdb-integration")]
 async fn iap_state_show(resource: &str) -> Result<()> {
     use duckdb::Connection;
 
@@ -8068,6 +8100,7 @@ async fn iap_state_show(resource: &str) -> Result<()> {
 }
 
 /// Remove a resource from state
+#[cfg(feature = "duckdb-integration")]
 async fn iap_state_rm(resource: &str, force: bool) -> Result<()> {
     use duckdb::Connection;
 
@@ -8106,6 +8139,7 @@ async fn iap_state_rm(resource: &str, force: bool) -> Result<()> {
 }
 
 /// Execute raw SQL query against state database
+#[cfg(feature = "duckdb-integration")]
 async fn iap_state_query(sql: &str) -> Result<()> {
     use std::process::Command;
 
@@ -8135,6 +8169,7 @@ async fn iap_state_query(sql: &str) -> Result<()> {
 }
 
 /// Push local state to GCS
+#[cfg(feature = "duckdb-integration")]
 async fn iap_sync_push(force: bool) -> Result<()> {
     use duckdb::Connection;
 
@@ -8201,6 +8236,7 @@ async fn iap_sync_push(force: bool) -> Result<()> {
 }
 
 /// Pull state from GCS to local
+#[cfg(feature = "duckdb-integration")]
 async fn iap_sync_pull(force: bool) -> Result<()> {
     use duckdb::Connection;
 
@@ -8273,6 +8309,7 @@ async fn iap_sync_pull(force: bool) -> Result<()> {
 }
 
 /// Show sync status
+#[cfg(feature = "duckdb-integration")]
 async fn iap_sync_status() -> Result<()> {
     use duckdb::Connection;
 
@@ -8347,6 +8384,7 @@ async fn iap_sync_status() -> Result<()> {
 }
 
 /// Detect drift between state and actual resources
+#[cfg(feature = "duckdb-integration")]
 async fn iap_drift_detect(_resource_type: Option<&str>, _resource: Option<&str>) -> Result<()> {
     println!("Drift detection requires cloud API access.");
     println!("This feature is not yet implemented.");
@@ -8358,6 +8396,7 @@ async fn iap_drift_detect(_resource_type: Option<&str>, _resource: Option<&str>)
 }
 
 /// Show drift report
+#[cfg(feature = "duckdb-integration")]
 async fn iap_drift_report(format: &str) -> Result<()> {
     use duckdb::Connection;
 
@@ -8415,6 +8454,7 @@ async fn iap_drift_report(format: &str) -> Result<()> {
 }
 
 /// Parse key=value variables
+#[cfg(feature = "duckdb-integration")]
 fn parse_variables(variables: &[String]) -> Result<std::collections::HashMap<String, String>> {
     let mut vars = std::collections::HashMap::new();
     for var in variables {
@@ -8428,6 +8468,7 @@ fn parse_variables(variables: &[String]) -> Result<std::collections::HashMap<Str
 }
 
 /// Get the default state database path
+#[cfg(feature = "duckdb-integration")]
 fn get_state_db_path() -> Result<PathBuf> {
     let path = PathBuf::from(".noetl/state.duckdb");
     Ok(path)

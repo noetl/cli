@@ -51,24 +51,31 @@ name = "ntl"
 path = "src/main.rs"
 
 [features]
-# Enabled by default so every cli build path (cargo install, apt, homebrew)
-# keeps the DuckDB capability.
-default = ["duckdb-integration"]
-# DuckDB integration — passthrough to `noetl-tools/duckdb-integration`.  The cli
-# routes `duckdb` / `ducklake` tool steps through `noetl_tools::tools::DuckdbTool`
-# (via noetl-executor's tools_bridge — see playbook_runner.rs).  noetl-tools
-# >= 3.20.0 gates the DuckDB C++ engine (`libduckdb-sys`) behind this non-default
-# feature (noetl/ai-meta#185); enabling it here keeps cli's noetl-tools DuckDB
-# path REAL after cli re-pins to 3.20.0 (otherwise DuckdbTool becomes a stub
-# that errors at dispatch).
+# Empty by default: a plain `cargo build` must not compile the DuckDB C++
+# amalgamation.  `libduckdb-sys` takes tens of minutes to an hour per target and
+# is the single largest cost in this crate's build; a five-platform wheel matrix
+# (the PyO3 package on PyPI) cannot pay it, and neither should a dev rebuild.
 #
-# In `default` (unlike noetl/worker#183, which keeps it out of default for a fast
-# dev build): the cli already compiles DuckDB via its own `duckdb` dependency
-# below, so this passthrough adds ZERO build cost — the same libduckdb-sys node
-# is shared by feature unification.  Keeping it off default would pay the DuckDB
-# compile anyway AND leave the noetl-tools path a stub — worst of both.
+# Every *distributed* artifact still ships with DuckDB — the release workflow's
+# tarball + deb jobs, the Homebrew formula, and the Dockerfile all pass
+# `--features duckdb-integration` explicitly.  Only the default build is lean.
+default = []
+# DuckDB integration.  Two things at once, which is why they share a feature:
+#
+#  1. `dep:duckdb` — the CLI's own embedded engine, used by `noetl iap`
+#     (workspace/state/sync/drift over a local `state.duckdb`) and by the
+#     `sink: duckdb:` target in playbook_runner.  Without it those paths are
+#     compiled out and report an actionable rebuild hint.
+#  2. `noetl-tools/duckdb-integration` — the registry-side engine behind
+#     `kind: duckdb` / `ducklake` playbook steps, which the CLI reaches through
+#     noetl-executor's tools_bridge.  noetl-tools >= 3.20.0 gates the same
+#     `libduckdb-sys` node behind this feature (noetl/ai-meta#185); with it off
+#     `DuckdbTool` is a stub that errors at dispatch.
+#
+# Both halves resolve to the same `libduckdb-sys` build via feature unification,
+# so enabling the feature costs one C++ compile, not two.
 # REQUIRES noetl-tools >= 3.20.0 (the version that introduced the feature).
-duckdb-integration = ["noetl-tools/duckdb-integration"]
+duckdb-integration = ["dep:duckdb", "noetl-tools/duckdb-integration"]
 
 [dependencies]
 # Workspace member crate shipping the shared execution core.  R-1.1
@@ -122,7 +129,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sysinfo = "0.31"
 nix = { version = "0.29", features = ["signal", "process"] }
-duckdb = { version = "1.0", features = ["bundled"] }
+# `bundled` compiles DuckDB from the vendored C++ amalgamation, so this is the
+# expensive one.  Optional + non-default; see the `duckdb-integration` feature.
+duckdb = { version = "1.0", features = ["bundled"], optional = true }
 shellexpand = "3.1"
 regex = "1.10"
 rhai = { version = "1.18", features = ["sync"] }

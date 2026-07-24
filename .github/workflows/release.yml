@@ -325,7 +325,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build binaries
-        run: cargo build --release --bins
+        # `duckdb-integration` is non-default (it compiles the DuckDB C++
+        # amalgamation).  Distributed binaries keep it: only dev/default
+        # builds and the PyO3 wheel matrix opt out.
+        run: cargo build --release --bins --features duckdb-integration
       - name: Package tarball
         shell: bash
         run: |
@@ -347,7 +350,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build binaries
-        run: cargo build --release --bins
+        # `duckdb-integration` is non-default (it compiles the DuckDB C++
+        # amalgamation).  Distributed binaries keep it: only dev/default
+        # builds and the PyO3 wheel matrix opt out.
+        run: cargo build --release --bins --features duckdb-integration
       - name: Build deb package (amd64)
         shell: bash
         run: |
@@ -459,7 +465,7 @@ jobs:
             depends_on "rust" => :build
 
             def install
-              system "cargo", "install", "--bins", *std_cargo_args
+              system "cargo", "install", "--bins", "--features", "duckdb-integration", *std_cargo_args
             end
 
             test do

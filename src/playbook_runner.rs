@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+#[cfg(feature = "duckdb-integration")]
 use duckdb::{params, Connection};
 // `Deserialize` / `Serialize` derive macros come in through the
 // `pub use noetl_executor::playbook::*` block below; no direct use
@@ -1406,6 +1407,7 @@ impl PlaybookRunner {
     // in the Tool::Sink arm now goes through `format_sink_payload`.
 
     /// Sink data to DuckDB table
+    #[cfg(feature = "duckdb-integration")]
     fn sink_to_duckdb(&self, db_path: &PathBuf, table: &str, json_data: &str) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
@@ -1451,6 +1453,19 @@ impl PlaybookRunner {
                 Ok(())
             }
         }
+    }
+
+    /// `sink: duckdb:` in a playbook, in a build compiled without the embedded
+    /// engine.  The step fails with a rebuild hint rather than the target being
+    /// silently absent from the playbook surface.
+    #[cfg(not(feature = "duckdb-integration"))]
+    fn sink_to_duckdb(&self, db_path: &PathBuf, table: &str, _json_data: &str) -> Result<()> {
+        anyhow::bail!(
+            "sink to DuckDB ({} -> {}) needs the embedded DuckDB engine, which this build \
+             was compiled without.\n  Rebuild with: cargo install noetl --features duckdb-integration",
+            db_path.display(),
+            table
+        )
     }
 
     fn render_template(&self, template: &str, context: &ExecutionContext) -> Result<String> {
