@@ -15,11 +15,13 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 # Build dependencies - this layer is cached as long as Cargo.toml/Cargo.lock don't change
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --features duckdb-integration --recipe-path recipe.json
 
-# Build the application
+# Build the application.  `duckdb-integration` is non-default (it compiles the
+# DuckDB C++ amalgamation); pass it explicitly so the shipped image keeps the
+# `noetl iap` + `sink: duckdb:` capability it had before the feature was gated.
 COPY . .
-RUN cargo build --release --bin noetl
+RUN cargo build --release --bin noetl --features duckdb-integration
 
 # Runtime stage
 FROM alpine:3.22.2 AS runtime
