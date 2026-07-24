@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.21.0](https://github.com/noetl/cli/compare/v4.20.0...v4.21.0) (2026-07-24)
+
+### Features
+
+* **cli:** make the embedded DuckDB engine an opt-in feature ([#74](https://github.com/noetl/cli/issues/74)) ([f013e07](https://github.com/noetl/cli/commit/f013e0784d5dd6f5a4fe96b167cc88ba720b8ea5))
+
 ## [4.20.0](https://github.com/noetl/cli/compare/v4.19.0...v4.20.0) (2026-07-24)
 
 ### Features
