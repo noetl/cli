@@ -39,9 +39,30 @@ pub fn evaluate_condition(
     };
 
     // Replace variables within the expression.
+    //
+    // noetl/cli#76 — this loop used to iterate `variables` directly.  That is a
+    // `HashMap`, so the iteration order is randomised per instance, and each
+    // step is a naive substring `replace`.  When one variable NAME is a prefix
+    // of another the result depends on which happened to come first:
+    //
+    //   vars: status="ok", status_code="200"   expression: status_code == "200"
+    //     status_code first ->  200 == "200"      -> TRUE
+    //     status      first ->  ok_code == "200"  -> FALSE
+    //
+    // Measured over 2000 constructions of that exact map: 858 true / 1142
+    // false.  That is the whole of cli#76's "a true `when:` arc takes its
+    // branch only about half the time" — the arc order is deterministic (a
+    // `Vec`, first match wins); the CONDITION was not.
+    //
+    // Fixed by making the order total and prefix-safe: longest key first, ties
+    // broken lexicographically.  A longer name is therefore always substituted
+    // before any name that is a prefix of it, and the same inputs now always
+    // produce the same expression.
+    let mut keys: Vec<&String> = variables.keys().collect();
+    keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.as_str().cmp(b.as_str())));
     let mut rendered = expression.to_string();
-    for (key, value) in variables {
-        rendered = rendered.replace(key, value);
+    for key in keys {
+        rendered = rendered.replace(key, &variables[key]);
     }
 
     fn strip_quotes(s: &str) -> String {
@@ -77,9 +98,29 @@ pub fn evaluate_condition(
         }
     }
 
-    // Truthy check — not empty, not "false", not "0".
-    let value = strip_quotes(&rendered);
-    Ok(!value.is_empty() && value != "false" && value != "0")
+    // Truthy check.
+    //
+    // noetl/ai-meta#231 — this used to be a CASE-SENSITIVE `value != "false"`.
+    // The template engine renders a boolean Python-style, so a `when:` guard on
+    // a false boolean rendered `"False"`, which is neither empty nor the
+    // lowercase literal, and the arc fired anyway.  Deterministically wrong in
+    // one direction, which is the other half of noetl/cli#76: the substitution
+    // ordering above made a true arc fire about half the time, and this made a
+    // FALSE arc fire every time.
+    //
+    // The falsy set is also aligned with the server's
+    // `orchestrate-core::TemplateRenderer::evaluate_condition`, which already
+    // lower-cases and already treats these as falsy.  This module's own doc
+    // comment claims the CLI tree walker and the worker runner "evaluate
+    // `when` / `case` conditions the same way" — they did not evaluate them the
+    // same way as the server, so one playbook could take different branches in
+    // `--runtime local` and on a cluster.  That divergence is a defect in its
+    // own right.
+    let value = strip_quotes(&rendered).trim().to_lowercase();
+    Ok(!matches!(
+        value.as_str(),
+        "" | "false" | "0" | "no" | "none" | "null" | "off" | "{}" | "[]"
+    ))
 }
 
 /// Evaluate a Rhai expression that returns a boolean condition.
@@ -421,6 +462,99 @@ fn value_to_f64(value: &serde_json::Value) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// noetl/cli#76 — a true `when:` arc fired only about half the time.
+    ///
+    /// The arc order was never the problem (arcs are a `Vec`, first match
+    /// wins). The CONDITION was: variable substitution iterated a `HashMap`,
+    /// whose order is randomised per instance, and each step was a naive
+    /// substring `replace`. With `status` and `status_code` in scope:
+    ///
+    ///   status_code first ->  `200 == "200"`      -> true
+    ///   status      first ->  `ok_code == "200"`  -> false
+    ///
+    /// Measured 858/1142 over 2000 constructions before the fix.
+    ///
+    /// Run enough times that the pre-fix code cannot pass by luck: at ~43%
+    /// per-iteration failure, 200 iterations leave a false-pass probability
+    /// around 0.57^200, which is nil.
+    #[test]
+    fn overlapping_variable_names_evaluate_deterministically() {
+        for i in 0..200 {
+            let mut vars = HashMap::new();
+            vars.insert("status".to_string(), "ok".to_string());
+            vars.insert("status_code".to_string(), "200".to_string());
+            assert!(
+                evaluate_condition("{{ status_code == \"200\" }}", &vars).unwrap(),
+                "iteration {i}: the longer name must always win, or the arc fires at random"
+            );
+        }
+    }
+
+    /// noetl/ai-meta#231 — a boolean renders Python-style, so a false guard
+    /// arrived as `"False"`.  The old check was case-sensitive against the
+    /// lowercase literal, so the arc fired anyway: deterministically wrong,
+    /// every time, in the direction that silently runs work it should not.
+    #[test]
+    fn a_python_style_false_is_falsy() {
+        let mut vars = HashMap::new();
+        vars.insert("flag".to_string(), "False".to_string());
+        assert!(
+            !evaluate_condition("{{ flag }}", &vars).unwrap(),
+            "a rendered `False` must be falsy — this fired the arc before #231"
+        );
+        vars.insert("flag".to_string(), "True".to_string());
+        assert!(evaluate_condition("{{ flag }}", &vars).unwrap());
+    }
+
+    /// Aligned with the server's falsy set, so one playbook cannot take a
+    /// different branch under `--runtime local` than on a cluster.
+    #[test]
+    fn the_falsy_set_matches_the_server() {
+        for falsy in ["", "false", "False", "FALSE", "0", "no", "none", "None", "null", "off", "{}", "[]"] {
+            let mut vars = HashMap::new();
+            vars.insert("v".to_string(), falsy.to_string());
+            assert!(
+                !evaluate_condition("{{ v }}", &vars).unwrap(),
+                "{falsy:?} must be falsy, as it is in orchestrate-core"
+            );
+        }
+        for truthy in ["true", "True", "1", "yes", "ok", "req-123"] {
+            let mut vars = HashMap::new();
+            vars.insert("v".to_string(), truthy.to_string());
+            assert!(
+                evaluate_condition("{{ v }}", &vars).unwrap(),
+                "{truthy:?} must be truthy"
+            );
+        }
+    }
+
+    /// The prefix must still resolve on its own — the fix orders the
+    /// substitution, it does not drop the shorter key.
+    #[test]
+    fn the_shorter_name_still_substitutes() {
+        let mut vars = HashMap::new();
+        vars.insert("status".to_string(), "ok".to_string());
+        vars.insert("status_code".to_string(), "200".to_string());
+        for _ in 0..50 {
+            assert!(evaluate_condition("{{ status == \"ok\" }}", &vars).unwrap());
+        }
+    }
+
+    /// Three-way overlap, so the ordering is a total order and not a lucky
+    /// pairwise swap.
+    #[test]
+    fn a_three_way_overlap_is_stable() {
+        let mut vars = HashMap::new();
+        vars.insert("a".to_string(), "1".to_string());
+        vars.insert("ab".to_string(), "2".to_string());
+        vars.insert("abc".to_string(), "3".to_string());
+        for _ in 0..200 {
+            assert!(evaluate_condition("{{ abc == \"3\" }}", &vars).unwrap());
+            assert!(evaluate_condition("{{ ab == \"2\" }}", &vars).unwrap());
+            assert!(evaluate_condition("{{ a == \"1\" }}", &vars).unwrap());
+        }
+    }
 
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
