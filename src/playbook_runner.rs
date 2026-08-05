@@ -86,11 +86,11 @@ pub struct PlaybookRunner {
     /// When true, after `run()` completes the runner serialises a
     /// `RunOutcome` to stdout as JSON. Combined with `quiet=true` this
     /// gives a pipeline-friendly invocation:
-    ///     noetl exec --runtime local foo.yaml --json
+    ///     noetl run --runtime local foo.yaml --json
     /// → progress on stderr (or nothing in --quiet), structured JSON
     /// envelope on stdout.
     emit_json: bool,
-    /// Git-backed state sink (`noetl exec --facts-out <path>`): after each
+    /// Git-backed state sink (`noetl run --facts-out <path>`): after each
     /// successful provider-step apply, the emitted `provider_fact` is appended
     /// as JSONL (sensitive identifiers masked).  `None` disables persistence.
     facts_out: Option<PathBuf>,
@@ -176,7 +176,7 @@ impl PlaybookRunner {
                 ValidationError::IncompatibleProfile { required } => {
                     anyhow::bail!(
                         "Playbook '{}' requires {} runtime (executor.profile: {})\n\
-                         Use: noetl exec {} --runtime {}",
+                         Use: noetl run {} --runtime {}",
                         playbook.metadata.name,
                         required,
                         required,
@@ -188,7 +188,7 @@ impl PlaybookRunner {
                     anyhow::bail!(
                         "Playbook '{}' requires tool '{}' which is not supported by local runtime.\n\
                          Supported tools: {:?}\n\
-                         Consider using: noetl exec {} --runtime distributed",
+                         Consider using: noetl run {} --runtime distributed",
                         playbook.metadata.name,
                         tool,
                         supported,
@@ -199,7 +199,7 @@ impl PlaybookRunner {
                     anyhow::bail!(
                         "Playbook '{}' requires feature '{}' which is not supported by local runtime.\n\
                          Supported features: {:?}\n\
-                         Consider using: noetl exec {} --runtime distributed",
+                         Consider using: noetl run {} --runtime distributed",
                         playbook.metadata.name,
                         feature,
                         supported,

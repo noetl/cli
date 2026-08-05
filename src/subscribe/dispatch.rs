@@ -7,7 +7,7 @@
 //!
 //! So the default — the "pure local" mode the phase is about — runs the target
 //! playbook **in-process** with the message as its workload, via the same
-//! [`crate::playbook_runner::PlaybookRunner`] `noetl exec --runtime local`
+//! [`crate::playbook_runner::PlaybookRunner`] `noetl run --runtime local`
 //! uses.  No server, no NATS-dispatch.  The `--dispatch server` variant (or a
 //! `--server-url`) instead POSTs `/api/execute` to a control plane, keeping
 //! the event model identical — only the dispatch sink differs.
