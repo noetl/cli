@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.21.1](https://github.com/noetl/cli/compare/v4.21.0...v4.21.1) (2026-08-05)
+
+### Bug Fixes
+
+* **executor:** make when: conditions deterministic, and stop a false bool firing the arc ([d695c35](https://github.com/noetl/cli/commit/d695c3548a763f8a8dd2ea7150ff9d51917ddb18)), closes [noetl/cli#76](https://github.com/noetl/cli/issues/76) [noetl/ai-meta#231](https://github.com/noetl/ai-meta/issues/231) [noetl/cli#76](https://github.com/noetl/cli/issues/76) [noetl/ai-meta#231](https://github.com/noetl/ai-meta/issues/231)
+
 ## [4.21.0](https://github.com/noetl/cli/compare/v4.20.0...v4.21.0) (2026-07-24)
 
 ### Features
