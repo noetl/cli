@@ -571,7 +571,7 @@ async fn load_facts(client: &Client, common: &ProviderCommonArgs) -> Result<Vec<
             .with_context(|| format!("parsing facts file {}", path.display()))?;
         // Accept raw tier records (payload-string), decoded bodies, or bare
         // provider_facts — the tier extractor handles all three.
-        return Ok(provider_state::extract_facts_from_tier_records(&records));
+        return Ok(extract_and_report_coverage(&records, &format!("{}", path.display())));
     }
     if let Some(server) = &common.server {
         let mut url = format!("{}/api/ehdb/tiers/eventlog?limit=1000", server.trim_end_matches('/'));
@@ -595,10 +595,41 @@ async fn load_facts(client: &Client, common: &ProviderCommonArgs) -> Result<Vec<
             .and_then(|r| r.get("records"))
             .and_then(|r| r.as_array())
             .unwrap_or(&empty);
-        return Ok(provider_state::extract_facts_from_tier_records(records));
+        return Ok(extract_and_report_coverage(records, &url));
     }
     // No state source → empty model (everything untracked / import).
     Ok(Vec::new())
+}
+
+/// Extract provider facts and **say so on stderr** when the fold understood
+/// nothing.
+///
+/// noetl/ai-meta#191's dangerous half is that an empty ownership model is a
+/// legitimate state, so a caller cannot tell "nothing is tracked yet" from "the
+/// extractor did not understand the data". noetl-tools now warns via `tracing`,
+/// but this binary installs a subscriber **only for the `subscribe` subcommand**
+/// (`src/subscribe/mod.rs`), so on the provider path that warning is emitted into
+/// a void. The signal has to land in this command's own output or it does not
+/// exist for the operator running it.
+///
+/// stderr, not stdout: `provider report --json` output must stay machine-parseable.
+fn extract_and_report_coverage(
+    records: &[serde_json::Value],
+    source: &str,
+) -> Vec<provider_state::ProviderFact> {
+    let (facts, coverage) = provider_state::extract_facts_from_tier_records_with_coverage(records);
+    if coverage.is_suspicious() {
+        eprintln!(
+            "warning: read {} record(s) from {source} and recognised none of them as \
+             provider facts.\n         \
+             This is a parse failure, not an empty ownership model — treating it as \
+             \"nothing is tracked\"\n         \
+             would make an adopt or a destroy plan against a world it cannot see. \
+             (noetl/ai-meta#191)",
+            coverage.considered
+        );
+    }
+    facts
 }
 
 /// Choose the adopt target: the named step, or the sole provider step.
