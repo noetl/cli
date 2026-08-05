@@ -303,7 +303,7 @@ impl PlaybookRunner {
                 .unwrap_or_else(|| "start".to_string())
         };
 
-        if self.target.is_some() {
+        if self.target.is_some() && !self.quiet {
             eprintln!("🎯 Target: {}", starting_step);
         }
 
@@ -416,9 +416,15 @@ impl PlaybookRunner {
             }
         }
 
-        eprintln!("\n🔹 Step: {}", step_name);
-        if let Some(desc) = &step.desc {
-            eprintln!("   Description: {}", desc);
+        // Progress lines go to stderr so stdout stays clean for `--json`, but
+        // `--quiet` (which `noetl.run()` from the Python wheel sets) means the
+        // caller took the outcome as a value and wants stderr silent too.  The
+        // per-step banner has to honour that like every other progress print.
+        if !self.quiet {
+            eprintln!("\n🔹 Step: {}", step_name);
+            if let Some(desc) = &step.desc {
+                eprintln!("   Description: {}", desc);
+            }
         }
 
         // DSL v2: Process step.input and merge into context as input.* variables
