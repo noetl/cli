@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.21.2](https://github.com/noetl/cli/compare/v4.21.1...v4.21.2) (2026-08-05)
+
+### Bug Fixes
+
+* **provider:** surface the fold-coverage warning in the command's own output ([ab5cdf0](https://github.com/noetl/cli/commit/ab5cdf09f7f254285dc544b3b1e8b6d8f5521202)), closes [noetl/ai-meta#191](https://github.com/noetl/ai-meta/issues/191) [tools#93](https://github.com/noetl/tools/issues/93) [noetl/ai-meta#191](https://github.com/noetl/ai-meta/issues/191)
+
 ## [4.21.1](https://github.com/noetl/cli/compare/v4.21.0...v4.21.1) (2026-08-05)
 
 ### Bug Fixes
