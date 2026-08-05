@@ -490,7 +490,7 @@ fn mask_fact_identifiers(fact: &serde_json::Value) -> serde_json::Value {
 
 /// Append the applied `provider_fact` from a tool result to the JSONL sink, iff
 /// the outcome is an applied one (`planned` / dry-run is intent-only and is
-/// skipped).  Shared by the provider verbs and `noetl exec --facts-out` so both
+/// skipped).  Shared by the provider verbs and `noetl run --facts-out` so both
 /// dispatch paths persist ownership identically.
 pub(crate) fn append_applied_fact(out: &Path, data: &serde_json::Value) -> Result<()> {
     let Some(fact) = data.get("provider_fact") else {
