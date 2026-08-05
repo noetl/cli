@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.21.3](https://github.com/noetl/cli/compare/v4.21.2...v4.21.3) (2026-08-05)
+
+### Bug Fixes
+
+* **cli:** gate the per-step progress banner on --quiet ([432d7da](https://github.com/noetl/cli/commit/432d7da5a04c957512b0e7eab319448ee3d0bfbd))
+
 ## [4.21.2](https://github.com/noetl/cli/compare/v4.21.1...v4.21.2) (2026-08-05)
 
 ### Bug Fixes
