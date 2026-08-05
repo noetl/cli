@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.21.4](https://github.com/noetl/cli/compare/v4.21.3...v4.21.4) (2026-08-05)
+
+### Bug Fixes
+
+* **cli:** stop recommending the deprecated exec verb in user-facing hints ([0437f9a](https://github.com/noetl/cli/commit/0437f9a061833e37768c6358d71b04eff469a21d)), closes [noetl/ai-meta#193](https://github.com/noetl/ai-meta/issues/193) [noetl/ai-meta#193](https://github.com/noetl/ai-meta/issues/193)
+
 ## [4.21.3](https://github.com/noetl/cli/compare/v4.21.2...v4.21.3) (2026-08-05)
 
 ### Bug Fixes
