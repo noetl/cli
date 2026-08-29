@@ -53,7 +53,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -719,6 +719,34 @@ enum CatalogCommand {
     Get {
         /// Resource path/name
         path: String,
+    },
+    /// Bulk-load every catalog resource under one or more paths.
+    ///
+    /// The first-class way to populate a catalog: one API round trip per
+    /// batch instead of one per file, with a per-file outcome you can act on.
+    /// Loading a tree was previously a shell loop of single `register` calls.
+    ///
+    /// Examples:
+    ///     noetl catalog load playbooks/
+    ///     noetl catalog load playbooks/ --dry-run
+    ///     noetl catalog load a.yaml b.yaml --batch-size 50 --json
+    #[command(verbatim_doc_comment)]
+    Load {
+        /// Files or directories. Directories are walked recursively.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+
+        /// Items per request.
+        #[arg(long, default_value_t = 100)]
+        batch_size: usize,
+
+        /// List what would be loaded and send nothing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit only the JSON response.
+        #[arg(short, long)]
+        json: bool,
     },
     /// List resources in catalog by type
     /// Examples:
@@ -2858,6 +2886,23 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 }
                 CatalogCommand::Get { path } => {
                     get_catalog_resource(&client, &base_url, use_gateway_proxy, &path).await?;
+                }
+                CatalogCommand::Load {
+                    paths,
+                    batch_size,
+                    dry_run,
+                    json,
+                } => {
+                    bulk_load_catalog(
+                        &client,
+                        &base_url,
+                        use_gateway_proxy,
+                        &paths,
+                        batch_size,
+                        dry_run,
+                        json,
+                    )
+                    .await?;
                 }
                 CatalogCommand::List { resource_type, json } => {
                     list_resources(&client, &base_url, use_gateway_proxy, &resource_type, json).await?;
@@ -5028,6 +5073,232 @@ async fn register_resource(
         std::process::exit(1);
     }
 
+    Ok(())
+}
+
+/// A catalog resource discovered on disk, ready to load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredResource {
+    pub file: PathBuf,
+    pub resource_type: String,
+}
+
+/// Files this bulk load will NOT send, and why.
+///
+/// Reported rather than skipped. A bulk load that silently drops files is the
+/// worst possible failure here: the operator believes a catalog is complete when
+/// it is not, and nothing says otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedResource {
+    pub file: PathBuf,
+    pub reason: String,
+}
+
+/// Classify one file for bulk loading.
+///
+/// `Ok` for a catalog resource, `Err(reason)` for anything this command must not
+/// send. **Credentials are refused, not loaded**: they belong to
+/// `POST /api/credentials`, and pushing one through the catalog batch would
+/// register secret material as a catalog entry.
+pub fn classify_for_bulk_load(file: &Path, content: &str) -> Result<String, String> {
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(ext.as_str(), "yaml" | "yml") {
+        return Err(format!("not a YAML file (.{ext})"));
+    }
+    if content.trim().is_empty() {
+        return Err("file is empty".to_string());
+    }
+    if content.contains("kind: Credential") {
+        return Err(
+            "credential resources are not bulk-loaded through the catalog; use \
+             `noetl catalog register <file>`"
+                .to_string(),
+        );
+    }
+    // The server derives kind from the YAML's own `kind:`; `resource_type` is
+    // only the fallback when that is absent, so mirroring the single-register
+    // default here keeps the two paths agreeing.
+    Ok("Playbook".to_string())
+}
+
+/// Walk `paths` and return what to load and what was refused.
+///
+/// Sorted, so two runs over the same tree submit the same items in the same
+/// order and a diff between runs means the tree changed.
+pub fn discover_resources(paths: &[PathBuf]) -> Result<(Vec<DiscoveredResource>, Vec<SkippedResource>)> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        if p.is_dir() {
+            collect_yaml(p, &mut files)?;
+        } else {
+            files.push(p.clone());
+        }
+    }
+    files.sort();
+    files.dedup();
+
+    let (mut found, mut skipped) = (Vec::new(), Vec::new());
+    for f in files {
+        let content = match fs::read_to_string(&f) {
+            Ok(c) => c,
+            Err(e) => {
+                skipped.push(SkippedResource {
+                    file: f,
+                    reason: format!("unreadable: {e}"),
+                });
+                continue;
+            }
+        };
+        match classify_for_bulk_load(&f, &content) {
+            Ok(resource_type) => found.push(DiscoveredResource {
+                file: f,
+                resource_type,
+            }),
+            Err(reason) => skipped.push(SkippedResource { file: f, reason }),
+        }
+    }
+    Ok((found, skipped))
+}
+
+fn collect_yaml(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir).context(format!("Failed to read directory: {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_yaml(&path, out)?;
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| matches!(e.to_ascii_lowercase().as_str(), "yaml" | "yml"))
+            .unwrap_or(false)
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Bulk-load catalog resources.
+///
+/// One request per batch against `POST /api/catalog/register/batch`, which runs
+/// each item through the same registration the single `register` command uses —
+/// so validation, versioning and the server-side catalog log behave identically.
+///
+/// ⚠ This registers each item as a NEW version, exactly as `register` does. It is
+/// for loading content, **not** for reproducing an existing catalog: re-loading a
+/// tree that is already registered creates a second version of every entry.
+/// Seeding the log from rows that already exist is the server's
+/// `POST /api/catalog-log/backfill`, which preserves the existing version.
+#[allow(clippy::too_many_arguments)]
+async fn bulk_load_catalog(
+    client: &Client,
+    base_url: &str,
+    use_gateway_proxy: bool,
+    paths: &[PathBuf],
+    batch_size: usize,
+    dry_run: bool,
+    json_only: bool,
+) -> Result<()> {
+    let batch_size = batch_size.clamp(1, 1000);
+    let (found, skipped) = discover_resources(paths)?;
+
+    if !json_only {
+        println!("discovered {} resource(s), {} skipped", found.len(), skipped.len());
+        for s in &skipped {
+            println!("  skip {}: {}", s.file.display(), s.reason);
+        }
+    }
+
+    if dry_run {
+        let summary = serde_json::json!({
+            "dry_run": true,
+            "discovered": found.len(),
+            "skipped": skipped.iter().map(|s| serde_json::json!({
+                "file": s.file.display().to_string(), "reason": s.reason
+            })).collect::<Vec<_>>(),
+            "files": found.iter().map(|f| f.file.display().to_string()).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    if found.is_empty() {
+        // Not an error, but not a success either: an empty load that printed
+        // nothing would read as "everything is registered".
+        eprintln!("nothing to load — no YAML catalog resources found under the given paths");
+        return Ok(());
+    }
+
+    let url = api_url(base_url, "catalog/register/batch", use_gateway_proxy);
+    let (mut registered, mut failed) = (0usize, 0usize);
+
+    for chunk in found.chunks(batch_size) {
+        let mut items = Vec::with_capacity(chunk.len());
+        for r in chunk {
+            let content = fs::read_to_string(&r.file)
+                .context(format!("Failed to read file: {}", r.file.display()))?;
+            items.push(RegisterRequest {
+                content: BASE64_STANDARD.encode(&content),
+                resource_type: r.resource_type.clone(),
+            });
+        }
+        let body = serde_json::json!({ "items": items });
+        let response = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to send bulk register request")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            check_gateway_auth_expired(status, use_gateway_proxy, None);
+            let text = response.text().await?;
+            eprintln!("bulk load failed: {} - {}", status, text);
+            std::process::exit(1);
+        }
+        let result: serde_json::Value = response.json().await?;
+        registered += result.get("registered").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        failed += result.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+        if json_only {
+            println!("{}", serde_json::to_string(&result)?);
+        } else {
+            for item in result.get("results").and_then(|r| r.as_array()).unwrap_or(&vec![]) {
+                let idx = item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let file = chunk
+                    .get(idx)
+                    .map(|c| c.file.display().to_string())
+                    .unwrap_or_else(|| format!("item {idx}"));
+                match item.get("status").and_then(|v| v.as_str()) {
+                    Some("registered") => println!(
+                        "  ok   {} -> {} v{}",
+                        file,
+                        item.get("path").and_then(|v| v.as_str()).unwrap_or("?"),
+                        item.get("version").and_then(|v| v.as_i64()).unwrap_or(0)
+                    ),
+                    _ => println!(
+                        "  FAIL {}: {}",
+                        file,
+                        item.get("error").and_then(|v| v.as_str()).unwrap_or("unknown")
+                    ),
+                }
+            }
+        }
+    }
+
+    if !json_only {
+        println!("registered {registered}, failed {failed}, skipped {}", skipped.len());
+    }
+    // A partial failure must not exit 0 — a CI step that bulk-loads a catalog
+    // has to be able to fail.
+    if failed > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -8476,6 +8747,80 @@ fn get_state_db_path() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    // ---- catalog bulk load (noetl/ai-meta#311 step 2 / catalog programme) ----
+
+    /// ⭐ Credentials must be REFUSED by the bulk loader, not loaded.
+    ///
+    /// They belong to `POST /api/credentials`; pushing one through the catalog
+    /// batch would register secret material as a catalog entry.
+    #[test]
+    fn bulk_load_refuses_credential_resources() {
+        let r = crate::classify_for_bulk_load(
+            std::path::Path::new("c.yaml"),
+            "apiVersion: noetl.io/v2\nkind: Credential\nmetadata: {name: x}\n",
+        );
+        let reason = r.expect_err("a credential must not be bulk-loaded into the catalog");
+        assert!(
+            reason.contains("credential"),
+            "the refusal must say why: {reason}"
+        );
+    }
+
+    #[test]
+    fn bulk_load_accepts_a_playbook() {
+        let r = crate::classify_for_bulk_load(
+            std::path::Path::new("p.yaml"),
+            "apiVersion: noetl.io/v2\nkind: Playbook\nmetadata: {path: a/b}\n",
+        );
+        assert_eq!(r.as_deref(), Ok("Playbook"));
+    }
+
+    /// Non-YAML and empty files are refused WITH A REASON rather than dropped.
+    ///
+    /// A bulk load that silently skips files is the worst failure here: the
+    /// operator believes the catalog is complete when it is not.
+    #[test]
+    fn bulk_load_refuses_non_yaml_and_empty_files_with_a_reason() {
+        let e = crate::classify_for_bulk_load(std::path::Path::new("x.json"), "{}")
+            .expect_err("json is not a catalog YAML");
+        assert!(e.contains("YAML"), "{e}");
+
+        let e = crate::classify_for_bulk_load(std::path::Path::new("x.yaml"), "   \n")
+            .expect_err("an empty file must not be submitted");
+        assert!(e.contains("empty"), "{e}");
+    }
+
+    /// Discovery is recursive, sorted and deduped, and reports refusals.
+    ///
+    /// Sorted so two runs over the same tree submit the same items in the same
+    /// order — a diff between runs then means the tree changed, not the walk.
+    #[test]
+    fn discovery_is_recursive_sorted_and_reports_skips() {
+        let dir = std::env::temp_dir().join(format!("noetl-bulk-{}", std::process::id()));
+        let sub = dir.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let pb = "apiVersion: noetl.io/v2\nkind: Playbook\nmetadata: {path: p}\n";
+        std::fs::write(dir.join("b.yaml"), pb).unwrap();
+        std::fs::write(dir.join("a.yaml"), pb).unwrap();
+        std::fs::write(sub.join("c.yml"), pb).unwrap();
+        std::fs::write(dir.join("cred.yaml"), "kind: Credential\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+
+        let (found, skipped) = crate::discover_resources(&[dir.clone()]).unwrap();
+        let names: Vec<String> = found
+            .iter()
+            .map(|f| f.file.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["a.yaml", "b.yaml", "c.yml"], "sorted, recursive, YAML only");
+        assert_eq!(skipped.len(), 1, "the credential is reported, not dropped");
+        assert!(skipped[0].reason.contains("credential"));
+
+        // The same path listed twice must not load anything twice.
+        let (twice, _) = crate::discover_resources(&[dir.clone(), dir.clone()]).unwrap();
+        assert_eq!(twice.len(), found.len(), "a repeated path must not duplicate items");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     // ---- runtime precedence ladder: flag > context > local default ----
