@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.22.0](https://github.com/noetl/cli/compare/v4.21.4...v4.22.0) (2026-08-29)
+
+### Features
+
+* **catalog:** bulk-load as a first-class CLI operation ([1d6b4cf](https://github.com/noetl/cli/commit/1d6b4cf92ade99657d0229ab60c09e5e3c75be26)), closes [noetl/ai-meta#307](https://github.com/noetl/ai-meta/issues/307) [noetl/ai-meta#311](https://github.com/noetl/ai-meta/issues/311)
+
 ## [4.21.4](https://github.com/noetl/cli/compare/v4.21.3...v4.21.4) (2026-08-05)
 
 ### Bug Fixes
