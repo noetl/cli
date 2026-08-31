@@ -100,6 +100,7 @@ impl RuntimeCapabilities {
     }
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 pub struct Playbook {
     #[serde(rename = "apiVersion")]
@@ -110,11 +111,14 @@ pub struct Playbook {
     /// Runtime requirements and capabilities (8-char root key).
     #[serde(default)]
     pub executor: Option<Executor>,
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+    #[serde(default)]
     pub workload: Option<HashMap<String, serde_yaml::Value>>,
     /// Credential aliases this playbook resolves.  Entries stay untyped: the
     /// reference schema declares them as open objects, and their contents are
     /// keychain-resolver territory, not document structure.
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub keychain: Option<Vec<serde_yaml::Value>>,
     /// Named reusable tasks referenced by `tool: {kind: workbook}` steps.
     #[serde(default)]
@@ -122,6 +126,7 @@ pub struct Playbook {
     pub workflow: Vec<Step>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Executor specification — runtime requirements and capabilities.
 #[derive(Debug, Deserialize, Default)]
 pub struct Executor {
@@ -139,6 +144,7 @@ pub struct Executor {
     pub spec: Option<ExecutorSpec>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Executor spec for workflow entry and termination control.
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct ExecutorSpec {
@@ -164,6 +170,7 @@ pub fn default_version() -> String {
     "noetl-runtime/1".to_string()
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Executor requirements.
 #[derive(Debug, Deserialize, Default)]
 pub struct ExecutorRequires {
@@ -175,39 +182,59 @@ pub struct ExecutorRequires {
     pub features: Vec<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 pub struct Metadata {
     pub name: String,
     #[allow(dead_code)]
+    #[serde(default)]
     pub path: Option<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 pub struct Step {
     pub step: String,
+    #[serde(default)]
     pub desc: Option<String>,
     /// Step enablement guard — evaluated before step runs (canonical v2).
     #[serde(rename = "when")]
+    #[serde(default)]
     pub when_guard: Option<String>,
     /// Step-level input data for cross-boundary propagation (DSL v2).
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub input: Option<HashMap<String, serde_yaml::Value>>,
+    /// Deserialized into the execution projection [`Tool`]; DESCRIBED in the
+    /// schema by [`ToolSpecDoc`], the document shape.  See `ToolSpec` for why.
+    #[cfg_attr(feature = "json-schema", schemars(with = "Option<ToolSpecDoc>"))]
+    #[serde(default)]
     pub tool: Option<Tool>,
     /// Next transitions — raw YAML, parsed manually to support both v10
     /// router and legacy formats.
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "Option<NextDoc>"))]
     pub next: Option<serde_yaml::Value>,
     #[serde(rename = "case")]
+    #[serde(default)]
     pub case: Option<Vec<CaseCondition>>,
     #[serde(rename = "loop")]
     #[allow(dead_code)]
+    #[serde(default)]
     pub loop_config: Option<LoopConfig>,
+    #[serde(default)]
     pub vars: Option<HashMap<String, String>>,
+    /// Variables bound when the step completes.  Present in 23 real playbooks
+    /// and in the previous schema; this model dropped it silently until now.
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+    #[serde(default)]
+    pub set: Option<HashMap<String, serde_yaml::Value>>,
     /// Step spec for routing mode.
     #[serde(default)]
     pub spec: Option<StepSpec>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Step specification for routing control.
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct StepSpec {
@@ -219,9 +246,11 @@ pub struct StepSpec {
     pub policy: Option<StepPolicy>,
     /// Open in the reference schema, so it stays open here.
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub timeout: Option<serde_yaml::Value>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Next routing mode.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(rename_all = "lowercase")]
@@ -231,20 +260,24 @@ pub enum NextMode {
     Inclusive,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// V10 router spec for next transitions.
 #[derive(Debug, Clone)]
 pub struct NextRouterSpec {
     pub mode: Option<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// V10 arc for router format.
 #[derive(Debug, Clone)]
 pub struct NextArc {
     pub step: String,
     pub when_condition: Option<String>,
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub args: Option<HashMap<String, serde_yaml::Value>>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Next format — supports both v10 router and legacy array formats.
 #[derive(Debug)]
 pub enum NextFormat {
@@ -317,25 +350,30 @@ impl NextFormat {
     }
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Then block can be either a list of actions or a single action dict.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum ThenBlock {
     /// Single action object (backwards compatible).
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     Single(serde_yaml::Value),
     /// List of action objects.
     List(Vec<NextStep>),
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 pub struct CaseCondition {
     #[serde(flatten)]
     pub when: WhenCondition,
     pub then: ThenBlock,
     #[serde(rename = "else")]
+    #[serde(default)]
     pub else_steps: Option<Vec<NextStep>>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Condition that can be either a simple template string or Rhai code.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -349,6 +387,7 @@ pub enum WhenCondition {
     Simple { when: String },
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Tool {
@@ -375,6 +414,7 @@ pub enum Tool {
         args: HashMap<String, String>,
         /// Canonical input field (DSL v2) — takes precedence over args.
         #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         input: HashMap<String, serde_yaml::Value>,
     },
     #[serde(rename = "duckdb")]
@@ -417,15 +457,19 @@ pub enum Tool {
         service: Option<String>,
         /// `bool` or a template string (`"{{ ... }}"`) — resolved by the tool.
         #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         dry_run: Option<serde_yaml::Value>,
         #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         input: Option<serde_yaml::Value>,
         #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         poll: Option<serde_yaml::Value>,
         /// Config-level API endpoint override (Round 3) — testing / emulators
         /// only.  A base URL string or `{crm,billing,serviceusage}` object; lets
         /// a playbook be validated offline against wiremock / an emulator.
         #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         endpoint: Option<serde_yaml::Value>,
         /// Ownership / stack label (Round 3, Fork 1) — scopes the resource
         /// ownership + drift + orphan projection.
@@ -444,16 +488,19 @@ pub enum Tool {
         /// the caller's EHDB raw-eventlog-tier fold.  Used by `report` / `adopt`
         /// to compute the desired-vs-actual diff; absent → untracked / import.
         #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         known_desired: Option<serde_yaml::Value>,
         /// Multi-org / multi-billing wrong-target guard (Stage-1 safety) —
         /// `{ require_org, require_org_display_name, require_billing_account }`.
         /// Pins the organization + billing account a run may touch; a mismatch
         /// is refused structurally (offline) and, in apply mode, live.
         #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         guard: Option<serde_yaml::Value>,
         /// Provider auth block (apply mode only).  Captured raw and mapped to
         /// the noetl-tools `AuthConfig` at dispatch; dry-run ignores it.
         #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         auth: Option<serde_yaml::Value>,
     },
     #[serde(other)]
@@ -468,6 +515,7 @@ pub fn default_duckdb_path() -> String {
     ".noetl/state.duckdb".to_string()
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthConfig {
     /// Auth provider type: adc (Application Default Credentials), token, basic.
@@ -477,6 +525,7 @@ pub struct AuthConfig {
     pub scopes: Vec<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SinkTarget {
@@ -494,6 +543,7 @@ pub enum SinkTarget {
     },
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SinkFormat {
@@ -503,6 +553,7 @@ pub enum SinkFormat {
     Csv,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum CmdsList {
@@ -516,6 +567,7 @@ impl Default for CmdsList {
     }
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Next step definition — supports canonical v2 format.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -526,6 +578,7 @@ pub enum NextStep {
         #[serde(rename = "when")]
         when_condition: Option<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         args: Option<HashMap<String, serde_yaml::Value>>,
     },
     /// Legacy conditional: `{ when: "condition", then: [...] }`.
@@ -534,6 +587,7 @@ pub enum NextStep {
     NextAction { next: Vec<NextStep> },
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct LoopConfig {
@@ -584,6 +638,7 @@ pub struct LoopConfig {
 // specification does not define.
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Admission control for a step: which rules gate entry, and whether the
 /// first match wins (`exclusive`) or all matching rules apply (`inclusive`).
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -591,9 +646,11 @@ pub struct AdmitPolicy {
     #[serde(default)]
     pub mode: Option<MatchMode>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub rules: Vec<serde_yaml::Value>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Match semantics shared by `AdmitPolicy`, `TaskPolicy` and `NextSpec`.
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -605,6 +662,7 @@ pub enum MatchMode {
     Inclusive,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Step-level policy block.  Only `admit` has a defined shape in the
 /// reference schema; the rest are open maps there and stay open here.
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -612,13 +670,17 @@ pub struct StepPolicy {
     #[serde(default)]
     pub admit: Option<AdmitPolicy>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub lifecycle: Option<serde_yaml::Value>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub failure: Option<serde_yaml::Value>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub emit: Option<serde_yaml::Value>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Task-level policy: rule evaluation plus the before/after/finally hooks.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct TaskPolicy {
@@ -627,16 +689,21 @@ pub struct TaskPolicy {
     #[serde(default)]
     pub on_unmatched: Option<OnUnmatched>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub rules: Vec<serde_yaml::Value>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub before: Option<Vec<serde_yaml::Value>>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub after: Option<Vec<serde_yaml::Value>>,
     /// `finally` is a Rust keyword-adjacent name; the wire key is unchanged.
     #[serde(default, rename = "finally")]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub finally_: Option<Vec<serde_yaml::Value>>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// What to do when no task rule matches.
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -646,27 +713,34 @@ pub enum OnUnmatched {
     Fail,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Per-task spec carried under `tool.spec`.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct TaskSpec {
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub timeout: Option<serde_yaml::Value>,
     #[serde(default)]
     pub policy: Option<TaskPolicy>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Executor-level policy block — all three members are open maps in the
 /// reference schema.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ExecutorPolicy {
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub defaults: Option<serde_yaml::Value>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub results: Option<serde_yaml::Value>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub limits: Option<serde_yaml::Value>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Where a tool's result is stored.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct OutputStore {
@@ -687,6 +761,7 @@ pub struct OutputStore {
     pub credential: Option<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputStoreKind {
@@ -705,6 +780,7 @@ pub enum OutputStoreKind {
     EventLog,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Compression {
@@ -714,6 +790,7 @@ pub enum Compression {
     Lz4,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Extract one value out of a tool result and bind it to a name.
 #[derive(Debug, Deserialize, Clone)]
 pub struct OutputSelect {
@@ -724,6 +801,7 @@ pub struct OutputSelect {
     pub as_: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Result accumulation across loop iterations.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct OutputAccumulate {
@@ -743,6 +821,7 @@ pub struct OutputAccumulate {
     pub max_items: Option<i64>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AccumulateStrategy {
@@ -753,6 +832,7 @@ pub enum AccumulateStrategy {
     Concat,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Lifetime of a stored tool result.
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -764,6 +844,7 @@ pub enum OutputScope {
     Permanent,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// A tool's `output:` block.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ToolOutput {
@@ -783,21 +864,51 @@ pub struct ToolOutput {
     pub as_: Option<String>,
 }
 
+/// An integer that may be written literally or as a template expression.
+///
+/// Any numeric field in the DSL can carry `{{ ... }}` instead of a literal —
+/// `lease_seconds: '{{ frame_lease_seconds }}'` is real and appears in the e2e
+/// fixtures. Typing those fields as plain `i64`/`f64` makes the playbook fail
+/// to parse AND makes the schema reject it; both happened here before this
+/// existed.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum TemplatableI64 {
+    /// A literal integer.
+    Literal(i64),
+    /// A template expression resolved at render time.
+    Template(String),
+}
+
+/// A number that may be written literally or as a template expression.
+/// See [`TemplatableI64`].
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum TemplatableF64 {
+    /// A literal number.
+    Literal(f64),
+    /// A template expression resolved at render time.
+    Template(String),
+}
+
 /// Frame sizing and leasing for a `mode: cursor` loop.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct FramePolicy {
     #[serde(default)]
-    pub max_rows: Option<i64>,
+    pub max_rows: Option<TemplatableI64>,
     #[serde(default)]
-    pub max_seconds: Option<f64>,
+    pub max_seconds: Option<TemplatableF64>,
     #[serde(default)]
-    pub max_bytes: Option<i64>,
+    pub max_bytes: Option<TemplatableI64>,
     #[serde(default)]
-    pub lease_seconds: Option<f64>,
+    pub lease_seconds: Option<TemplatableF64>,
     #[serde(default)]
-    pub heartbeat_seconds: Option<f64>,
+    pub heartbeat_seconds: Option<TemplatableF64>,
     #[serde(default)]
-    pub row_concurrency: Option<i64>,
+    pub row_concurrency: Option<TemplatableI64>,
     #[serde(default)]
     pub process: Option<FrameProcess>,
     #[serde(default)]
@@ -805,9 +916,10 @@ pub struct FramePolicy {
     #[serde(default)]
     pub retry_mode: Option<String>,
     #[serde(default)]
-    pub max_attempts: Option<i64>,
+    pub max_attempts: Option<TemplatableI64>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FrameProcess {
@@ -816,6 +928,7 @@ pub enum FrameProcess {
     Frame,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Where loop iterations execute.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct LoopPolicy {
@@ -823,6 +936,7 @@ pub struct LoopPolicy {
     pub exec: Option<LoopExec>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LoopExec {
@@ -831,6 +945,7 @@ pub enum LoopExec {
     Local,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LoopMode {
@@ -840,6 +955,7 @@ pub enum LoopMode {
     Cursor,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// A cursor source for `mode: cursor` loops.
 #[derive(Debug, Deserialize, Clone)]
 pub struct CursorSpec {
@@ -848,9 +964,11 @@ pub struct CursorSpec {
     pub auth: String,
     pub claim: String,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub options: Option<serde_yaml::Value>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// The `spec:` block of a loop.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct LoopSpec {
@@ -858,6 +976,7 @@ pub struct LoopSpec {
     pub mode: Option<LoopMode>,
     /// Either a number or a template string, so it stays loose.
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub max_in_flight: Option<serde_yaml::Value>,
     #[serde(default)]
     pub policy: Option<LoopPolicy>,
@@ -865,6 +984,7 @@ pub struct LoopSpec {
     pub frame: Option<FramePolicy>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// One `next:` arc.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Arc {
@@ -872,11 +992,14 @@ pub struct Arc {
     #[serde(default)]
     pub when: Option<String>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub set: Option<serde_yaml::Value>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub spec: Option<serde_yaml::Value>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// Routing behaviour for a `next:` block.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct NextSpec {
@@ -885,9 +1008,11 @@ pub struct NextSpec {
     #[serde(default)]
     pub on_no_match: Option<OnNoMatch>,
     #[serde(default)]
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub policy: Option<serde_yaml::Value>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OnNoMatch {
@@ -896,6 +1021,7 @@ pub enum OnNoMatch {
     Quiet,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 /// The v10 `next:` router form.  `Step::next` stays `serde_yaml::Value`
 /// because the legacy shorthand forms are still accepted; this type
 /// describes the structured form for the schema and for callers that want
@@ -908,9 +1034,121 @@ pub struct NextRouter {
     pub arcs: Vec<Arc>,
 }
 
+/// The **document** shape of `next:`.
+///
+/// `Step::next` deserializes as free-form YAML because the legacy shorthand
+/// forms are still accepted, and constraining it would reject playbooks that
+/// run. This union keeps that permissiveness — the `Other` arm accepts
+/// anything — while making [`NextRouter`], [`NextSpec`] and [`Arc`] reachable
+/// from the schema, so editors can complete the structured form.
+///
+/// ⚠ It therefore DOCUMENTS the router; it does not CONSTRAIN it.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum NextDoc {
+    /// The v10 structured router.
+    Router(NextRouter),
+    /// Any legacy shorthand form.
+    Other(serde_json::Value),
+}
+
 /// A named, reusable task in the `workbook:` list.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorkbookTask {
     pub name: String,
+    #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
     pub tool: serde_yaml::Value,
+}
+
+// ---------------------------------------------------------------------------
+// JSON Schema generation (noetl/ai-meta#201).
+// ---------------------------------------------------------------------------
+
+/// Generate the JSON Schema for a playbook document.
+///
+/// Emits **draft 2020-12**, matching the schema this replaces — the one the
+/// retired Python `_generate_schema` produced from the v10 Pydantic models.
+///
+/// The schema is deliberately **permissive**: `additionalProperties` is left
+/// unset, exactly as the reference schema had it in all 24 of its definitions.
+/// It describes and completes a playbook; it does not reject unknown keys,
+/// because the parser does not either. Claiming otherwise would make the
+/// schema stricter than the runtime and fail valid playbooks.
+///
+/// ⚠ `Step::next` is typed `serde_yaml::Value`, so the schema describes it as
+/// free-form. The structured router form is available as the `NextRouter`
+/// definition, but it is **documentation, not a constraint** — the legacy
+/// shorthand `next:` forms are still accepted by the parser, and constraining
+/// the field would reject them.
+#[cfg(feature = "json-schema")]
+pub fn playbook_json_schema() -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(Playbook))
+        .expect("schemars emits valid JSON");
+
+    if let Some(obj) = schema.as_object_mut() {
+        obj.insert(
+            "$schema".to_string(),
+            serde_json::Value::String("https://json-schema.org/draft/2020-12/schema".into()),
+        );
+        obj.insert(
+            "$id".to_string(),
+            serde_json::Value::String(
+                "https://noetl.io/schema/playbook.schema.json".into(),
+            ),
+        );
+        obj.insert(
+            "title".to_string(),
+            serde_json::Value::String("NoETL Playbook".into()),
+        );
+        obj.insert(
+            "description".to_string(),
+            serde_json::Value::String(
+                "JSON Schema for NoETL playbooks, generated from the Rust document \
+                 model in noetl-executor (`noetl schema`). Permissive by design: it \
+                 describes and completes, it does not reject unknown keys, because \
+                 the parser does not either."
+                    .into(),
+            ),
+        );
+    }
+    schema
+}
+
+/// The **document** shape of a step's `tool:` block.
+///
+/// [`Tool`] above is an execution projection: an internally-tagged enum with
+/// one variant per tool kind, carrying exactly the fields the dispatcher needs.
+/// That is the right model for running a step and the wrong one for describing
+/// a playbook, because real playbooks carry per-kind fields the dispatcher does
+/// not read (`name`, `libs`, `pool`, `auth`, …) and kinds the enum has no
+/// variant for.
+///
+/// Generating the schema from [`Tool`] produced a `oneOf` that rejected **268
+/// of 279** real playbooks. The reference schema this replaces described the
+/// same field as `ToolSpec | [object] | null`, requiring only `kind` — so this
+/// reproduces that, and only that.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolSpec {
+    /// Tool kind — `python`, `postgres`, `http`, `noop`, …
+    pub kind: String,
+    /// Per-task timeout and policy.
+    #[serde(default)]
+    pub spec: Option<TaskSpec>,
+    /// Where the result goes and how it is shaped.
+    #[serde(default)]
+    pub output: Option<ToolOutput>,
+}
+
+/// `tool:` accepts either one tool or a list of them.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ToolSpecDoc {
+    /// A single tool.
+    One(ToolSpec),
+    /// A sequence of tools run in order.
+    Many(Vec<ToolSpec>),
 }
