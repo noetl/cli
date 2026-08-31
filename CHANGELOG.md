@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.23.1](https://github.com/noetl/cli/compare/v4.23.0...v4.23.1) (2026-08-31)
+
+### Bug Fixes
+
+* **publish:** bump noetl-executor to 0.9.0 so the crate can publish ([753058d](https://github.com/noetl/cli/commit/753058dee764ba70f32c8a6d7fc324607da30968)), closes [cli#82](https://github.com/noetl/cli/issues/82) [cli#82](https://github.com/noetl/cli/issues/82)
+
 ## [4.23.0](https://github.com/noetl/cli/compare/v4.22.0...v4.23.0) (2026-08-31)
 
 ### Features
