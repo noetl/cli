@@ -126,6 +126,8 @@ mod tests {
             },
             executor,
             workload: None,
+            keychain: None,
+            workbook: None,
             workflow: Vec::new(),
         }
     }

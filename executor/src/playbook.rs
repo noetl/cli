@@ -111,6 +111,14 @@ pub struct Playbook {
     #[serde(default)]
     pub executor: Option<Executor>,
     pub workload: Option<HashMap<String, serde_yaml::Value>>,
+    /// Credential aliases this playbook resolves.  Entries stay untyped: the
+    /// reference schema declares them as open objects, and their contents are
+    /// keychain-resolver territory, not document structure.
+    #[serde(default)]
+    pub keychain: Option<Vec<serde_yaml::Value>>,
+    /// Named reusable tasks referenced by `tool: {kind: workbook}` steps.
+    #[serde(default)]
+    pub workbook: Option<Vec<WorkbookTask>>,
     pub workflow: Vec<Step>,
 }
 
@@ -143,6 +151,9 @@ pub struct ExecutorSpec {
     /// Treat "no next match" as error (default: false = branch terminates).
     #[serde(default)]
     pub no_next_is_error: Option<bool>,
+    /// Execution-wide defaults, result handling and limits.
+    #[serde(default)]
+    pub policy: Option<ExecutorPolicy>,
 }
 
 pub fn default_profile() -> String {
@@ -203,6 +214,12 @@ pub struct StepSpec {
     /// Routing mode: exclusive (default, first match) or inclusive (all matches).
     #[serde(default)]
     pub next_mode: Option<NextMode>,
+    /// Step admission / lifecycle / failure / emit policy.
+    #[serde(default)]
+    pub policy: Option<StepPolicy>,
+    /// Open in the reference schema, so it stays open here.
+    #[serde(default)]
+    pub timeout: Option<serde_yaml::Value>,
 }
 
 /// Next routing mode.
@@ -520,8 +537,380 @@ pub enum NextStep {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct LoopConfig {
-    #[serde(rename = "in")]
-    pub in_collection: String,
+    /// The collection to iterate.  OPTIONAL: a `mode: cursor` loop draws from
+    /// `cursor:` instead, and this field being required previously made such a
+    /// loop fail to parse.
+    #[serde(default, rename = "in")]
+    pub in_collection: Option<String>,
     pub iterator: String,
+    /// Legacy top-level shorthand for `spec.mode`.
+    #[serde(default)]
     pub mode: Option<String>,
+    /// Cursor source for `mode: cursor`.
+    #[serde(default)]
+    pub cursor: Option<CursorSpec>,
+    /// Loop mode, concurrency, policy and frame sizing.
+    #[serde(default)]
+    pub spec: Option<LoopSpec>,
+}
+
+// ---------------------------------------------------------------------------
+// Playbook document model — the policy / output / loop surface.
+//
+// Everything below describes parts of a playbook that this crate previously
+// accepted only as untyped YAML, or dropped on the floor: `policy:` blocks,
+// tool `output:`, cursor loops, the `next:` router, `keychain:` and
+// `workbook:`.  They are typed here so there is ONE model of what a playbook
+// may contain rather than several partial ones, and so a JSON Schema can be
+// derived from it (noetl/ai-meta#201).
+//
+// Grounded in two sources, not invented:
+//   * the v10 Pydantic models this replaces, captured in noetl/ai-meta at
+//     playbooks/dsl-schema-rust/python-model-reference/ before they were
+//     deleted, and the JSON Schema they generated (draft 2020-12, 24 $defs);
+//   * what this crate's parser already accepts, which is why `Step` keeps
+//     `when` / `case` / `vars` -- fields the Python spec never described but
+//     real playbooks use.
+//
+// Deliberately PERMISSIVE.  No `deny_unknown_fields` anywhere, matching both
+// the previous model and the reference schema, whose `additionalProperties`
+// was unset in all 24 definitions.  Adding these types therefore cannot make
+// a playbook that parses today stop parsing: every field is optional and
+// unknown keys are still ignored.
+//
+// Free-form regions stay `serde_yaml::Value` on purpose.  `rules`, `limits`,
+// `lifecycle`, `failure` and `emit` are open-ended in the reference schema
+// too (`Vec<Map>` / `Map`); typing them further would claim a structure the
+// specification does not define.
+// ---------------------------------------------------------------------------
+
+/// Admission control for a step: which rules gate entry, and whether the
+/// first match wins (`exclusive`) or all matching rules apply (`inclusive`).
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AdmitPolicy {
+    #[serde(default)]
+    pub mode: Option<MatchMode>,
+    #[serde(default)]
+    pub rules: Vec<serde_yaml::Value>,
+}
+
+/// Match semantics shared by `AdmitPolicy`, `TaskPolicy` and `NextSpec`.
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchMode {
+    /// First matching rule wins.
+    #[default]
+    Exclusive,
+    /// Every matching rule applies.
+    Inclusive,
+}
+
+/// Step-level policy block.  Only `admit` has a defined shape in the
+/// reference schema; the rest are open maps there and stay open here.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct StepPolicy {
+    #[serde(default)]
+    pub admit: Option<AdmitPolicy>,
+    #[serde(default)]
+    pub lifecycle: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub failure: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub emit: Option<serde_yaml::Value>,
+}
+
+/// Task-level policy: rule evaluation plus the before/after/finally hooks.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct TaskPolicy {
+    #[serde(default)]
+    pub mode: Option<MatchMode>,
+    #[serde(default)]
+    pub on_unmatched: Option<OnUnmatched>,
+    #[serde(default)]
+    pub rules: Vec<serde_yaml::Value>,
+    #[serde(default)]
+    pub before: Option<Vec<serde_yaml::Value>>,
+    #[serde(default)]
+    pub after: Option<Vec<serde_yaml::Value>>,
+    /// `finally` is a Rust keyword-adjacent name; the wire key is unchanged.
+    #[serde(default, rename = "finally")]
+    pub finally_: Option<Vec<serde_yaml::Value>>,
+}
+
+/// What to do when no task rule matches.
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OnUnmatched {
+    #[default]
+    Continue,
+    Fail,
+}
+
+/// Per-task spec carried under `tool.spec`.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct TaskSpec {
+    #[serde(default)]
+    pub timeout: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub policy: Option<TaskPolicy>,
+}
+
+/// Executor-level policy block — all three members are open maps in the
+/// reference schema.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ExecutorPolicy {
+    #[serde(default)]
+    pub defaults: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub results: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub limits: Option<serde_yaml::Value>,
+}
+
+/// Where a tool's result is stored.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct OutputStore {
+    #[serde(default)]
+    pub kind: Option<OutputStoreKind>,
+    #[serde(default)]
+    pub driver: Option<String>,
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub ttl: Option<String>,
+    #[serde(default)]
+    pub compression: Option<Compression>,
+    /// Keychain alias, never an inline secret.
+    #[serde(default)]
+    pub credential: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputStoreKind {
+    #[default]
+    Auto,
+    Memory,
+    Kv,
+    Disk,
+    Object,
+    S3,
+    Gcs,
+    Db,
+    #[serde(rename = "duckdb")]
+    DuckDb,
+    #[serde(rename = "eventlog")]
+    EventLog,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Compression {
+    #[default]
+    None,
+    Gzip,
+    Lz4,
+}
+
+/// Extract one value out of a tool result and bind it to a name.
+#[derive(Debug, Deserialize, Clone)]
+pub struct OutputSelect {
+    /// JSONPath into the result, e.g. `$.data.next`.
+    pub path: String,
+    /// Variable the extracted value is bound to.
+    #[serde(rename = "as")]
+    pub as_: String,
+}
+
+/// Result accumulation across loop iterations.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct OutputAccumulate {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub strategy: Option<AccumulateStrategy>,
+    #[serde(default)]
+    pub merge_path: Option<String>,
+    #[serde(default)]
+    pub manifest_as: Option<String>,
+    #[serde(default)]
+    pub on_success: Option<bool>,
+    #[serde(default)]
+    pub on_error: Option<bool>,
+    #[serde(default)]
+    pub max_items: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AccumulateStrategy {
+    #[default]
+    Append,
+    Replace,
+    Merge,
+    Concat,
+}
+
+/// Lifetime of a stored tool result.
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputScope {
+    Step,
+    #[default]
+    Execution,
+    Workflow,
+    Permanent,
+}
+
+/// A tool's `output:` block.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ToolOutput {
+    #[serde(default)]
+    pub store: Option<OutputStore>,
+    #[serde(default)]
+    pub select: Option<Vec<OutputSelect>>,
+    #[serde(default)]
+    pub accumulate: Option<OutputAccumulate>,
+    #[serde(default)]
+    pub inline_max_bytes: Option<i64>,
+    #[serde(default)]
+    pub preview_max_bytes: Option<i64>,
+    #[serde(default)]
+    pub scope: Option<OutputScope>,
+    #[serde(default, rename = "as")]
+    pub as_: Option<String>,
+}
+
+/// Frame sizing and leasing for a `mode: cursor` loop.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct FramePolicy {
+    #[serde(default)]
+    pub max_rows: Option<i64>,
+    #[serde(default)]
+    pub max_seconds: Option<f64>,
+    #[serde(default)]
+    pub max_bytes: Option<i64>,
+    #[serde(default)]
+    pub lease_seconds: Option<f64>,
+    #[serde(default)]
+    pub heartbeat_seconds: Option<f64>,
+    #[serde(default)]
+    pub row_concurrency: Option<i64>,
+    #[serde(default)]
+    pub process: Option<FrameProcess>,
+    #[serde(default)]
+    pub verify_ipc: Option<bool>,
+    #[serde(default)]
+    pub retry_mode: Option<String>,
+    #[serde(default)]
+    pub max_attempts: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FrameProcess {
+    #[default]
+    Row,
+    Frame,
+}
+
+/// Where loop iterations execute.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct LoopPolicy {
+    #[serde(default)]
+    pub exec: Option<LoopExec>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LoopExec {
+    Distributed,
+    #[default]
+    Local,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LoopMode {
+    #[default]
+    Sequential,
+    Parallel,
+    Cursor,
+}
+
+/// A cursor source for `mode: cursor` loops.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CursorSpec {
+    pub kind: String,
+    /// Keychain alias.
+    pub auth: String,
+    pub claim: String,
+    #[serde(default)]
+    pub options: Option<serde_yaml::Value>,
+}
+
+/// The `spec:` block of a loop.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct LoopSpec {
+    #[serde(default)]
+    pub mode: Option<LoopMode>,
+    /// Either a number or a template string, so it stays loose.
+    #[serde(default)]
+    pub max_in_flight: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub policy: Option<LoopPolicy>,
+    #[serde(default)]
+    pub frame: Option<FramePolicy>,
+}
+
+/// One `next:` arc.
+#[derive(Debug, Deserialize, Clone)]
+pub struct Arc {
+    pub step: String,
+    #[serde(default)]
+    pub when: Option<String>,
+    #[serde(default)]
+    pub set: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub spec: Option<serde_yaml::Value>,
+}
+
+/// Routing behaviour for a `next:` block.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct NextSpec {
+    #[serde(default)]
+    pub mode: Option<MatchMode>,
+    #[serde(default)]
+    pub on_no_match: Option<OnNoMatch>,
+    #[serde(default)]
+    pub policy: Option<serde_yaml::Value>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OnNoMatch {
+    #[default]
+    Complete,
+    Quiet,
+}
+
+/// The v10 `next:` router form.  `Step::next` stays `serde_yaml::Value`
+/// because the legacy shorthand forms are still accepted; this type
+/// describes the structured form for the schema and for callers that want
+/// it typed.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct NextRouter {
+    #[serde(default)]
+    pub spec: Option<NextSpec>,
+    #[serde(default)]
+    pub arcs: Vec<Arc>,
+}
+
+/// A named, reusable task in the `workbook:` list.
+#[derive(Debug, Deserialize, Clone)]
+pub struct WorkbookTask {
+    pub name: String,
+    pub tool: serde_yaml::Value,
 }
