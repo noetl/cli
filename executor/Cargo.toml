@@ -54,6 +54,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 
+# JSON Schema generation for the playbook document model (noetl/ai-meta#201).
+# Optional: only the CLI's `noetl schema` needs it, so the crate stays lean for
+# the worker, which depends on this crate but never generates a schema.
+# schemars 1.x emits draft 2020-12, matching the reference schema this replaces.
+schemars = { version = "1", optional = true }
+
 # Error handling.
 anyhow = "1.0"
 thiserror = "1.0"
@@ -102,6 +108,8 @@ object_store = { version = "0.11", features = ["gcp"] }
 bytes = "1"
 
 [features]
+# Derive JsonSchema on the playbook document model.
+json-schema = ["dep:schemars"]
 # DuckDB integration — passthrough to `noetl-tools/duckdb-integration`.
 # noetl-tools >= 3.20.0 gates the DuckDB C++ engine (libduckdb-sys) behind a
 # non-default feature (noetl/ai-meta#185) so builds that never run duckdb steps

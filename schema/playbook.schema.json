@@ -1,0 +1,1268 @@
+{
+  "$defs": {
+    "AccumulateStrategy": {
+      "enum": [
+        "append",
+        "replace",
+        "merge",
+        "concat"
+      ],
+      "type": "string"
+    },
+    "AdmitPolicy": {
+      "description": "Admission control for a step: which rules gate entry, and whether the\nfirst match wins (`exclusive`) or all matching rules apply (`inclusive`).",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MatchMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rules": {
+          "default": []
+        }
+      },
+      "type": "object"
+    },
+    "Arc": {
+      "description": "One `next:` arc.",
+      "properties": {
+        "set": {
+          "default": null
+        },
+        "spec": {
+          "default": null
+        },
+        "step": {
+          "type": "string"
+        },
+        "when": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "step"
+      ],
+      "type": "object"
+    },
+    "CaseCondition": {
+      "anyOf": [
+        {
+          "description": "Rhai expression for complex conditions.",
+          "properties": {
+            "rhai": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "rhai"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Simple template string condition (Jinja2-style).",
+          "properties": {
+            "when": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "when"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Condition that can be either a simple template string or Rhai code.",
+      "properties": {
+        "else": {
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "then": {
+          "$ref": "#/$defs/ThenBlock"
+        }
+      },
+      "required": [
+        "then"
+      ],
+      "type": "object"
+    },
+    "Compression": {
+      "enum": [
+        "none",
+        "gzip",
+        "lz4"
+      ],
+      "type": "string"
+    },
+    "CursorSpec": {
+      "description": "A cursor source for `mode: cursor` loops.",
+      "properties": {
+        "auth": {
+          "description": "Keychain alias.",
+          "type": "string"
+        },
+        "claim": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "options": {
+          "default": null
+        }
+      },
+      "required": [
+        "kind",
+        "auth",
+        "claim"
+      ],
+      "type": "object"
+    },
+    "Executor": {
+      "description": "Executor specification — runtime requirements and capabilities.",
+      "properties": {
+        "profile": {
+          "default": "auto",
+          "description": "Runtime profile: local, distributed, or auto.",
+          "type": "string"
+        },
+        "requires": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutorRequires"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required capabilities."
+        },
+        "spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutorSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor spec for entry/final step configuration."
+        },
+        "version": {
+          "default": "noetl-runtime/1",
+          "description": "Semantic contract version: noetl-runtime/1.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ExecutorPolicy": {
+      "description": "Executor-level policy block — all three members are open maps in the\nreference schema.",
+      "properties": {
+        "defaults": {
+          "default": null
+        },
+        "limits": {
+          "default": null
+        },
+        "results": {
+          "default": null
+        }
+      },
+      "type": "object"
+    },
+    "ExecutorRequires": {
+      "description": "Executor requirements.",
+      "properties": {
+        "features": {
+          "default": [],
+          "description": "Required features.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "default": [],
+          "description": "Required tool kinds.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ExecutorSpec": {
+      "description": "Executor spec for workflow entry and termination control.",
+      "properties": {
+        "entry_step": {
+          "default": null,
+          "description": "Override entry step (default: workflow[0]).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "final_step": {
+          "default": null,
+          "description": "Optional finalization step run after quiescence.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "no_next_is_error": {
+          "default": null,
+          "description": "Treat \"no next match\" as error (default: false = branch terminates).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutorPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Execution-wide defaults, result handling and limits."
+        }
+      },
+      "type": "object"
+    },
+    "FramePolicy": {
+      "description": "Frame sizing and leasing for a `mode: cursor` loop.",
+      "properties": {
+        "heartbeat_seconds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatableF64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lease_seconds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatableF64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_attempts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatableI64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_bytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatableI64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_rows": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatableI64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_seconds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatableF64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "process": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrameProcess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retry_mode": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "row_concurrency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatableI64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verify_ipc": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "FrameProcess": {
+      "enum": [
+        "row",
+        "frame"
+      ],
+      "type": "string"
+    },
+    "LoopConfig": {
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CursorSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Cursor source for `mode: cursor`."
+        },
+        "in": {
+          "default": null,
+          "description": "The collection to iterate.  OPTIONAL: a `mode: cursor` loop draws from\n`cursor:` instead, and this field being required previously made such a\nloop fail to parse.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "iterator": {
+          "type": "string"
+        },
+        "mode": {
+          "default": null,
+          "description": "Legacy top-level shorthand for `spec.mode`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Loop mode, concurrency, policy and frame sizing."
+        }
+      },
+      "required": [
+        "iterator"
+      ],
+      "type": "object"
+    },
+    "LoopExec": {
+      "enum": [
+        "distributed",
+        "local"
+      ],
+      "type": "string"
+    },
+    "LoopMode": {
+      "enum": [
+        "sequential",
+        "parallel",
+        "cursor"
+      ],
+      "type": "string"
+    },
+    "LoopPolicy": {
+      "description": "Where loop iterations execute.",
+      "properties": {
+        "exec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopExec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LoopSpec": {
+      "description": "The `spec:` block of a loop.",
+      "properties": {
+        "frame": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FramePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_in_flight": {
+          "default": null,
+          "description": "Either a number or a template string, so it stays loose."
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MatchMode": {
+      "description": "Match semantics shared by `AdmitPolicy`, `TaskPolicy` and `NextSpec`.",
+      "oneOf": [
+        {
+          "const": "exclusive",
+          "description": "First matching rule wins.",
+          "type": "string"
+        },
+        {
+          "const": "inclusive",
+          "description": "Every matching rule applies.",
+          "type": "string"
+        }
+      ]
+    },
+    "Metadata": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "NextDoc": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NextRouter",
+          "description": "The v10 structured router."
+        },
+        {
+          "description": "Any legacy shorthand form."
+        }
+      ],
+      "description": "The **document** shape of `next:`.\n\n`Step::next` deserializes as free-form YAML because the legacy shorthand\nforms are still accepted, and constraining it would reject playbooks that\nrun. This union keeps that permissiveness — the `Other` arm accepts\nanything — while making [`NextRouter`], [`NextSpec`] and [`Arc`] reachable\nfrom the schema, so editors can complete the structured form.\n\n⚠ It therefore DOCUMENTS the router; it does not CONSTRAIN it."
+    },
+    "NextMode": {
+      "description": "Next routing mode.",
+      "enum": [
+        "exclusive",
+        "inclusive"
+      ],
+      "type": "string"
+    },
+    "NextRouter": {
+      "description": "The v10 `next:` router form.  `Step::next` stays `serde_yaml::Value`\nbecause the legacy shorthand forms are still accepted; this type\ndescribes the structured form for the schema and for callers that want\nit typed.",
+      "properties": {
+        "arcs": {
+          "items": {
+            "$ref": "#/$defs/Arc"
+          },
+          "type": "array"
+        },
+        "spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "NextSpec": {
+      "description": "Routing behaviour for a `next:` block.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MatchMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "on_no_match": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnNoMatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy": {
+          "default": null
+        }
+      },
+      "type": "object"
+    },
+    "NextStep": {
+      "anyOf": [
+        {
+          "description": "Canonical v2 format: `{ step: \"name\", when: \"condition\", args: {...} }`.",
+          "properties": {
+            "args": {
+              "default": null
+            },
+            "step": {
+              "type": "string"
+            },
+            "when": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "step"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Legacy conditional: `{ when: \"condition\", then: [...] }`.",
+          "properties": {
+            "then": {
+              "items": {
+                "$ref": "#/$defs/NextStep"
+              },
+              "type": "array"
+            },
+            "when": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "then"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Legacy next action: `{ next: [...] }`.",
+          "properties": {
+            "next": {
+              "items": {
+                "$ref": "#/$defs/NextStep"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "next"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Next step definition — supports canonical v2 format."
+    },
+    "OnNoMatch": {
+      "enum": [
+        "complete",
+        "quiet"
+      ],
+      "type": "string"
+    },
+    "OnUnmatched": {
+      "description": "What to do when no task rule matches.",
+      "enum": [
+        "continue",
+        "fail"
+      ],
+      "type": "string"
+    },
+    "OutputAccumulate": {
+      "description": "Result accumulation across loop iterations.",
+      "properties": {
+        "enabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "manifest_as": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_items": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "merge_path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on_error": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "on_success": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "strategy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccumulateStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OutputScope": {
+      "description": "Lifetime of a stored tool result.",
+      "enum": [
+        "step",
+        "execution",
+        "workflow",
+        "permanent"
+      ],
+      "type": "string"
+    },
+    "OutputSelect": {
+      "description": "Extract one value out of a tool result and bind it to a name.",
+      "properties": {
+        "as": {
+          "description": "Variable the extracted value is bound to.",
+          "type": "string"
+        },
+        "path": {
+          "description": "JSONPath into the result, e.g. `$.data.next`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "as"
+      ],
+      "type": "object"
+    },
+    "OutputStore": {
+      "description": "Where a tool's result is stored.",
+      "properties": {
+        "bucket": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Compression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential": {
+          "default": null,
+          "description": "Keychain alias, never an inline secret.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "driver": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputStoreKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefix": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ttl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OutputStoreKind": {
+      "enum": [
+        "auto",
+        "memory",
+        "kv",
+        "disk",
+        "object",
+        "s3",
+        "gcs",
+        "db",
+        "duckdb",
+        "eventlog"
+      ],
+      "type": "string"
+    },
+    "Step": {
+      "properties": {
+        "case": {
+          "items": {
+            "$ref": "#/$defs/CaseCondition"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "desc": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input": {
+          "default": null,
+          "description": "Step-level input data for cross-boundary propagation (DSL v2)."
+        },
+        "loop": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextDoc"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Next transitions — raw YAML, parsed manually to support both v10\nrouter and legacy formats."
+        },
+        "set": {
+          "default": null,
+          "description": "Variables bound when the step completes.  Present in 23 real playbooks\nand in the previous schema; this model dropped it silently until now."
+        },
+        "spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StepSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Step spec for routing mode."
+        },
+        "step": {
+          "type": "string"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolSpecDoc"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Deserialized into the execution projection [`Tool`]; DESCRIBED in the\nschema by [`ToolSpecDoc`], the document shape.  See `ToolSpec` for why."
+        },
+        "vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "when": {
+          "default": null,
+          "description": "Step enablement guard — evaluated before step runs (canonical v2).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "step"
+      ],
+      "type": "object"
+    },
+    "StepPolicy": {
+      "description": "Step-level policy block.  Only `admit` has a defined shape in the\nreference schema; the rest are open maps there and stay open here.",
+      "properties": {
+        "admit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdmitPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "emit": {
+          "default": null
+        },
+        "failure": {
+          "default": null
+        },
+        "lifecycle": {
+          "default": null
+        }
+      },
+      "type": "object"
+    },
+    "StepSpec": {
+      "description": "Step specification for routing control.",
+      "properties": {
+        "next_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Routing mode: exclusive (default, first match) or inclusive (all matches)."
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StepPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Step admission / lifecycle / failure / emit policy."
+        },
+        "timeout": {
+          "default": null,
+          "description": "Open in the reference schema, so it stays open here."
+        }
+      },
+      "type": "object"
+    },
+    "TaskPolicy": {
+      "description": "Task-level policy: rule evaluation plus the before/after/finally hooks.",
+      "properties": {
+        "after": {
+          "default": null
+        },
+        "before": {
+          "default": null
+        },
+        "finally": {
+          "default": null,
+          "description": "`finally` is a Rust keyword-adjacent name; the wire key is unchanged."
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MatchMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "on_unmatched": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnUnmatched"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rules": {
+          "default": []
+        }
+      },
+      "type": "object"
+    },
+    "TaskSpec": {
+      "description": "Per-task spec carried under `tool.spec`.",
+      "properties": {
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeout": {
+          "default": null
+        }
+      },
+      "type": "object"
+    },
+    "TemplatableF64": {
+      "anyOf": [
+        {
+          "description": "A literal number.",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A template expression resolved at render time.",
+          "type": "string"
+        }
+      ],
+      "description": "A number that may be written literally or as a template expression.\nSee [`TemplatableI64`]."
+    },
+    "TemplatableI64": {
+      "anyOf": [
+        {
+          "description": "A literal integer.",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A template expression resolved at render time.",
+          "type": "string"
+        }
+      ],
+      "description": "An integer that may be written literally or as a template expression.\n\nAny numeric field in the DSL can carry `{{ ... }}` instead of a literal —\n`lease_seconds: '{{ frame_lease_seconds }}'` is real and appears in the e2e\nfixtures. Typing those fields as plain `i64`/`f64` makes the playbook fail\nto parse AND makes the schema reject it; both happened here before this\nexisted."
+    },
+    "ThenBlock": {
+      "anyOf": [
+        {
+          "description": "Single action object (backwards compatible)."
+        },
+        {
+          "description": "List of action objects.",
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "Then block can be either a list of actions or a single action dict."
+    },
+    "ToolOutput": {
+      "description": "A tool's `output:` block.",
+      "properties": {
+        "accumulate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputAccumulate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "as": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inline_max_bytes": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "preview_max_bytes": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "select": {
+          "items": {
+            "$ref": "#/$defs/OutputSelect"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "store": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputStore"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ToolSpec": {
+      "description": "The **document** shape of a step's `tool:` block.\n\n[`Tool`] above is an execution projection: an internally-tagged enum with\none variant per tool kind, carrying exactly the fields the dispatcher needs.\nThat is the right model for running a step and the wrong one for describing\na playbook, because real playbooks carry per-kind fields the dispatcher does\nnot read (`name`, `libs`, `pool`, `auth`, …) and kinds the enum has no\nvariant for.\n\nGenerating the schema from [`Tool`] produced a `oneOf` that rejected **268\nof 279** real playbooks. The reference schema this replaces described the\nsame field as `ToolSpec | [object] | null`, requiring only `kind` — so this\nreproduces that, and only that.",
+      "properties": {
+        "kind": {
+          "description": "Tool kind — `python`, `postgres`, `http`, `noop`, …",
+          "type": "string"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolOutput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the result goes and how it is shaped."
+        },
+        "spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-task timeout and policy."
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ToolSpecDoc": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolSpec",
+          "description": "A single tool."
+        },
+        {
+          "description": "A sequence of tools run in order.",
+          "items": {
+            "$ref": "#/$defs/ToolSpec"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "`tool:` accepts either one tool or a list of them."
+    },
+    "WorkbookTask": {
+      "description": "A named, reusable task in the `workbook:` list.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "tool": true
+      },
+      "required": [
+        "name",
+        "tool"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://noetl.io/schema/playbook.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "JSON Schema for NoETL playbooks, generated from the Rust document model in noetl-executor (`noetl schema`). Permissive by design: it describes and completes, it does not reject unknown keys, because the parser does not either.",
+  "properties": {
+    "apiVersion": {
+      "type": "string"
+    },
+    "executor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Executor"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Runtime requirements and capabilities (8-char root key)."
+    },
+    "keychain": {
+      "default": null,
+      "description": "Credential aliases this playbook resolves.  Entries stay untyped: the\nreference schema declares them as open objects, and their contents are\nkeychain-resolver territory, not document structure."
+    },
+    "kind": {
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "workbook": {
+      "description": "Named reusable tasks referenced by `tool: {kind: workbook}` steps.",
+      "items": {
+        "$ref": "#/$defs/WorkbookTask"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "workflow": {
+      "items": {
+        "$ref": "#/$defs/Step"
+      },
+      "type": "array"
+    },
+    "workload": {
+      "default": null
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "workflow"
+  ],
+  "title": "NoETL Playbook",
+  "type": "object"
+}

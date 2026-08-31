@@ -557,6 +557,26 @@ enum Commands {
         #[command(subcommand)]
         command: provider_cli::ProviderCommand,
     },
+
+    /// Print the JSON Schema for a playbook document
+    ///
+    /// Generated from the Rust playbook model in `noetl-executor`, so it
+    /// cannot drift from what the parser accepts. Draft 2020-12. Point an
+    /// editor at the written file for completion and inline documentation
+    /// while authoring playbooks.
+    ///
+    /// Permissive by design: it describes and completes, it does not reject
+    /// unknown keys, because the parser does not either.
+    ///
+    /// EXAMPLES:
+    ///     noetl schema
+    ///     noetl schema --output playbook.schema.json
+    #[command(verbatim_doc_comment)]
+    Schema {
+        /// Write the schema here instead of stdout
+        #[arg(long, short)]
+        output: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3022,6 +3042,18 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 }
             },
         },
+        Some(Commands::Schema { output }) => {
+            let schema = noetl_executor::playbook::playbook_json_schema();
+            let text = serde_json::to_string_pretty(&schema)? + "\n";
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, &text)
+                        .with_context(|| format!("failed to write schema to {path}"))?;
+                    println!("wrote {} bytes to {path}", text.len());
+                }
+                None => print!("{text}"),
+            }
+        }
         Some(Commands::Provider { command }) => {
             provider_cli::run(&client, command).await?;
         }
