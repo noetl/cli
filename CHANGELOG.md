@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.23.0](https://github.com/noetl/cli/compare/v4.22.0...v4.23.0) (2026-08-31)
+
+### Features
+
+* **playbook:** type the policy, output and loop surface of the document model ([e38441e](https://github.com/noetl/cli/commit/e38441efe074c7b7e4ce5e6f4d6aec908f69a115)), closes [noetl/ai-meta#201](https://github.com/noetl/ai-meta/issues/201) [noetl#699](https://github.com/noetl/noetl/issues/699) [noetl/ai-meta#201](https://github.com/noetl/ai-meta/issues/201)
+* **schema:** generate the playbook JSON Schema from the model, and guard it ([879eb89](https://github.com/noetl/cli/commit/879eb89cd84dc868fab754de3e73ad93a8e74a46)), closes [noetl/ai-meta#201](https://github.com/noetl/ai-meta/issues/201) [noetl/ai-meta#201](https://github.com/noetl/ai-meta/issues/201)
+
 ## [4.22.0](https://github.com/noetl/cli/compare/v4.21.4...v4.22.0) (2026-08-29)
 
 ### Features
