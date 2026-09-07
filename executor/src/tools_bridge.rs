@@ -638,6 +638,11 @@ fn reshape_duckdb_result(result: ToolResult) -> Result<BridgeOutcome> {
         // bridge has nothing to attach here (DuckDB doesn't dispatch
         // async work), so it always falls through as `None`.
         pending_callback: result.pending_callback,
+        // noetl-tools 3.27 added this (noetl/ai-meta#328): WHICH execution a
+        // tool spawned.  Passed through rather than dropped -- this bridge
+        // reshapes a result, and a reshaping layer that silently narrows the
+        // struct is how the #326 loss happened one layer down.
+        child_execution_id: result.child_execution_id,
     })
 }
 
@@ -1642,6 +1647,7 @@ mod tests {
             exit_code: Some(1),
             duration_ms: Some(5),
             pending_callback: None,
+            child_execution_id: None,
         };
         result.exit_code = Some(1);
         let outcome = reshape_http_result(result).unwrap();
