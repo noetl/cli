@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.23.2](https://github.com/noetl/cli/compare/v4.23.1...v4.23.2) (2026-09-07)
+
+### Bug Fixes
+
+* **executor:** pass through ToolResult.child_execution_id (noetl-tools 3.27) ([1f7bb2a](https://github.com/noetl/cli/commit/1f7bb2a79787132a7886a3903db0b3d179aaba21)), closes [noetl/ai-meta#328](https://github.com/noetl/ai-meta/issues/328) [#326](https://github.com/noetl/cli/issues/326) [noetl/ai-meta#328](https://github.com/noetl/ai-meta/issues/328)
+
 ## [4.23.1](https://github.com/noetl/cli/compare/v4.23.0...v4.23.1) (2026-08-31)
 
 ### Bug Fixes
