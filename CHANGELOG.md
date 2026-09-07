@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.23.3](https://github.com/noetl/cli/compare/v4.23.2...v4.23.3) (2026-09-07)
+
+### Bug Fixes
+
+* **executor:** bump the member crate to 0.9.1 so the [#328](https://github.com/noetl/cli/issues/328) fix can publish ([2793ec4](https://github.com/noetl/cli/commit/2793ec413d99b853ab9a13680e9916554585ac8a))
+
 ## [4.23.2](https://github.com/noetl/cli/compare/v4.23.1...v4.23.2) (2026-09-07)
 
 ### Bug Fixes
