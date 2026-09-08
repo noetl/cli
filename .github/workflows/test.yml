@@ -36,6 +36,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: `git describe --tags` finds nothing on the
+          # default shallow clone, and the member check would SKIP — a clean
+          # result computed from no baseline at all.
+          fetch-depth: 0
+          fetch-tags: true
+
+      # noetl/ai-meta#331 — a member crate changed without a version bump
+      # releases green and publishes nothing new.  Catch it on the PR, where it
+      # costs a comment, not after the tag is cut.
+      - name: member versions
+        run: ./ci/check-member-versions.sh
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
