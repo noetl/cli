@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.23.4](https://github.com/noetl/cli/compare/v4.23.3...v4.23.4) (2026-09-08)
+
+### Bug Fixes
+
+* **release:** refuse a release that would publish nothing new ([#331](https://github.com/noetl/cli/issues/331)) ([9c600ab](https://github.com/noetl/cli/commit/9c600ab60ba96318ba70c33a2f0142162e2e35d7)), closes [noetl/ai-meta#328](https://github.com/noetl/ai-meta/issues/328) [#330](https://github.com/noetl/cli/issues/330) [#328](https://github.com/noetl/cli/issues/328)
+
 ## [4.23.3](https://github.com/noetl/cli/compare/v4.23.2...v4.23.3) (2026-09-07)
 
 ### Bug Fixes
