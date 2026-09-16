@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.0.0](https://github.com/noetl/cli/compare/v4.23.4...v5.0.0) (2026-09-16)
+
+### ⚠ BREAKING CHANGES
+
+* noetl-executor 0.10.0 requires noetl-tools 4.x and cannot be
+linked alongside noetl-tools 3.x.
+
+### Features
+
+* adopt noetl-tools 4.x; noetl-executor 0.10.0 ([6285bc2](https://github.com/noetl/cli/commit/6285bc2966c975d859aa241bd7d5e5e561a306df)), closes [noetl/ai-meta#330](https://github.com/noetl/ai-meta/issues/330) [noetl/cli#88](https://github.com/noetl/cli/issues/88) [noetl/ai-meta#330](https://github.com/noetl/ai-meta/issues/330)
+
 ## [4.23.4](https://github.com/noetl/cli/compare/v4.23.3...v4.23.4) (2026-09-08)
 
 ### Bug Fixes
