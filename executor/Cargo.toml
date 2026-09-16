@@ -1,5 +1,13 @@
 [package]
 name = "noetl-executor"
+# 0.10.0 — noetl-tools 4.x (noetl/ai-meta#330).  `ToolResult` is now
+# `#[non_exhaustive]`, so this crate's `tools_bridge` can no longer build one
+# with a struct literal.  The dependency's MAJOR moved, which is breaking for
+# anyone linking this crate alongside noetl-tools 3.x, so the version moves
+# under 0.x SemVer even though this crate's own public surface is unchanged.
+# Load-bearing for the release for the same reason every note below says so:
+# `publish-crate` skips a version already on crates.io, so leaving 0.9.1 would
+# make the `noetl` bin resolve a noetl-tools-3.x executor and fail to build.
 # 0.9.2 — test-only.  Rewrote a stale provider test and made the three DuckDb
 # dispatch tests assert the no-engine refusal instead of unwrapping it.  No
 # public API change, so a PATCH — but the version still HAS to move: `cargo
@@ -35,7 +43,7 @@ name = "noetl-executor"
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.9.2"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
@@ -101,7 +109,7 @@ rhai = { version = "1.18", features = ["sync"] }
 # Subsequent sub-PRs (PR-2c-2 onwards per Strategy B) replace one
 # inline tool implementation in playbook_runner.rs at a time so
 # semantic differences surface incrementally instead of all at once.
-noetl-tools = "3.27"
+noetl-tools = "4"
 
 # GCS uploads in `tools_bridge::gcs_upload` (R-3 GCS sink migration,
 # noetl/ai-meta#31).  The `gcp` feature pulls in

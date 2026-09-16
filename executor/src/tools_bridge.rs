@@ -602,8 +602,8 @@ fn duckdb_tool_config(
 /// playbook steps that read `<step>.result[0].col_name` keep
 /// working.  `affected_rows` from the noetl-tools envelope is
 /// dropped on purpose — the CLI never exposed it.
-fn reshape_duckdb_result(result: ToolResult) -> Result<BridgeOutcome> {
-    let data = match result.data {
+fn reshape_duckdb_result(mut result: ToolResult) -> Result<BridgeOutcome> {
+    let data = match result.data.take() {
         Some(d) => d,
         None => return from_tools_result(result),
     };
@@ -626,24 +626,30 @@ fn reshape_duckdb_result(result: ToolResult) -> Result<BridgeOutcome> {
 
     // Unknown shape — fall back to the generic from_tools_result
     // path so we still surface whatever the tool emitted.
-    from_tools_result(ToolResult {
-        status: result.status,
-        data: Some(data),
-        error: result.error,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exit_code: result.exit_code,
-        duration_ms: result.duration_ms,
-        // noetl-tools 2.21 added this marker field; the executor
-        // bridge has nothing to attach here (DuckDB doesn't dispatch
-        // async work), so it always falls through as `None`.
-        pending_callback: result.pending_callback,
-        // noetl-tools 3.27 added this (noetl/ai-meta#328): WHICH execution a
-        // tool spawned.  Passed through rather than dropped -- this bridge
-        // reshapes a result, and a reshaping layer that silently narrows the
-        // struct is how the #326 loss happened one layer down.
-        child_execution_id: result.child_execution_id,
-    })
+    // Put the (unchanged) data back and hand the SAME result on.  This was a
+    // field-by-field struct literal until noetl-tools 4.0 sealed `ToolResult`
+    // with `#[non_exhaustive]` (noetl/ai-meta#330).  Re-seating `data` on the
+    // original is not merely the shortest way past that: it is the only form
+    // that CANNOT narrow.  The literal had to name every field, so every new
+    // field upstream was a fresh chance to forget one, and two were added here
+    // by hand for exactly that reason (2.21's `pending_callback`, 3.27's
+    // `child_execution_id`).  A field added to `ToolResult` from here on
+    // reaches `from_tools_result` whether or not anyone remembers it exists.
+    //
+    // ⚠ WHAT THE OLD COMMENT CLAIMED, AND WHY IT WAS WRONG.  It said those two
+    // fields were "passed through rather than dropped".  They are not:
+    // `from_tools_result` reads `status`, `data`, `stdout`, `error` and
+    // `duration_ms` and returns a `BridgeOutcome { result: Option<String> }`,
+    // which has nowhere to put them.  Both are discarded one call later, and
+    // after this change the only mention of either field anywhere in this
+    // workspace is this comment.  So the careful hand-copying bought nothing
+    // -- the CLI's local-mode bridge has never conveyed a child execution id.
+    // That is a real limitation of this bridge, not of this function; see
+    // noetl/cli#88.  Fixing it means giving `BridgeOutcome` somewhere to put
+    // them, which is a deliberate change to the CLI's local-mode surface and
+    // does not belong in a dependency bump.
+    result.data = Some(data);
+    from_tools_result(result)
 }
 
 /// Prepare the variable map for a sub-playbook invocation.
@@ -1678,22 +1684,15 @@ mod tests {
         // CLI contract: HTTP error statuses come back inside the
         // `{status, body}` envelope, NOT as anyhow::Error.  Only
         // network-transport failures bubble up.
-        let mut result = ToolResult {
-            status: ToolStatus::Error,
-            data: Some(serde_json::json!({
+        let result = ToolResult::error("HTTP 404 response")
+            .with_data(serde_json::json!({
                 "status_code": 404,
                 "headers": {},
                 "body": {"error": "not found"},
-            })),
-            error: Some("HTTP 404 response".into()),
-            stdout: None,
-            stderr: None,
-            exit_code: Some(1),
-            duration_ms: Some(5),
-            pending_callback: None,
-            child_execution_id: None,
-        };
-        result.exit_code = Some(1);
+            }))
+            .with_exit_code(1)
+            .with_duration(5);
+        assert_eq!(result.status, ToolStatus::Error);
         let outcome = reshape_http_result(result).unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
@@ -1786,6 +1785,31 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
         assert_eq!(parsed.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn reshape_duckdb_unknown_shape_preserves_data_and_drops_bridge_less_fields() {
+        // Pins the fall-through arm's REAL behaviour, which had no test at all
+        // -- a comment was doing the work instead, and it was wrong.
+        //
+        // What survives: the payload. What does not: `child_execution_id` and
+        // `pending_callback`, because `BridgeOutcome` is `{ result:
+        // Option<String> }` and has nowhere to put them. This asserts the drop
+        // rather than hiding it, so anyone who later gives `BridgeOutcome` a
+        // home for them (noetl/cli#88) is told by a failing test that this is
+        // the place that changes.
+        let result = ToolResult::success(serde_json::json!({"unknown": "shape"}))
+            .with_child_execution_id("11111111-2222-3333-4444-555555555555")
+            .with_pending_callback(true);
+        let outcome = reshape_duckdb_result(result).unwrap();
+        let body = outcome.result.as_deref().expect("payload survives");
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["unknown"], "shape", "the data payload is preserved");
+        assert!(
+            !body.contains("11111111-2222-3333-4444-555555555555"),
+            "documented limitation: the child execution id cannot reach a \
+             BridgeOutcome, and this test exists so that is visible"
+        );
     }
 
     #[test]
