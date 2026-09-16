@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 
 use noetl_executor::playbook::{CmdsList, Tool};
-use noetl_executor::tools_bridge::{dispatch_via_registry, BridgeContext};
+use noetl_executor::tools_bridge::{dispatch_via_registry, BridgeContext, BridgeOutcome};
 
 fn empty_vars() -> HashMap<String, String> {
     HashMap::new()
@@ -116,6 +116,41 @@ async fn shell_nonzero_exit_propagates_error() {
 
 // ---- Tool::DuckDb ---------------------------------------------------
 
+// ⚠ These three need the DuckDB C++ engine, which sits behind the non-default
+// `duckdb-integration` feature (noetl/ai-meta#185) precisely so ordinary builds
+// skip the multi-hour libduckdb-sys compile.  Ungated, all three `unwrap()` a
+// Configuration error saying the tool is not compiled in — the tool behaving
+// correctly, reported as three test failures.  They were invisible until CI
+// started selecting this package at all (see .github/workflows/test.yml in this
+// change set).
+//
+// The obvious fix — `#[cfg(feature = "duckdb-integration")]` on each — is the
+// wrong one: it stops COMPILING them without the feature, so they could rot
+// silently and nobody would know until someone built the feature.  Instead they
+// stay compiled unconditionally and branch on `cfg!()` at RUNTIME, and the
+// no-engine branch is a real assertion rather than a skip: absence must be
+// reported as a loud Configuration error naming the feature.  Silently
+// returning an empty rows array instead would be the far worse failure, and
+// nothing else in this suite would catch it.
+
+/// Assert the no-engine outcome is an honest refusal, not a quiet empty answer.
+/// Returns `true` when the engine is absent and the caller should stop.
+fn duckdb_engine_absent(outcome: &anyhow::Result<BridgeOutcome>) -> bool {
+    if cfg!(feature = "duckdb-integration") {
+        return false;
+    }
+    let err = outcome
+        .as_ref()
+        .err()
+        .expect("without the duckdb-integration feature the dispatch MUST fail loudly, not return a result");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not compiled into this build") && msg.contains("duckdb-integration"),
+        "the refusal must name the missing feature so the operator can act on it: {msg}"
+    );
+    true
+}
+
 #[tokio::test]
 async fn duckdb_in_memory_select_returns_rows_array() {
     let vars = empty_vars();
@@ -125,7 +160,11 @@ async fn duckdb_in_memory_select_returns_rows_array() {
         query: Some("SELECT 1 AS id, 'alpha' AS name UNION ALL SELECT 2, 'beta'".into()),
         params: vec![],
     };
-    let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+    let outcome = dispatch_via_registry(&tool, &bridge).await;
+    if duckdb_engine_absent(&outcome) {
+        return;
+    }
+    let outcome = outcome.unwrap();
     let parsed: serde_json::Value =
         serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
     let arr = parsed.as_array().expect("result should be a JSON array");
@@ -148,7 +187,11 @@ async fn duckdb_in_memory_non_select_returns_status_ok() {
         query: Some("CREATE TABLE t (id INTEGER)".into()),
         params: vec![],
     };
-    let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+    let outcome = dispatch_via_registry(&tool, &bridge).await;
+    if duckdb_engine_absent(&outcome) {
+        return;
+    }
+    let outcome = outcome.unwrap();
     // CLI's pre-PR-2c-6 envelope for non-SELECT was the literal
     // `{"status": "ok"}` string; the bridge preserves it.
     assert_eq!(outcome.result.as_deref(), Some(r#"{"status": "ok"}"#));
@@ -163,7 +206,11 @@ async fn duckdb_select_empty_result_returns_empty_array() {
         query: Some("SELECT 1 AS id WHERE 1 = 0".into()),
         params: vec![],
     };
-    let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+    let outcome = dispatch_via_registry(&tool, &bridge).await;
+    if duckdb_engine_absent(&outcome) {
+        return;
+    }
+    let outcome = outcome.unwrap();
     let parsed: serde_json::Value =
         serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
     assert_eq!(parsed.as_array().unwrap().len(), 0);

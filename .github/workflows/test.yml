@@ -55,11 +55,27 @@ jobs:
       # --all-targets, not the default: plain cargo build/test skip integration
       # tests and cfg(test)-only code, so a binary can be broken while the lib
       # compiles clean.
+      #
+      # ⚠ --workspace, and it is NOT redundant with --all-targets.  The two
+      # flags widen different axes: --all-targets widens TARGET KINDS (lib,
+      # bins, tests, examples) within the selected packages; --workspace widens
+      # the PACKAGE SELECTION.  This repo's root Cargo.toml is a real
+      # `[package]` (the `noetl` bin) as well as a `[workspace]`, so the
+      # default selection is that root package ALONE — `events`, `executor`,
+      # `arrow-cache` and `arrow-flight-client` were never built or tested
+      # here.  Measured: the old command ran 69 tests, this one runs 161.
+      #
+      # That is not hypothetical.  `noetl-executor`'s
+      # `dispatch_provider_apply_without_auth_errors_no_network` was failing on
+      # main for eight days while every CI run reported success, because the
+      # package holding it was never selected.  A gate that does not run the
+      # tests is not a gate, and this one's own comment reasoned carefully
+      # about the wrong axis.
       - name: build (all targets)
-        run: cargo build --all-targets --locked
+        run: cargo build --workspace --all-targets --locked
 
       - name: test
-        run: cargo test --all-targets --locked
+        run: cargo test --workspace --all-targets --locked
 
       - name: clippy (visible, non-gating)
-        run: cargo clippy --all-targets --locked || true
+        run: cargo clippy --workspace --all-targets --locked || true

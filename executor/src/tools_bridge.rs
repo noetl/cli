@@ -1461,12 +1461,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dispatch_provider_apply_without_auth_errors_no_network() {
-        // Apply mode (dry_run=false) with no auth block → the tool refuses with
-        // a Configuration error and makes no network call.  The bridge surfaces
-        // it as a dispatch error rather than a silent empty outcome.
-        let tool = Tool::Provider {
+    /// Build a `Tool::Provider` for `serviceusage.services.enable` with no
+    /// `auth:` and `dry_run: false`, varying only `reconcile`.  The two tests
+    /// below differ in exactly that one field, which is the point.
+    fn provider_enable_without_auth(reconcile: Option<&str>) -> Tool {
+        Tool::Provider {
             provider: "google".into(),
             runtime: None,
             action: "google.serviceusage.services.enable".into(),
@@ -1482,15 +1481,60 @@ mod tests {
             endpoint: None,
             stack: None,
             confirm: None,
-            reconcile: None,
+            reconcile: reconcile.map(|r| r.to_string()),
             known_desired: None,
             guard: None,
             auth: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_provider_without_reconcile_reports_and_does_not_mutate() {
+        // ⚠ THIS TEST USED TO ASSERT THE OPPOSITE, AND WAS RED ON main FOR
+        // EIGHT DAYS WITHOUT ANYONE SEEING IT — CI never selected this package
+        // (fixed in the same change set; see .github/workflows/test.yml).
+        //
+        // It asserted that `dry_run: false` + no `auth:` errors.  noetl-tools
+        // 3.24.0 (#89) changed the contract deliberately: `reconcile` defaults
+        // to `report`, and a mutating action under `report` reads only — it
+        // makes no cloud mutation and writes no ownership fact.  Mutating is
+        // now an explicit opt-in (`reconcile: enforce`).  Without `auth:` the
+        // live actual cannot be read, so the verdict is `undetermined` rather
+        // than an error: a plain run never fails.
+        //
+        // So the honest assertion is not "it errors" but "it reports, and it
+        // changed nothing" — the safety property is `changed: false`, and that
+        // is what this now pins.
         let vars = empty_vars();
-        let err = dispatch_via_registry(&tool, &bridge_ctx(&vars))
+        let outcome = dispatch_via_registry(&provider_enable_without_auth(None), &bridge_ctx(&vars))
             .await
-            .unwrap_err();
+            .expect("a default (report) run never fails");
+        let parsed: serde_json::Value =
+            serde_json::from_str(outcome.result.as_deref().expect("report body")).unwrap();
+        assert_eq!(parsed["reconcile"], "report", "default policy is report");
+        assert_eq!(parsed["changed"], false, "a report must not mutate");
+        assert_eq!(
+            parsed["drift"], "undetermined",
+            "no auth: means the live actual could not be read"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_provider_enforce_without_auth_still_errors_no_network() {
+        // The property the test above was written to protect, restored against
+        // the path that still has it: apply mode REQUIRES `auth:`.  Under
+        // `reconcile: enforce` the tool is asked to actually converge, and with
+        // no credentials it must refuse rather than make a network call.
+        //
+        // Without this, the rewrite above would have quietly retired the
+        // guard instead of relocating it.
+        let vars = empty_vars();
+        let err = dispatch_via_registry(
+            &provider_enable_without_auth(Some("enforce")),
+            &bridge_ctx(&vars),
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.to_string().contains("apply mode") || err.to_string().contains("auth"),
             "error names the missing auth: {err}"
