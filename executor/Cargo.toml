@@ -1,5 +1,12 @@
 [package]
 name = "noetl-executor"
+# 0.9.2 — test-only.  Rewrote a stale provider test and made the three DuckDb
+# dispatch tests assert the no-engine refusal instead of unwrapping it.  No
+# public API change, so a PATCH — but the version still HAS to move: `cargo
+# publish` packs tests into the .crate, so the published crate's contents
+# differ, and `publish-crate` skips a version already on crates.io.  Leaving
+# 0.9.1 would mean the release publishes nothing new, which is what the
+# member-version guard (noetl/ai-meta#331) exists to catch and did.
 # 0.7.0 — noetl/ai-meta#189 provider tool round 4 (drift adoption).  Adds
 # `reconcile` + `known_desired` fields to the `Tool::Provider` variant of
 # `playbook::Tool`.  New public fields on a non-#[non_exhaustive] struct
@@ -28,7 +35,7 @@ name = "noetl-executor"
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.9.1"
+version = "0.9.2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
