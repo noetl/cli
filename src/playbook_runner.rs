@@ -1773,3 +1773,9 @@ mod tests {
         assert_eq!(entry, Some("custom_entry".to_string()));
     }
 }
+
+#[allow(dead_code)]
+fn ci_planted_lint_probe(n: usize) -> usize {
+    let doubled = n * 2;
+    doubled
+}
