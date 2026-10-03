@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.0.1](https://github.com/noetl/cli/compare/v5.0.0...v5.0.1) (2026-10-03)
+
+### Bug Fixes
+
+* **deps:** ratatui 0.26 -> 0.30 to clear the lru advisory ([65371e3](https://github.com/noetl/cli/commit/65371e3a112fa9684c8f6b333152c4a51bf36f07)), closes [noetl/ai-meta#374](https://github.com/noetl/ai-meta/issues/374) [#378](https://github.com/noetl/cli/issues/378) [noetl/ai-meta#385](https://github.com/noetl/ai-meta/issues/385)
+* **deps:** rpassword 3 -> 7, clearing GHSA-2p6r-x3vv-xqm2 ([df5c09f](https://github.com/noetl/cli/commit/df5c09fea3949b97387d5ebf73464a697f74be07)), closes [noetl/ai-meta#385](https://github.com/noetl/ai-meta/issues/385) [noetl/ai-meta#385](https://github.com/noetl/ai-meta/issues/385)
+
 ## [5.0.0](https://github.com/noetl/cli/compare/v4.23.4...v5.0.0) (2026-09-16)
 
 ### ⚠ BREAKING CHANGES

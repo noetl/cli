@@ -23,7 +23,7 @@ members = ["events", "executor", "arrow-cache", "arrow-flight-client"]
 
 [package]
 name = "noetl"
-version = "5.0.0"
+version = "5.0.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/noetl"
