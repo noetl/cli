@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 // YAML playbook types (R-1.1 PR-2a, see Appendix H of the global hybrid
 // cloud blueprint).
@@ -523,10 +523,10 @@ impl PlaybookRunner {
                             }
                             // Handle pipe: blocks - pass to distributed executor
                             // For local CLI, we skip pipeline execution (requires distributed runtime)
-                            if value.get("pipe").is_some() {
-                                if self.verbose {
-                                    eprintln!("   ⚠ Pipeline blocks require distributed runtime, skipping");
-                                }
+                            if value.get("pipe").is_some() && self.verbose {
+                                eprintln!(
+                                    "   ⚠ Pipeline blocks require distributed runtime, skipping"
+                                );
                             }
                         }
                     }
@@ -1350,7 +1350,6 @@ impl PlaybookRunner {
     }
 
 
-    /// Execute a Rhai script with access to HTTP, sleep, and utility functions
 
     // R-1.1 PR-2c-3: the rhai_to_json_string / json_to_rhai forwarders
     // that lived here were used only by execute_rhai_script (now
@@ -1465,7 +1464,7 @@ impl PlaybookRunner {
     /// engine.  The step fails with a rebuild hint rather than the target being
     /// silently absent from the playbook surface.
     #[cfg(not(feature = "duckdb-integration"))]
-    fn sink_to_duckdb(&self, db_path: &PathBuf, table: &str, _json_data: &str) -> Result<()> {
+    fn sink_to_duckdb(&self, db_path: &Path, table: &str, _json_data: &str) -> Result<()> {
         anyhow::bail!(
             "sink to DuckDB ({} -> {}) needs the embedded DuckDB engine, which this build \
              was compiled without.\n  Rebuild with: cargo install noetl --features duckdb-integration",

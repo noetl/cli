@@ -141,8 +141,7 @@ fn duckdb_engine_absent(outcome: &anyhow::Result<BridgeOutcome>) -> bool {
     }
     let err = outcome
         .as_ref()
-        .err()
-        .expect("without the duckdb-integration feature the dispatch MUST fail loudly, not return a result");
+        .expect_err("without the duckdb-integration feature the dispatch MUST fail loudly, not return a result");
     let msg = err.to_string();
     assert!(
         msg.contains("not compiled into this build") && msg.contains("duckdb-integration"),

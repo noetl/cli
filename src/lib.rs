@@ -1733,10 +1733,6 @@ fn parse_exec_reference(reference: &str, version_override: Option<&str>) -> Resu
     })
 }
 
-/// Resolve runtime mode based on:
-/// 1. CLI flag (--runtime local|distributed) - highest priority if explicitly set
-/// 2. If --runtime auto (default): use context config runtime preference
-/// 3. If context runtime is also auto: auto-detect from reference type
 /// Resolve the runtime placement via the precedence ladder
 /// (flag > context > default) and report where the decision came from.
 ///
@@ -2702,7 +2698,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             CodexDispatch::Passthrough(args) => run_codex_passthrough(&args)?,
         },
         Some(Commands::Ai { ref args }) => {
-            run_ai_mode(&cli, &args)?;
+            run_ai_mode(&cli, args)?;
         }
         Some(Commands::Run(args)) => {
             run_playbook(
@@ -2897,10 +2893,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                         fs::read_to_string(&file).context(format!("Failed to read file: {:?}", file.display()))?;
                     let resource_type = if content.contains("kind: Credential") {
                         "Credential"
-                    } else if content.contains("kind: Playbook") {
-                        "Playbook"
                     } else {
-                        "Playbook" // Default
+                        // Anything else, including an explicit
+                        // `kind: Playbook`, defaults to Playbook.
+                        "Playbook"
                     };
                     register_resource(&client, &base_url, use_gateway_proxy, resource_type, &file).await?;
                 }
@@ -4083,7 +4079,7 @@ async fn write_callback_http_response(
     let response = format!(
         "HTTP/1.1 {}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status_line,
-        body.as_bytes().len(),
+        body.len(),
         body
     );
     socket
@@ -4091,17 +4087,6 @@ async fn write_callback_http_response(
         .await
         .context("Failed to write callback HTTP response")?;
     Ok(())
-}
-
-/// Extract the Auth0 tenant slug from an Auth0 domain like
-/// ``mestumre-development.us.auth0.com`` ⇒ ``mestumre-development``.
-/// Used (with the optional region label) to construct the dashboard
-/// management URL the user clicks when the PKCE callback URL isn't
-/// in the application's allowed list.  Returns ``None`` for custom
-/// domains (CNAMEd) where the tenant slug can't be derived from the
-/// domain alone.
-fn extract_auth0_tenant_from_domain(domain: &str) -> Option<String> {
-    extract_auth0_tenant_and_region(domain).map(|(tenant, _)| tenant)
 }
 
 /// Extract both the tenant slug and the optional region label from
@@ -4626,7 +4611,7 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
                 if pkce_port == 0 {
                     anyhow::bail!("--pkce-port cannot be 0.");
                 }
-                let ctx_name_ref = context.as_deref().or_else(|| config.current_context.as_deref());
+                let ctx_name_ref = context.as_deref().or(config.current_context.as_deref());
                 let ctx_ref = ctx_name_ref.and_then(|n| config.contexts.get(n));
                 let domain = auth0_domain
                     .as_deref()
@@ -4652,7 +4637,7 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
                     .filter(|s| !s.trim().is_empty());
                 let client_secret = auth0_client_secret
                     .as_deref()
-                    .or_else(|| env_client_secret.as_deref())
+                    .or(env_client_secret.as_deref())
                     .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_client_secret.as_deref()))
                     .filter(|s| !s.trim().is_empty());
                 let login_hint = auth0.as_deref().filter(|v| looks_like_email(v)).map(str::trim);
@@ -4674,7 +4659,7 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
             }
 
             if token.is_none() && use_browser_flow {
-                let ctx_name_ref = context.as_deref().or_else(|| config.current_context.as_deref());
+                let ctx_name_ref = context.as_deref().or(config.current_context.as_deref());
                 let ctx_ref = ctx_name_ref.and_then(|n| config.contexts.get(n));
                 let domain = auth0_domain
                     .as_deref()
@@ -4707,7 +4692,7 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
                         token = Some(auth0_input.trim().to_string());
                     } else if looks_like_email(&auth0_input) {
                         // Resolve context config
-                        let ctx_name_ref = context.as_deref().or_else(|| config.current_context.as_deref());
+                        let ctx_name_ref = context.as_deref().or(config.current_context.as_deref());
                         let ctx_ref = ctx_name_ref.and_then(|n| config.contexts.get(n));
                         let early_domain = auth0_domain
                             .as_deref()
@@ -4721,7 +4706,7 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
                         let early_client_id = ctx_ref.and_then(|c| c.gateway_auth0_client_id.as_deref());
                         let early_client_secret = auth0_client_secret
                             .as_deref()
-                            .or_else(|| env_client_secret.as_deref())
+                            .or(env_client_secret.as_deref())
                             .or_else(|| ctx_ref.and_then(|c| c.gateway_auth0_client_secret.as_deref()))
                             .filter(|s| !s.trim().is_empty());
                         let early_redirect_uri = ctx_ref.and_then(|c| c.gateway_auth0_redirect_uri.as_deref());
@@ -4793,8 +4778,7 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
                             token = Some(id_token.to_string());
                         } else {
                             // Browser flow: print authorization URL
-                            let early_redirect_uri = early_redirect_uri;
-                            if !json {
+                                if !json {
                                 println!("Auth0 login hint: {}", auth0_input.trim());
                                 if let (Some(domain), Some(client_id)) = (early_domain, early_client_id) {
                                     let nonce = std::time::SystemTime::now()
@@ -5710,9 +5694,8 @@ async fn get_status(
         let fallback_status = fallback_response.status();
         let fallback_text = fallback_response.text().await?;
         eprintln!(
-            "Failed to get status: {} - {}; fallback failed: {} - {}",
+            "Failed to get status: {} - Execution not found in server state cache; fallback failed: {} - {}",
             response.status(),
-            "Execution not found in server state cache",
             fallback_status,
             fallback_text
         );
@@ -6463,7 +6446,7 @@ fn extract_column_names(query: &str) -> Vec<String> {
                     s[as_pos + 4..].trim().to_string()
                 } else {
                     // Get the last part after dot (for qualified names like table.column)
-                    s.split('.').last().unwrap_or(s).trim().to_string()
+                    s.split('.').next_back().unwrap_or(s).trim().to_string()
                 }
             })
             .collect();
@@ -6778,7 +6761,7 @@ async fn start_server(init_db: bool) -> Result<()> {
 
     // Spawn Python server subprocess using new entry point
     let mut cmd = Command::new("python");
-    cmd.args(&["-m", "noetl.server"])
+    cmd.args(["-m", "noetl.server"])
         .arg("--host")
         .arg(&host)
         .arg("--port")
@@ -6818,7 +6801,7 @@ async fn start_server(init_db: bool) -> Result<()> {
         let base_url = format!("http://localhost:{}", port);
 
         println!("Initializing database schema...");
-        let response = client.post(&format!("{}/api/db/init", base_url)).send().await;
+        let response = client.post(format!("{}/api/db/init", base_url)).send().await;
 
         match response {
             Ok(resp) if resp.status().is_success() => {
@@ -6946,7 +6929,7 @@ async fn start_worker(_max_workers: Option<usize>) -> Result<()> {
     // Build Python worker command - execute worker module directly
     // python -m noetl.worker starts V2 worker via __main__.py
     let mut cmd = Command::new("python");
-    cmd.args(&["-m", "noetl.worker"]);
+    cmd.args(["-m", "noetl.worker"]);
 
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
@@ -7242,19 +7225,15 @@ async fn build_docker_image(no_cache: bool, platform: Option<String>) -> Result<
 
     let stdout_thread = std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                println!("{}", line);
-            }
+        for line in reader.lines().map_while(Result::ok) {
+            println!("{}", line);
         }
     });
 
     let stderr_thread = std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                println!("{}", line);
-            }
+        for line in reader.lines().map_while(Result::ok) {
+            println!("{}", line);
         }
     });
 
@@ -8845,7 +8824,7 @@ mod tests {
         std::fs::write(dir.join("cred.yaml"), "kind: Credential\n").unwrap();
         std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
 
-        let (found, skipped) = crate::discover_resources(&[dir.clone()]).unwrap();
+        let (found, skipped) = crate::discover_resources(std::slice::from_ref(&dir)).unwrap();
         let names: Vec<String> = found
             .iter()
             .map(|f| f.file.file_name().unwrap().to_string_lossy().to_string())
@@ -8964,47 +8943,20 @@ mod tests {
     }
 
     #[test]
-    fn auth0_tenant_extracted_from_standard_domain() {
-        // ``<tenant>.auth0.com`` shape — the simplest case.
-        assert_eq!(
-            extract_auth0_tenant_from_domain("acme.auth0.com"),
-            Some("acme".to_string())
-        );
-    }
-
-    #[test]
-    fn auth0_tenant_extracted_from_regional_domain() {
-        // ``<tenant>.<region>.auth0.com`` — Auth0 regional shape
-        // (eu, us, au, jp).  We pull the first label, which is the
-        // tenant slug used in the management URL.
-        assert_eq!(
-            extract_auth0_tenant_from_domain("mestumre-development.us.auth0.com"),
-            Some("mestumre-development".to_string())
-        );
-        assert_eq!(
-            extract_auth0_tenant_from_domain("acme.eu.auth0.com"),
-            Some("acme".to_string())
-        );
-    }
-
-    #[test]
-    fn auth0_tenant_returns_none_for_custom_domain() {
-        // CNAMEd custom domains can't be parsed for a tenant slug.
-        // Return None so the caller falls back to ``<tenant>`` in
-        // the dashboard hint.
-        assert_eq!(extract_auth0_tenant_from_domain("login.example.com"), None);
-        assert_eq!(extract_auth0_tenant_from_domain(""), None);
-    }
-
-    #[test]
     fn auth0_tenant_normalises_whitespace_and_case() {
+        // Re-pointed from the removed `extract_auth0_tenant_from_domain`
+        // wrapper onto the live function.  This is the ONLY coverage of
+        // the domain-side `.trim().trim_end_matches('/').to_lowercase()`
+        // -- `build_auth0_dashboard_url_trims_whitespace_in_client_id`
+        // trims the client_id, not the domain.  Deleting it with the
+        // wrapper would have silently dropped that case.
         assert_eq!(
-            extract_auth0_tenant_from_domain("  ACME.AUTH0.COM  "),
-            Some("acme".to_string())
+            extract_auth0_tenant_and_region("  ACME.AUTH0.COM  "),
+            Some(("acme".to_string(), None))
         );
         assert_eq!(
-            extract_auth0_tenant_from_domain("acme.auth0.com/"),
-            Some("acme".to_string())
+            extract_auth0_tenant_and_region("acme.auth0.com/"),
+            Some(("acme".to_string(), None))
         );
     }
 
