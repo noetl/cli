@@ -43,9 +43,9 @@ use async_trait::async_trait;
 
 /// One command the worker will dispatch to a tool.
 ///
-/// The shape mirrors the Python-side `noetl.command` row + envelope
-/// + render-context map.  Keep field naming aligned with the wire
-/// format so JSON serde round-trips both directions.
+/// The shape mirrors the Python-side `noetl.command` row, plus the
+/// envelope and render-context map.  Keep field naming aligned with
+/// the wire format so JSON serde round-trips both directions.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Command {
     /// Stable identifier for this command.  Worker uses the

@@ -14,8 +14,13 @@
 # Deliberately NOT here:
 #   * `cargo fmt --check` — these crates are formatted with rustfmt 1.9.0 and a
 #     different version reformats large parts of the tree.
-#   * `-D warnings` — pre-existing clippy warnings would make this start red for
-#     reasons no individual PR caused.  Clippy runs and stays visible.
+#
+# `-D warnings` IS here as of noetl/ai-meta#378.  It was deliberately omitted when
+# this workflow was written, because 39 pre-existing lints would have made it
+# start red for reasons no individual PR caused.  33 of those are now fixed and
+# two more are covered by a raised threshold in clippy.toml, leaving the two
+# exceptions below.  The gate starts green and a new lint is the only thing that
+# can turn it red.
 name: test
 
 on:
@@ -77,5 +82,29 @@ jobs:
       - name: test
         run: cargo test --workspace --all-targets --locked
 
-      - name: clippy (visible, non-gating)
-        run: cargo clippy --workspace --all-targets --locked || true
+      # Gating since noetl/ai-meta#378, proven to fail on a planted lint before
+      # this form was committed -- a lint gate never seen to go red is
+      # indistinguishable from one that cannot.
+      #
+      # The two -A entries below are the only exceptions, and each one states
+      # why it cannot simply be fixed.  An unexplained -A is how a gate quietly
+      # stops gating; if one appears here without a reason, that is the bug.
+      # Both are tracked on noetl/ai-meta#378.
+      #
+      #   large_enum_variant -- EhdbQueryCommand (src/lib.rs:592), Tool
+      #     (executor/src/playbook.rs:393) and ToolSpecDoc (:1149) are clap
+      #     Subcommand and serde tagged/untagged derive enums.  The suggested
+      #     fix is boxing the large variants, but Tool is also derived under
+      #     the json-schema feature that GENERATES the published DSL schema,
+      #     so boxing would change that schema's output.  That is a downstream
+      #     contract change, not a local cleanup.
+      #
+      #   result_large_err -- the large Err is tonic::Status, an upstream type
+      #     we do not control ("try reducing the size of tonic::Status"), and
+      #     the only site is a test helper in arrow-flight-client/src/tests.rs.
+      #
+      # clippy.toml raises too-many-arguments-threshold to 8 for the two 8-arg
+      # functions in src/lib.rs.  That is deliberately a threshold and not an
+      # -A: a function growing to 9 arguments still fails (verified).
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::large_enum_variant -A clippy::result_large_err

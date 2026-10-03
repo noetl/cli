@@ -2014,7 +2014,7 @@ mod tests {
         let map: HashMap<String, String> = updates.into_iter().collect();
         assert_eq!(map.get("auth.token"), Some(&"tok-123".to_string()));
         assert_eq!(map.get("auth.provider"), Some(&"gcp".to_string()));
-        assert!(map.get("auth.project").is_none());
+        assert!(!map.contains_key("auth.project"));
     }
 
     #[test]
@@ -2033,7 +2033,7 @@ mod tests {
     fn auth_context_updates_skips_empty_project() {
         let updates = auth_context_updates("gcp", "t", Some(""));
         let map: HashMap<String, String> = updates.into_iter().collect();
-        assert!(map.get("auth.project").is_none());
+        assert!(!map.contains_key("auth.project"));
     }
 
     #[test]

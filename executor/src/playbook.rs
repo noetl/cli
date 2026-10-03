@@ -301,10 +301,10 @@ impl NextFormat {
             }
             serde_yaml::Value::Mapping(map) => {
                 // V10 router format: { spec: { mode: ... }, arcs: [...] }
-                let spec = map.get(&serde_yaml::Value::String("spec".to_string())).and_then(|v| {
+                let spec = map.get(serde_yaml::Value::String("spec".to_string())).and_then(|v| {
                     if let serde_yaml::Value::Mapping(spec_map) = v {
                         let mode = spec_map
-                            .get(&serde_yaml::Value::String("mode".to_string()))
+                            .get(serde_yaml::Value::String("mode".to_string()))
                             .and_then(|m| m.as_str().map(|s| s.to_string()));
                         Some(NextRouterSpec { mode })
                     } else {
@@ -312,20 +312,20 @@ impl NextFormat {
                     }
                 });
 
-                let arcs = map.get(&serde_yaml::Value::String("arcs".to_string())).and_then(|v| {
+                let arcs = map.get(serde_yaml::Value::String("arcs".to_string())).and_then(|v| {
                     if let serde_yaml::Value::Sequence(arcs_arr) = v {
                         let arcs: Vec<NextArc> = arcs_arr
                             .iter()
                             .filter_map(|arc_val| {
                                 if let serde_yaml::Value::Mapping(arc_map) = arc_val {
                                     let step = arc_map
-                                        .get(&serde_yaml::Value::String("step".to_string()))
+                                        .get(serde_yaml::Value::String("step".to_string()))
                                         .and_then(|s| s.as_str().map(|s| s.to_string()))?;
                                     let when_condition = arc_map
-                                        .get(&serde_yaml::Value::String("when".to_string()))
+                                        .get(serde_yaml::Value::String("when".to_string()))
                                         .and_then(|w| w.as_str().map(|s| s.to_string()));
                                     let args = arc_map
-                                        .get(&serde_yaml::Value::String("args".to_string()))
+                                        .get(serde_yaml::Value::String("args".to_string()))
                                         .and_then(|a| serde_yaml::from_value(a.clone()).ok());
                                     Some(NextArc {
                                         step,

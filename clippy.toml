@@ -1,0 +1,5 @@
+# Two functions in src/lib.rs take 8 arguments; clippy's default ceiling is 7.
+# Raising the threshold to 8 rather than allowing the lint outright keeps it
+# live: a function growing to 9 arguments still fails the gate.  See
+# noetl/ai-meta#378.
+too-many-arguments-threshold = 8
