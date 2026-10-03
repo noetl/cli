@@ -6665,7 +6665,14 @@ impl App {
     }
 }
 
-async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
+// ratatui 0.30 gave `Backend` an associated `Error` type (it was `std::io::Error`
+// before), so `terminal.draw(..)?` into an anyhow::Result needs the error to be
+// Send + Sync + 'static for the From conversion.  The bound is on the generic
+// parameter, so concrete backends (CrosstermBackend over Stdout) satisfy it.
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()>
+where
+    <B as Backend>::Error: Send + Sync + 'static,
+{
     app.update_playbooks().await.ok();
     let tick_rate = Duration::from_millis(250);
     let mut last_tick = Instant::now();
@@ -6700,7 +6707,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)].as_ref())
-        .split(f.size());
+        .split(f.area());
 
     let header =
         Paragraph::new("NoETL Control (noetl) - Playbooks").block(Block::default().borders(Borders::ALL).title("Info"));
