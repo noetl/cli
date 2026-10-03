@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.0.2](https://github.com/noetl/cli/compare/v5.0.1...v5.0.2) (2026-10-03)
+
+### Bug Fixes
+
+* **executor:** bump 0.10.0 -> 0.10.1 for the lint fixes in this PR ([d6ea04c](https://github.com/noetl/cli/commit/d6ea04c0f93eff92f6ea037e55ad9f11a0b6b10c)), closes [noetl/ai-meta#331](https://github.com/noetl/ai-meta/issues/331) [noetl/ai-meta#331](https://github.com/noetl/ai-meta/issues/331) [noetl/ai-meta#378](https://github.com/noetl/ai-meta/issues/378)
+
 ## [5.0.1](https://github.com/noetl/cli/compare/v5.0.0...v5.0.1) (2026-10-03)
 
 ### Bug Fixes
