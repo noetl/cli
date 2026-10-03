@@ -121,8 +121,8 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 base64 = "0.22"
 anyhow = "1.0"
-ratatui = "0.26"
-crossterm = "0.27"
+ratatui = "0.30"
+crossterm = "0.29"
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 tracing = "0.1"
@@ -135,7 +135,10 @@ duckdb = { version = "1.0", features = ["bundled"], optional = true }
 shellexpand = "3.1"
 regex = "1.10"
 rhai = { version = "1.18", features = ["sync"] }
-rpassword = "3"
+# 7.5.0 is the patched line for GHSA-2p6r-x3vv-xqm2 (noetl/ai-meta#385); 3.x is
+# vulnerable.  One call site: rpassword::read_password() in src/lib.rs, same name and
+# signature in 7.x.
+rpassword = "7"
 rand = "0.8"
 sha2 = "0.10"
 url = "2.5"
