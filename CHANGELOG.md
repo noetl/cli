@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.0.3](https://github.com/noetl/cli/compare/v5.0.2...v5.0.3) (2026-10-04)
+
+### Bug Fixes
+
+* **apt:** build and index arm64, index every version, and stop Release checksumming itself ([d2bffb3](https://github.com/noetl/cli/commit/d2bffb3cf594f6fc48af5751c1706148a836ec92)), closes [noetl/ai-meta#390](https://github.com/noetl/ai-meta/issues/390) [noetl/ai-meta#390](https://github.com/noetl/ai-meta/issues/390)
+
 ## [5.0.2](https://github.com/noetl/cli/compare/v5.0.1...v5.0.2) (2026-10-03)
 
 ### Bug Fixes
