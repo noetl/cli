@@ -344,8 +344,23 @@ jobs:
           path: dist/*.tar.gz
 
   build-deb:
-    runs-on: ubuntu-latest
+    # Both Debian architectures, each built natively on its own runner.
+    #
+    # arm64 was added for noetl/ai-meta#390: `pool/` already held arm64 .debs
+    # (newest 2.8.7) while `dists/` carried only `binary-amd64`, so every arm64
+    # user got nothing from the repository and the stale files looked like
+    # coverage.  The aarch64 Linux binary was ALREADY built every release by
+    # `build-release-assets`; only the packaging and the index were
+    # amd64-only, so publishing a current arm64 .deb costs one matrix entry.
+    runs-on: ${{ matrix.os }}
     needs: verify-version
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            deb_arch: amd64
+          - os: ubuntu-24.04-arm
+            deb_arch: arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -354,12 +369,13 @@ jobs:
         # amalgamation).  Distributed binaries keep it: only dev/default
         # builds and the PyO3 wheel matrix opt out.
         run: cargo build --release --bins --features duckdb-integration
-      - name: Build deb package (amd64)
+      - name: Build deb package (${{ matrix.deb_arch }})
         shell: bash
         run: |
           set -euo pipefail
           VERSION="${{ needs.verify-version.outputs.version }}"
-          PKG_ROOT="dist/noetl_${VERSION}-1_amd64"
+          ARCH="${{ matrix.deb_arch }}"
+          PKG_ROOT="dist/noetl_${VERSION}-1_${ARCH}"
           mkdir -p "${PKG_ROOT}/DEBIAN" "${PKG_ROOT}/usr/bin"
           cp target/release/noetl "${PKG_ROOT}/usr/bin/noetl"
           cp target/release/ntl "${PKG_ROOT}/usr/bin/ntl"
@@ -368,14 +384,14 @@ jobs:
           Version: ${VERSION}-1
           Section: utils
           Priority: optional
-          Architecture: amd64
+          Architecture: ${ARCH}
           Maintainer: NoETL <support@noetl.io>
           Description: NoETL workflow automation CLI
           EOF
           dpkg-deb --build "${PKG_ROOT}"
       - uses: actions/upload-artifact@v4
         with:
-          name: deb-amd64
+          name: deb-${{ matrix.deb_arch }}
           path: dist/*.deb
 
   github-release:
@@ -531,10 +547,13 @@ jobs:
           HTTP_CODE="$(printf '%s' "${PROBE_OUT}" | grep -oE 'HTTP [0-9]{3}' | head -1 || true)"
           echo "::error title=APT publish token unusable::APT_REPO_PUSH_TOKEN is set but cannot access noetl/apt (gh exit ${PROBE_STATUS}, ${HTTP_CODE:-status unknown}). The token is likely expired, revoked, or not granted access to the repo. Regenerate it and update the org secret, then re-run this release. gh reported: ${PROBE_OUT}"
           exit 1
+      # Every deb-* artifact, not just amd64 — `merge-multiple` flattens them
+      # into one directory so the scan below sees both architectures.
       - uses: actions/download-artifact@v4
         if: ${{ steps.apt_token.outputs.usable == 'true' }}
         with:
-          name: deb-amd64
+          pattern: deb-*
+          merge-multiple: true
           path: dist
       - name: Install apt tooling
         if: ${{ steps.apt_token.outputs.usable == 'true' }}
@@ -561,13 +580,68 @@ jobs:
           DISTS="jammy noble"
           mkdir -p pool/main
           cp ../dist/*.deb pool/main/
+
+          # Architectures are DISCOVERED from the pool, not listed.  An
+          # enumerated arch list is a representation that drifts the moment a
+          # new one is published, and partial index coverage raises no error at
+          # all -- which is exactly how arm64 stayed unindexed while arm64
+          # .debs sat in the pool (noetl/ai-meta#390).
+          # `sed -n ... p` so ONLY well-formed names contribute.  A plain
+          # `s///` passes non-matching lines through unchanged, which turns a
+          # stray file like `pool/main/not-a-package.deb` into an
+          # "architecture" named after its own path -- verified in a sandbox
+          # against the real pool contents.
+          # `find`, not a glob: with `set -o pipefail` an unmatched glob makes
+          # the whole assignment fail before the guard below can report it.
+          ARCHES="$(find pool/main -maxdepth 1 -name '*.deb' \
+            | sed -nE 's/.*_([a-z0-9]+)\.deb$/\1/p' \
+            | sort -u | tr '\n' ' ')"
+          echo "architectures found in pool: ${ARCHES}"
+          if [[ -z "${ARCHES// /}" ]]; then
+            echo "::error title=No .deb architectures found::pool/main has no .deb files; refusing to publish an index built from nothing."
+            exit 1
+          fi
+
           for DIST in ${DISTS}; do
-            mkdir -p "dists/${DIST}/main/binary-amd64"
-            dpkg-scanpackages pool/main /dev/null \
-              > "dists/${DIST}/main/binary-amd64/Packages"
-            gzip -9c "dists/${DIST}/main/binary-amd64/Packages" \
-              > "dists/${DIST}/main/binary-amd64/Packages.gz"
-            apt-ftparchive release "dists/${DIST}" > "dists/${DIST}/Release"
+            # Rebuild the suite from scratch so a retired architecture cannot
+            # leave a stale index behind.
+            rm -rf "dists/${DIST}/main"
+            for ARCH in ${ARCHES}; do
+              DEST="dists/${DIST}/main/binary-${ARCH}"
+              mkdir -p "${DEST}"
+              # --arch: without it every .deb lands in ONE index regardless of
+              #   architecture, so an arm64 upload could be served to amd64.
+              # --multiversion: index every version, not only the newest, so
+              #   `apt install noetl=<older>` resolves.  Without it 22 of 23
+              #   .debs in the pool were listed nowhere (#390).
+              dpkg-scanpackages --multiversion --arch "${ARCH}" pool/main /dev/null \
+                > "${DEST}/Packages"
+              gzip -9c "${DEST}/Packages" > "${DEST}/Packages.gz"
+              cat > "${DEST}/Release" <<EOF
+          Archive: ${DIST}
+          Component: main
+          Origin: NoETL
+          Label: NoETL
+          Architecture: ${ARCH}
+          EOF
+            done
+
+            # `apt-ftparchive release D > D/Release` writes its output INTO the
+            # directory it is scanning, so the old Release is listed in its own
+            # checksum table at whatever size it happened to be -- an entry that
+            # can never be correct (#390).  Remove it first, build to a temp
+            # path, then move it in.
+            rm -f "dists/${DIST}/Release"
+            apt-ftparchive \
+              -o "APT::FTPArchive::Release::Origin=NoETL" \
+              -o "APT::FTPArchive::Release::Label=NoETL APT Repository" \
+              -o "APT::FTPArchive::Release::Suite=${DIST}" \
+              -o "APT::FTPArchive::Release::Codename=${DIST}" \
+              -o "APT::FTPArchive::Release::Architectures=${ARCHES% }" \
+              -o "APT::FTPArchive::Release::Components=main" \
+              -o "APT::FTPArchive::Release::Description=NoETL APT Repository" \
+              release "dists/${DIST}" > "${RUNNER_TEMP}/Release.${DIST}"
+            mv "${RUNNER_TEMP}/Release.${DIST}" "dists/${DIST}/Release"
           done
       - name: Commit and push
         if: ${{ steps.apt_token.outputs.usable == 'true' }}
