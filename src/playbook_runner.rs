@@ -484,7 +484,7 @@ impl PlaybookRunner {
                         let result = self.evaluate_rhai_condition(rhai, context)?;
                         (
                             result,
-                            format!("rhai: {}...", &rhai.chars().take(40).collect::<String>()),
+                            format!("rhai: {}...", rhai.chars().take(40).collect::<String>()),
                         )
                     }
                     WhenCondition::Simple { when } => {
