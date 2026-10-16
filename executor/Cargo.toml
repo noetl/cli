@@ -1,5 +1,9 @@
 [package]
 name = "noetl-executor"
+# 0.11.0 — `kind: agent` (noetl/cli#95).  Adds the `Tool::Agent` variant to the
+# public, non-#[non_exhaustive] `playbook::Tool` enum, which breaks exhaustive
+# matches downstream, so a 0.x MINOR; also adds `tools_bridge::{start_agent_session,
+# local_credential_env_var}` and requires noetl-tools 4.1 (AgentSession).
 # 0.10.0 — noetl-tools 4.x (noetl/ai-meta#330).  `ToolResult` is now
 # `#[non_exhaustive]`, so this crate's `tools_bridge` can no longer build one
 # with a struct literal.  The dependency's MAJOR moved, which is breaking for
@@ -43,7 +47,7 @@ name = "noetl-executor"
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.10.1"
+version = "0.11.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
@@ -109,7 +113,7 @@ rhai = { version = "1.18", features = ["sync"] }
 # Subsequent sub-PRs (PR-2c-2 onwards per Strategy B) replace one
 # inline tool implementation in playbook_runner.rs at a time so
 # semantic differences surface incrementally instead of all at once.
-noetl-tools = "4"
+noetl-tools = "4.1"
 
 # GCS uploads in `tools_bridge::gcs_upload` (R-3 GCS sink migration,
 # noetl/ai-meta#31).  The `gcp` feature pulls in

@@ -63,7 +63,7 @@ use noetl_tools::auth::GcpAuth;
 use noetl_tools::context::ExecutionContext as ToolsExecutionContext;
 use noetl_tools::registry::{AuthConfig as ToolsAuthConfig, Tool as ToolsRegistryTool, ToolConfig};
 use noetl_tools::result::{ToolResult, ToolStatus};
-use noetl_tools::tools::{DuckdbTool, HttpTool, ProviderTool, RhaiTool, ShellTool};
+use noetl_tools::tools::{AgentSession, DuckdbTool, HttpTool, ProviderTool, RhaiTool, ShellTool};
 use tracing::{info_span, Instrument};
 
 use crate::playbook::{AuthConfig as CliAuthConfig, CmdsList, SinkFormat, Tool};
@@ -400,6 +400,61 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
                 cfg.insert("guard".into(), yaml_to_json(g));
             }
             ("provider", serde_json::Value::Object(cfg))
+        }
+        Tool::Agent {
+            framework,
+            model,
+            prompt,
+            system,
+            max_turns,
+            max_tokens,
+            temperature,
+            endpoint,
+            tools,
+            // Mapped to ToolConfig.auth by `start_agent_session`.
+            auth: _,
+            claude_bin,
+            allowed_tools,
+            mcp_config,
+            workdir,
+        } => {
+            // Optional fields are omitted when absent so the noetl-tools
+            // AgentConfig serde defaults (max_turns=8, max_tokens=4096) apply.
+            let mut cfg = serde_json::Map::new();
+            cfg.insert("framework".into(), serde_json::json!(framework));
+            cfg.insert("model".into(), serde_json::json!(model));
+            cfg.insert("prompt".into(), serde_json::json!(prompt));
+            if let Some(s) = system {
+                cfg.insert("system".into(), serde_json::json!(s));
+            }
+            if let Some(n) = max_turns {
+                cfg.insert("max_turns".into(), serde_json::json!(n));
+            }
+            if let Some(n) = max_tokens {
+                cfg.insert("max_tokens".into(), serde_json::json!(n));
+            }
+            if let Some(t) = temperature {
+                cfg.insert("temperature".into(), serde_json::json!(t));
+            }
+            if let Some(e) = endpoint {
+                cfg.insert("endpoint".into(), serde_json::json!(e));
+            }
+            if let Some(t) = tools {
+                cfg.insert("tools".into(), yaml_to_json(t));
+            }
+            if let Some(b) = claude_bin {
+                cfg.insert("claude_bin".into(), serde_json::json!(b));
+            }
+            if let Some(t) = allowed_tools {
+                cfg.insert("allowed_tools".into(), serde_json::json!(t));
+            }
+            if let Some(m) = mcp_config {
+                cfg.insert("mcp_config".into(), serde_json::json!(m));
+            }
+            if let Some(w) = workdir {
+                cfg.insert("workdir".into(), serde_json::json!(w));
+            }
+            ("agent", serde_json::Value::Object(cfg))
         }
         Tool::Unsupported => ("unsupported", serde_json::json!({})),
     };
@@ -1286,10 +1341,79 @@ pub async fn dispatch_via_registry(
                 .map_err(|e| anyhow::anyhow!("provider dispatch failed: {}", e))?;
             from_tools_result(result)
         }
+        Tool::Agent { .. } => {
+            // The agent loop runs tools between model turns, and in the CLI
+            // those tools are sub-playbooks — so the runner drives the loop
+            // itself via `start_agent_session`.  Routing an agent step here
+            // would answer its tool calls with nothing; fail loudly instead.
+            anyhow::bail!("agent steps are driven by the runner via start_agent_session")
+        }
         Tool::Unsupported => {
             anyhow::bail!("unsupported tool kind");
         }
     }
+}
+
+/// Environment variable that backs keychain alias `alias` in the CLI local
+/// runtime: `NOETL_CREDENTIAL_` + the alias upper-cased, with every
+/// non-alphanumeric character replaced by `_` (`anthropic` →
+/// `NOETL_CREDENTIAL_ANTHROPIC`, `gmail-work` → `NOETL_CREDENTIAL_GMAIL_WORK`).
+///
+/// The playbook still names the alias explicitly; this is only where local
+/// mode looks it up, because local mode has no server-side keychain.
+pub fn local_credential_env_var(alias: &str) -> String {
+    let suffix: String = alias
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("NOETL_CREDENTIAL_{}", suffix)
+}
+
+/// Start a noetl-tools [`AgentSession`] for a (template-rendered)
+/// `Tool::Agent` step in the CLI local runtime.
+///
+/// The step's `auth:` block is required.  Its `credential:` alias resolves
+/// from [`local_credential_env_var`]; an alias with no value set is an error
+/// naming the variable to set — there is no other fallback.
+pub async fn start_agent_session(tool: &Tool, bridge: &BridgeContext<'_>) -> Result<AgentSession> {
+    let auth = match tool {
+        Tool::Agent { auth, .. } => auth.as_ref(),
+        _ => anyhow::bail!("start_agent_session called with a non-agent tool"),
+    };
+    // Whether `auth:` is required depends on the framework (`claude` needs it,
+    // `claude-code` refuses it); the noetl-tools AgentSession enforces that.
+    let auth = auth.map(|a| yaml_auth_to_tools(a, "agent")).transpose()?;
+
+    let mut ctx = to_tools_context(bridge);
+    if let Some(alias) = auth.as_ref().and_then(|a| a.credential.as_deref()) {
+        let var = local_credential_env_var(alias);
+        // An empty value counts as unset: `VAR="$(cat missing-file)"` yields
+        // an empty string, which would otherwise be sent as a blank key.
+        let value = std::env::var(&var)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "credential alias `{}` is not set or empty; local mode reads it from ${}",
+                    alias,
+                    var
+                )
+            })?;
+        ctx.set_secret(alias, value);
+    }
+
+    let mut config = to_tools_config(tool);
+    config.auth = auth;
+    AgentSession::start(&config, &ctx)
+        .await
+        .map_err(|e| anyhow::anyhow!("agent start failed: {}", e))
 }
 
 /// Convert a `serde_yaml::Value` to a `serde_json::Value` for the noetl-tools
@@ -1306,11 +1430,18 @@ fn yaml_to_json(v: &serde_yaml::Value) -> serde_json::Value {
 /// convert-through-JSON.  A malformed block is reported rather than silently
 /// dropped — an apply-mode step with a broken `auth:` should fail loudly.
 fn provider_auth_to_tools(auth: &serde_yaml::Value) -> Result<ToolsAuthConfig> {
+    yaml_auth_to_tools(auth, "provider")
+}
+
+/// Map a step's raw `auth:` block onto the noetl-tools `AuthConfig`.  `what`
+/// names the tool kind in the error.
+fn yaml_auth_to_tools(auth: &serde_yaml::Value, what: &str) -> Result<ToolsAuthConfig> {
     let json = yaml_to_json(auth);
     serde_json::from_value::<ToolsAuthConfig>(json).map_err(|e| {
         anyhow::anyhow!(
-            "invalid provider `auth:` block (expected e.g. `type: gcp_adc`, \
-             `credential: <alias>`, `scopes: [...]`): {}",
+            "invalid {} `auth:` block (expected e.g. `type: gcp_adc` or `type: api_key`, \
+             `credential: <alias>`): {}",
+            what,
             e
         )
     })
@@ -1427,6 +1558,101 @@ mod tests {
         // A malformed block is reported, not silently dropped.
         let bad = serde_yaml::to_value(serde_json::json!({ "type": "not_a_real_type" })).unwrap();
         assert!(provider_auth_to_tools(&bad).is_err());
+    }
+
+    fn agent_tool(auth: Option<serde_json::Value>) -> Tool {
+        Tool::Agent {
+            framework: "claude".into(),
+            model: "claude-test".into(),
+            prompt: "hi".into(),
+            system: Some("be brief".into()),
+            max_turns: Some(3),
+            max_tokens: None,
+            temperature: None,
+            endpoint: None,
+            tools: Some(
+                serde_yaml::to_value(serde_json::json!([
+                    { "name": "list_unread", "playbook": "gmail/list.yaml" }
+                ]))
+                .unwrap(),
+            ),
+            auth: auth.map(|a| serde_yaml::to_value(a).unwrap()),
+            claude_bin: None,
+            allowed_tools: None,
+            mcp_config: None,
+            workdir: None,
+        }
+    }
+
+    #[test]
+    fn to_tools_config_agent_omits_absent_fields() {
+        let cfg = to_tools_config(&agent_tool(None));
+        assert_eq!(cfg.kind, "agent");
+        assert_eq!(cfg.config["framework"], "claude");
+        assert_eq!(cfg.config["system"], "be brief");
+        assert_eq!(cfg.config["max_turns"], 3);
+        assert!(cfg.config.get("max_tokens").is_none());
+        assert_eq!(cfg.config["tools"][0]["playbook"], "gmail/list.yaml");
+        assert!(cfg.auth.is_none(), "auth is mapped by start_agent_session");
+    }
+
+    #[test]
+    fn local_credential_env_var_normalises_alias() {
+        assert_eq!(local_credential_env_var("anthropic"), "NOETL_CREDENTIAL_ANTHROPIC");
+        assert_eq!(
+            local_credential_env_var("gmail-work.2"),
+            "NOETL_CREDENTIAL_GMAIL_WORK_2"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_agent_session_requires_auth_block() {
+        let vars = empty_vars();
+        let err = start_agent_session(&agent_tool(None), &bridge_ctx(&vars))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auth:"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn start_agent_session_names_the_missing_env_var() {
+        let vars = empty_vars();
+        let tool = agent_tool(Some(serde_json::json!({
+            "type": "api_key",
+            "credential": "agent-test-unset-alias",
+        })));
+        let err = start_agent_session(&tool, &bridge_ctx(&vars))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NOETL_CREDENTIAL_AGENT_TEST_UNSET_ALIAS"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn start_agent_session_treats_empty_credential_as_unset() {
+        // Only this test touches this variable.
+        std::env::set_var("NOETL_CREDENTIAL_AGENT_TEST_EMPTY_ALIAS", "  \n");
+        let vars = empty_vars();
+        let tool = agent_tool(Some(serde_json::json!({
+            "type": "api_key",
+            "credential": "agent-test-empty-alias",
+        })));
+        let err = start_agent_session(&tool, &bridge_ctx(&vars))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not set or empty"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_through_registry_is_refused() {
+        let vars = empty_vars();
+        let err = dispatch_via_registry(&agent_tool(None), &bridge_ctx(&vars))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("start_agent_session"), "{err}");
     }
 
     #[tokio::test]

@@ -1,0 +1,41 @@
+# Local `kind: agent` example: a Claude tool-use loop whose tools are playbooks.
+#
+#   export NOETL_CREDENTIAL_ANTHROPIC=...     # local backing for the `anthropic` alias
+#   noetl run examples/agent/inbox_triage.yaml --runtime local --set account=work
+#
+# Each tool the model calls runs as a sub-playbook (the entry's `playbook:`),
+# with the model's input object exposed as `{{ workload.<key> }}`.
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: inbox_triage_agent
+executor:
+  profile: local
+  requires:
+    tools: [agent]
+workload:
+  account: work
+workflow:
+  - step: start
+    next:
+      - step: triage
+  - step: triage
+    tool:
+      kind: agent
+      framework: claude
+      model: claude-sonnet-5-5
+      system: You triage email. Be brief and list only messages that need a reply.
+      prompt: Triage the unread mail in the {{ workload.account }} account.
+      max_turns: 6
+      auth:
+        type: api_key
+        credential: anthropic
+      tools:
+        - name: list_unread
+          description: List unread messages (sender and subject) for one mail account.
+          input_schema:
+            type: object
+            properties:
+              account: { type: string, description: Account name }
+            required: [account]
+          playbook: tools/list_unread.yaml

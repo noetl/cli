@@ -59,6 +59,7 @@ impl RuntimeCapabilities {
                 "playbook".to_string(),
                 "auth".to_string(),
                 "sink".to_string(),
+                "agent".to_string(),
             ],
             features: vec![
                 "case_v1".to_string(),
@@ -502,6 +503,48 @@ pub enum Tool {
         #[serde(default)]
         #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         auth: Option<serde_yaml::Value>,
+    },
+    /// AI agent step (`kind: agent`) — a native Claude tool-use loop run by
+    /// the noetl-tools `AgentSession`.  The CLI drives the loop turn by turn
+    /// and runs each tool the model calls as a sub-playbook (the tool entry's
+    /// `playbook:` binding), so agent tools are ordinary playbooks.
+    Agent {
+        /// Agent framework.  Only `claude` is implemented.
+        framework: String,
+        model: String,
+        prompt: String,
+        #[serde(default)]
+        system: Option<String>,
+        #[serde(default)]
+        max_turns: Option<u32>,
+        #[serde(default)]
+        max_tokens: Option<u32>,
+        #[serde(default)]
+        temperature: Option<f64>,
+        /// API base URL override — tests / API-compatible gateways only.
+        #[serde(default)]
+        endpoint: Option<String>,
+        /// Tool list: `{name, description, input_schema, playbook}` entries.
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        tools: Option<serde_yaml::Value>,
+        /// `auth:` block (`type: api_key`, `credential: <alias>`) — required
+        /// for `framework: claude`, refused for `framework: claude-code`.
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        auth: Option<serde_yaml::Value>,
+        /// `claude-code` only: path to the `claude` CLI (default: `claude` on PATH).
+        #[serde(default)]
+        claude_bin: Option<String>,
+        /// `claude-code` only: tools Claude Code may use.
+        #[serde(default)]
+        allowed_tools: Option<Vec<String>>,
+        /// `claude-code` only: MCP server config files.
+        #[serde(default)]
+        mcp_config: Option<Vec<String>>,
+        /// `claude-code` only: working directory for the CLI.
+        #[serde(default)]
+        workdir: Option<String>,
     },
     #[serde(other)]
     Unsupported,
