@@ -1308,12 +1308,183 @@ impl PlaybookRunner {
                 }
                 Ok(outcome.result)
             }
+            Tool::Agent {
+                framework,
+                model,
+                prompt,
+                system,
+                max_turns,
+                max_tokens,
+                temperature,
+                endpoint,
+                tools,
+                auth,
+                claude_bin,
+                allowed_tools,
+                mcp_config,
+                workdir,
+            } => {
+                // The runner drives the noetl-tools AgentSession turn by turn:
+                // each model turn is one async call, and every tool the model
+                // asks for runs here as a sub-playbook BETWEEN turns — outside
+                // any block_on, the same way `Tool::Playbook` recurses.
+                let rendered_tool = Tool::Agent {
+                    framework: self.render_template(framework, context)?,
+                    model: self.render_template(model, context)?,
+                    prompt: self.render_template(prompt, context)?,
+                    system: match system {
+                        Some(s) => Some(self.render_template(s, context)?),
+                        None => None,
+                    },
+                    max_turns: *max_turns,
+                    max_tokens: *max_tokens,
+                    temperature: *temperature,
+                    endpoint: match endpoint {
+                        Some(e) => Some(self.render_template(e, context)?),
+                        None => None,
+                    },
+                    tools: match tools {
+                        Some(t) => Some(self.render_yaml_value(t, context)?),
+                        None => None,
+                    },
+                    auth: match auth {
+                        Some(a) => Some(self.render_yaml_value(a, context)?),
+                        None => None,
+                    },
+                    claude_bin: match claude_bin {
+                        Some(b) => Some(self.render_template(b, context)?),
+                        None => None,
+                    },
+                    allowed_tools: allowed_tools.clone(),
+                    mcp_config: match mcp_config {
+                        Some(m) => Some(
+                            m.iter()
+                                .map(|p| self.render_template(p, context))
+                                .collect::<Result<Vec<_>>>()?,
+                        ),
+                        None => None,
+                    },
+                    workdir: match workdir {
+                        Some(w) => Some(self.render_template(w, context)?),
+                        None => None,
+                    },
+                };
+                let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
+                    execution_id: 0,
+                    step: "<cli-local>",
+                    variables: &context.variables,
+                    server_url: String::new(),
+                    worker_id: None,
+                    command_id: None,
+                };
+                let mut session = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(noetl_executor::tools_bridge::start_agent_session(
+                        &rendered_tool,
+                        &bridge_ctx,
+                    ))
+                })?;
+
+                if self.verbose {
+                    eprintln!("   🤖 Agent: {} ({} tools)", model, session.config().tools.len());
+                }
+
+                loop {
+                    let turn =
+                        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(session.next_turn()))
+                            .map_err(|e| anyhow::anyhow!("agent turn failed: {}", e))?;
+
+                    match turn {
+                        noetl_tools::tools::AgentTurn::Final(value) => {
+                            if self.verbose {
+                                eprintln!("   Agent finished after {} turn(s)", session.turns());
+                            }
+                            return Ok(Some(serde_json::to_string(&value)?));
+                        }
+                        noetl_tools::tools::AgentTurn::ToolCalls(calls) => {
+                            let outputs = calls
+                                .iter()
+                                .map(|call| self.run_agent_tool_call(&session, call, context))
+                                .collect();
+                            session.submit_tool_results(outputs);
+                        }
+                    }
+                }
+            }
             Tool::Unsupported => {
                 eprintln!("   Tool not supported in local execution mode");
-                eprintln!("   Supported tools: shell, http, playbook, duckdb, auth, sink, provider");
+                eprintln!("   Supported tools: shell, http, playbook, duckdb, auth, sink, provider, agent");
                 eprintln!("   For other tools (postgres, python, iterator, etc.), use distributed execution");
                 Ok(None)
             }
+        }
+    }
+
+    /// Answer one agent tool call by running the tool's `playbook:` binding as
+    /// a sub-playbook.
+    ///
+    /// The model's input object becomes the sub-playbook's `workload.*`
+    /// variables.  Those values are passed through verbatim and are NEVER
+    /// template-rendered: they are model output, which can carry text from
+    /// untrusted sources (an email body, a web page), and rendering it would
+    /// let that text evaluate expressions against this runner's variables.
+    /// They are also passed through [`defang_template_markers`], because the
+    /// sub-playbook's own renderer would otherwise re-expand them.
+    ///
+    /// Failures become `is_error` tool results for the model to react to,
+    /// rather than failing the step — the step fails only through the model
+    /// giving up or `max_turns`.
+    fn run_agent_tool_call(
+        &self,
+        session: &noetl_tools::tools::AgentSession,
+        call: &noetl_tools::tools::AgentToolCall,
+        context: &ExecutionContext,
+    ) -> noetl_tools::tools::AgentToolOutput {
+        let error = |message: String| noetl_tools::tools::AgentToolOutput {
+            tool_use_id: call.id.clone(),
+            content: message,
+            is_error: true,
+        };
+
+        let Some(spec) = session.tool_spec(&call.name) else {
+            return error(format!("unknown tool `{}`", call.name));
+        };
+        let Some(relative) = spec.binding.get("playbook").and_then(|p| p.as_str()) else {
+            return error(format!("tool `{}` has no `playbook:` binding", call.name));
+        };
+        let playbook_path = match self.resolve_playbook_path(relative) {
+            Ok(p) => p,
+            Err(e) => return error(format!("tool `{}`: {}", call.name, e)),
+        };
+
+        let mut sub_vars = context.variables.clone();
+        if let Some(input) = call.input.as_object() {
+            for (key, value) in input {
+                let value = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                sub_vars.insert(format!("workload.{}", key), defang_template_markers(&value));
+            }
+        }
+
+        if self.verbose {
+            eprintln!("   🔧 Agent tool `{}` → {}", call.name, playbook_path.display());
+        }
+
+        let sub_runner = PlaybookRunner::new(playbook_path)
+            .with_variables(sub_vars)
+            .with_verbose(self.verbose)
+            .with_quiet(self.quiet);
+        match sub_runner.run() {
+            Ok(outcome) if outcome.status == "ok" => noetl_tools::tools::AgentToolOutput {
+                tool_use_id: call.id.clone(),
+                content: outcome
+                    .final_result
+                    .unwrap_or_else(|| serde_json::to_string(&outcome.step_results).unwrap_or_default()),
+                is_error: false,
+            },
+            Ok(outcome) => error(outcome.error.unwrap_or_else(|| format!("tool `{}` failed", call.name))),
+            Err(e) => error(format!("tool `{}` failed: {}", call.name, e)),
         }
     }
 
@@ -1502,6 +1673,18 @@ impl PlaybookRunner {
             .context("Failed to get playbook directory")?;
         Ok(base_dir.join(relative_path))
     }
+}
+
+/// Break `{{` in a value that came from model output so the sub-playbook's
+/// renderer cannot treat it as a template reference.
+///
+/// Needed because `noetl_executor::template::render_template` substitutes
+/// variables with successive `str::replace` passes: a value inserted by one
+/// pass is re-scanned by the later ones, so `{{ workload.secret }}` inside an
+/// email the model quotes back would be expanded.  `{{` becomes `{ {`, which
+/// no pass matches.  Remove once the renderer substitutes in a single pass.
+fn defang_template_markers(value: &str) -> String {
+    value.replace("{{", "{ {")
 }
 
 struct ExecutionContext {

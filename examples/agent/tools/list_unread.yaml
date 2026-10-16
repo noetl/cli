@@ -1,0 +1,20 @@
+# Agent tool for inbox_triage.yaml.  A stub that returns fixed messages so the
+# example runs without mail credentials; swap the shell step for `kind: http`
+# calls to the Gmail API to make it real.
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: list_unread
+workload:
+  account: ""
+workflow:
+  - step: start
+    next:
+      - step: list
+  - step: list
+    tool:
+      kind: shell
+      cmds:
+        - >-
+          echo '[{"account":"{{ workload.account }}","from":"ci@example.com","subject":"Build failed on main"},
+          {"account":"{{ workload.account }}","from":"news@example.com","subject":"Weekly digest"}]'

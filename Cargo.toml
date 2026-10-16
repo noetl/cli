@@ -142,3 +142,8 @@ rpassword = "7"
 rand = "0.8"
 sha2 = "0.10"
 url = "2.5"
+
+[dev-dependencies]
+# Mock Anthropic Messages API for the `kind: agent` end-to-end test
+# (tests/agent_local.rs).  Same major as noetl-tools uses for its tool tests.
+wiremock = "0.6"
