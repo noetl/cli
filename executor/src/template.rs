@@ -20,139 +20,143 @@ use std::collections::HashMap;
 /// references against the supplied variable + step-result maps.
 ///
 /// Supported filters: `lower`, `upper`, `trim`, `default`.
+///
+/// Substitution is a single left-to-right scan: a substituted value is
+/// never re-scanned, so `{{ ... }}` text inside a value (e.g. an email
+/// body or HTTP response) cannot pull in other variables.  Unknown
+/// tokens are left untouched.
 pub fn render_template(
     template: &str,
     variables: &HashMap<String, String>,
     step_results: &HashMap<String, String>,
 ) -> Result<String> {
-    let mut result = template.to_string();
+    Ok(render_tokens(template, variables, step_results, None))
+}
 
-    // First, handle templates with filters (e.g., {{ workload.var | lower }}).
-    let filter_regex =
-        regex::Regex::new(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\|\s*([a-zA-Z_]+)\s*\}\}").unwrap();
-    result = filter_regex
-        .replace_all(&result, |caps: &regex::Captures| {
-            let var_name = &caps[1];
-            let filter_name = &caps[2];
+/// Filter token: `{{ var | filter }}`.
+const FILTER_PATTERN: &str =
+    r"\{\{\s*(?P<fvar>[a-zA-Z_][a-zA-Z0-9_.]*)\s*\|\s*(?P<fname>[a-zA-Z_]+)\s*\}\}";
+/// Plain token: exactly `{{ key }}` (one space each side), matching the
+/// placeholders the previous `str::replace` passes looked for.
+const PLAIN_PATTERN: &str = r"\{\{ (?P<key>[^{}]*?) \}\}";
+/// Result token: `{{ result.path }}` with an optional filter.
+const RESULT_PATTERN: &str =
+    r"\{\{\s*result\.(?P<rpath>[a-zA-Z0-9_.\[\]]+)\s*(?:\|\s*(?P<rfilter>[a-zA-Z_]+(?:\([^)]*\))?))?\s*\}\}";
 
-            // Try to find the variable value.
-            let value = variables
-                .get(var_name)
-                .or_else(|| variables.get(&format!("workload.{}", var_name)))
-                .map(|s| s.as_str())
-                .unwrap_or("");
+/// Shared single-pass renderer.  `result_json` is `Some` when called
+/// from [`render_template_with_result`], which enables `{{ result.* }}`
+/// tokens (taking precedence over the other token kinds, as before).
+fn render_tokens(
+    template: &str,
+    variables: &HashMap<String, String>,
+    step_results: &HashMap<String, String>,
+    result_json: Option<Option<&serde_json::Value>>,
+) -> String {
+    let pattern = if result_json.is_some() {
+        format!("{}|{}|{}", RESULT_PATTERN, FILTER_PATTERN, PLAIN_PATTERN)
+    } else {
+        format!("{}|{}", FILTER_PATTERN, PLAIN_PATTERN)
+    };
+    let token_regex = regex::Regex::new(&pattern).unwrap();
 
-            // Apply the filter.
-            match filter_name {
-                "lower" => value.to_lowercase(),
-                "upper" => value.to_uppercase(),
-                "trim" => value.trim().to_string(),
-                "default" => {
-                    if value.is_empty() {
-                        "".to_string()
-                    } else {
-                        value.to_string()
-                    }
-                }
-                _ => value.to_string(),
+    let rendered = token_regex.replace_all(template, |caps: &regex::Captures| {
+        if let Some(path) = caps.name("rpath") {
+            let filter = caps.name("rfilter").map(|m| m.as_str());
+            return resolve_result(result_json.flatten(), path.as_str(), filter);
+        }
+        if let (Some(var), Some(filter)) = (caps.name("fvar"), caps.name("fname")) {
+            return resolve_filter(variables, var.as_str(), filter.as_str());
+        }
+        let key = &caps["key"];
+        resolve_plain(variables, step_results, key)
+            .map(str::to_string)
+            .unwrap_or_else(|| caps[0].to_string())
+    });
+
+    rendered.trim().to_string()
+}
+
+/// Resolve a `{{ var | filter }}` token.  Missing variables render as
+/// the empty string (after the `workload.<name>` fallback).
+fn resolve_filter(variables: &HashMap<String, String>, var_name: &str, filter_name: &str) -> String {
+    let value = variables
+        .get(var_name)
+        .or_else(|| variables.get(&format!("workload.{}", var_name)))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    match filter_name {
+        "lower" => value.to_lowercase(),
+        "upper" => value.to_uppercase(),
+        "trim" => value.trim().to_string(),
+        // `default` without an argument renders the value (empty if unset).
+        _ => value.to_string(),
+    }
+}
+
+/// Resolve a plain `{{ key }}` token with the same precedence as the
+/// previous replace passes: `workload.*`, `vars.*`, `<step>.result`,
+/// then a direct key lookup.  `None` leaves the token untouched.
+fn resolve_plain<'a>(
+    variables: &'a HashMap<String, String>,
+    step_results: &'a HashMap<String, String>,
+    key: &str,
+) -> Option<&'a str> {
+    if key.starts_with("workload.") || key.starts_with("vars.") {
+        if let Some(value) = variables.get(key) {
+            return Some(value);
+        }
+    }
+    if let Some(step_name) = key.strip_suffix(".result") {
+        if let Some(value) = step_results.get(step_name) {
+            return Some(value);
+        }
+    }
+    variables.get(key).map(|s| s.as_str())
+}
+
+/// Resolve a `{{ result.path | filter }}` token against the result JSON.
+fn resolve_result(result_json: Option<&serde_json::Value>, path: &str, filter: Option<&str>) -> String {
+    let Some(json) = result_json else {
+        return "".to_string();
+    };
+
+    // Navigate the JSON path.
+    let value = get_json_path(json, path);
+    let value_str = match &value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "".to_string(),
+        other => other.to_string(),
+    };
+
+    // Apply the default filter if present.
+    match filter {
+        Some(f) if (f == "default" || f.starts_with("default(")) && (value_str.is_empty() || value_str == "null") => {
+            // Extract default value from default('value') or default("").
+            if let Some(start) = f.find('(') {
+                let inner = &f[start + 1..f.len() - 1];
+                inner.trim_matches(|c| c == '\'' || c == '"').to_string()
+            } else {
+                "".to_string()
             }
-        })
-        .to_string();
-
-    // Handle workload.* variables.
-    for (key, value) in variables {
-        if key.starts_with("workload.") {
-            let placeholder = format!("{{{{ {} }}}}", key);
-            result = result.replace(&placeholder, value);
         }
+        _ => value_str,
     }
-
-    // Handle vars.* variables.
-    for (key, value) in variables {
-        if key.starts_with("vars.") {
-            let placeholder = format!("{{{{ {} }}}}", key);
-            result = result.replace(&placeholder, value);
-        }
-    }
-
-    // Handle step_name.result variables.
-    for (step_name, value) in step_results {
-        let placeholder = format!("{{{{ {}.result }}}}", step_name);
-        result = result.replace(&placeholder, value);
-    }
-
-    // Also support direct {{ variable }} lookups.
-    for (key, value) in variables {
-        let placeholder = format!("{{{{ {} }}}}", key);
-        result = result.replace(&placeholder, value);
-    }
-
-    Ok(result.trim().to_string())
 }
 
 /// Render a template that may reference `{{ result.path }}` against the
 /// supplied JSON result value (e.g. the previous step's HTTP response
-/// body), then apply the regular [`render_template`] pass for the
-/// rest of the references.
+/// body) along with the regular [`render_template`] references, in one
+/// pass so values from the result are never re-expanded.
 pub fn render_template_with_result(
     template: &str,
     variables: &HashMap<String, String>,
     step_results: &HashMap<String, String>,
     result_json: Option<&serde_json::Value>,
 ) -> Result<String> {
-    let mut output = template.to_string();
-
-    // Handle result.path expressions like {{ result.status }},
-    // {{ result.body.name }}.
-    let result_regex = regex::Regex::new(
-        r"\{\{\s*result\.([a-zA-Z0-9_.\[\]]+)\s*(?:\|\s*([a-zA-Z_]+(?:\([^)]*\))?))?\s*\}\}",
-    )
-    .unwrap();
-
-    output = result_regex
-        .replace_all(&output, |caps: &regex::Captures| {
-            let path = &caps[1];
-            let filter = caps.get(2).map(|m| m.as_str());
-
-            if let Some(json) = result_json {
-                // Navigate the JSON path.
-                let value = get_json_path(json, path);
-                let value_str = match &value {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    serde_json::Value::Null => "".to_string(),
-                    other => other.to_string(),
-                };
-
-                // Apply filter if present.
-                if let Some(f) = filter {
-                    if f == "default" || f.starts_with("default(") {
-                        if value_str.is_empty() || value_str == "null" {
-                            // Extract default value from default('value') or default("").
-                            if let Some(start) = f.find('(') {
-                                let inner = &f[start + 1..f.len() - 1];
-                                inner.trim_matches(|c| c == '\'' || c == '"').to_string()
-                            } else {
-                                "".to_string()
-                            }
-                        } else {
-                            value_str
-                        }
-                    } else {
-                        value_str
-                    }
-                } else {
-                    value_str
-                }
-            } else {
-                "".to_string()
-            }
-        })
-        .to_string();
-
-    // Then apply normal template rendering for other variables.
-    render_template(&output, variables, step_results)
+    Ok(render_tokens(template, variables, step_results, Some(result_json)))
 }
 
 /// Get a value from JSON using a path like `"status"`, `"body.name"`,
@@ -290,6 +294,62 @@ mod tests {
             render_template_with_result("name = {{ result.body.name }}", &variables, &step_results, Some(&json))
                 .unwrap();
         assert_eq!(result, "name = noetl");
+    }
+
+    #[test]
+    fn render_template_does_not_reexpand_substituted_values() {
+        // A substituted value must never be scanned for further `{{ }}`
+        // tokens; otherwise untrusted data could pull in other variables.
+        let variables = vars(&[
+            ("workload.a", "{{ workload.secret }}"),
+            ("workload.secret", "S"),
+            ("b", "{{ vars.c }}"),
+            ("vars.c", "C"),
+        ]);
+        let mut step_results = HashMap::new();
+        step_results.insert("fetch".to_string(), "{{ workload.secret }}".to_string());
+        for _ in 0..50 {
+            let result = render_template(
+                "x {{ workload.a }} {{ b }} {{ fetch.result }} {{ workload.a | upper }}",
+                &variables,
+                &step_results,
+            )
+            .unwrap();
+            assert_eq!(
+                result,
+                "x {{ workload.secret }} {{ vars.c }} {{ workload.secret }} {{ WORKLOAD.SECRET }}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_template_leaves_unknown_tokens_untouched() {
+        let variables = vars(&[("workload.a", "A")]);
+        let step_results = HashMap::new();
+        let result = render_template(
+            "{{ workload.a }} {{ missing }} {{workload.a}} {{ nope.result }} {{ bad}} {{ workload.a }}",
+            &variables,
+            &step_results,
+        )
+        .unwrap();
+        assert_eq!(result, "A {{ missing }} {{workload.a}} {{ nope.result }} {{ bad}} A");
+    }
+
+    #[test]
+    fn render_template_with_result_does_not_reexpand_json_values() {
+        let variables = vars(&[("workload.secret", "S"), ("workload.name", "n")]);
+        let step_results = HashMap::new();
+        let json = serde_json::json!({"body": "{{ workload.secret }}"});
+        for _ in 0..50 {
+            let result = render_template_with_result(
+                "{{ result.body }} {{ workload.name }}",
+                &variables,
+                &step_results,
+                Some(&json),
+            )
+            .unwrap();
+            assert_eq!(result, "{{ workload.secret }} n");
+        }
     }
 
     #[test]
