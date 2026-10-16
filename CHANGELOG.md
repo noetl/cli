@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.1.0](https://github.com/noetl/cli/compare/v5.0.3...v5.1.0) (2026-10-16)
+
+### Features
+
+* **agent:** run kind: agent steps in the local runtime ([9ee79bb](https://github.com/noetl/cli/commit/9ee79bbe3d04324685c4081ca9788cf54f1e3ebc))
+
+### Bug Fixes
+
+* **executor:** bump noetl-executor to 0.11.0 for kind: agent ([195f8ed](https://github.com/noetl/cli/commit/195f8edecce776256aa82e1831fc1891e69eb897))
+
 ## [5.0.3](https://github.com/noetl/cli/compare/v5.0.2...v5.0.3) (2026-10-04)
 
 ### Bug Fixes
