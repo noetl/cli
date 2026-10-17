@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.2.0](https://github.com/noetl/cli/compare/v5.1.0...v5.2.0) (2026-10-17)
+
+### Features
+
+* **credentials:** local credential store, http auth aliases, and Google OAuth ([dc3f6a1](https://github.com/noetl/cli/commit/dc3f6a1220fabb0ce65a032598e51a0962ebf8a7))
+
 ## [5.1.0](https://github.com/noetl/cli/compare/v5.0.3...v5.1.0) (2026-10-16)
 
 ### Features
