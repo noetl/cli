@@ -529,6 +529,63 @@ pub async fn resolve_auth_to_bearer(cfg: &CliAuthConfig) -> Result<String> {
     }
 }
 
+/// Resolve an `http` step's `auth:` block to the header it adds.
+///
+/// | `type` / `provider` | header | credential |
+/// |---|---|---|
+/// | `gcp` / `google` / `adc` | `Authorization: Bearer <ADC token>` | none (ambient ADC, as before) |
+/// | `bearer` | `Authorization: Bearer <value>` | required |
+/// | `api_key` | `<header, default X-API-Key>: <value>` | required |
+/// | `google_oauth` | `Authorization: Bearer <access token>` | required; a refresh-token document |
+///
+/// Credential aliases resolve through
+/// [`crate::local_credentials::resolve`].  A `google_oauth` document is
+/// refused as a `bearer` / `api_key` value, so a refresh token can never be
+/// sent verbatim to whatever host the step names.
+pub async fn resolve_http_auth_header(cfg: &CliAuthConfig) -> Result<(String, String)> {
+    let credential = || -> Result<&str> {
+        cfg.credential.as_deref().filter(|c| !c.trim().is_empty()).ok_or_else(|| {
+            anyhow::anyhow!("http auth type `{}` needs `credential: <alias>`", cfg.provider)
+        })
+    };
+    let secret = |alias: &str| -> Result<String> {
+        let value = crate::local_credentials::resolve(alias)?;
+        if crate::local_credentials::is_google_oauth(&value) {
+            anyhow::bail!(
+                "credential `{}` is a google_oauth refresh token; use `type: google_oauth`, not `{}`",
+                alias,
+                cfg.provider
+            );
+        }
+        Ok(value)
+    };
+    match cfg.provider.as_str() {
+        "gcp" | "google" | "adc" => Ok((
+            "Authorization".to_string(),
+            format!("Bearer {}", resolve_auth_to_bearer(cfg).await?),
+        )),
+        "bearer" => Ok((
+            "Authorization".to_string(),
+            format!("Bearer {}", secret(credential()?)?),
+        )),
+        "api_key" => Ok((
+            cfg.header.clone().unwrap_or_else(|| "X-API-Key".to_string()),
+            secret(credential()?)?,
+        )),
+        "google_oauth" => Ok((
+            "Authorization".to_string(),
+            format!(
+                "Bearer {}",
+                crate::local_credentials::google_access_token(credential()?).await?
+            ),
+        )),
+        other => anyhow::bail!(
+            "unsupported http auth type: {}. Supported: gcp, google, adc, bearer, api_key, google_oauth",
+            other
+        ),
+    }
+}
+
 /// Build the noetl-tools [`ToolConfig`] for an HTTP request.
 ///
 /// Identical to the [`to_tools_config`] `Tool::Http` arm but pulled
@@ -549,14 +606,11 @@ fn http_tool_config(
     headers: &HashMap<String, String>,
     params: &HashMap<String, String>,
     body: Option<&str>,
-    bearer: Option<&str>,
+    auth_header: Option<(String, String)>,
 ) -> ToolConfig {
     let mut merged_headers = headers.clone();
-    if let Some(token) = bearer {
-        merged_headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", token),
-        );
+    if let Some((name, value)) = auth_header {
+        merged_headers.insert(name, value);
     }
     ToolConfig {
         kind: "http".to_string(),
@@ -1168,19 +1222,11 @@ pub async fn dispatch_via_registry(
             //   when the string parses as JSON (adding Content-Type:
             //   application/json automatically), otherwise sends it
             //   verbatim.  See `http_body_value`.
-            let bearer = if let Some(auth_cfg) = auth {
-                Some(resolve_auth_to_bearer(auth_cfg).await?)
-            } else {
-                None
+            let auth_header = match auth {
+                Some(auth_cfg) => Some(resolve_http_auth_header(auth_cfg).await?),
+                None => None,
             };
-            let config = http_tool_config(
-                method,
-                url,
-                headers,
-                params,
-                body.as_deref(),
-                bearer.as_deref(),
-            );
+            let config = http_tool_config(method, url, headers, params, body.as_deref(), auth_header);
             let http_tool = HttpTool::new();
             let ctx = to_tools_context(bridge);
             let result = http_tool
@@ -1362,17 +1408,7 @@ pub async fn dispatch_via_registry(
 /// The playbook still names the alias explicitly; this is only where local
 /// mode looks it up, because local mode has no server-side keychain.
 pub fn local_credential_env_var(alias: &str) -> String {
-    let suffix: String = alias
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("NOETL_CREDENTIAL_{}", suffix)
+    crate::local_credentials::env_var(alias)
 }
 
 /// Start a noetl-tools [`AgentSession`] for a (template-rendered)
@@ -1392,20 +1428,8 @@ pub async fn start_agent_session(tool: &Tool, bridge: &BridgeContext<'_>) -> Res
 
     let mut ctx = to_tools_context(bridge);
     if let Some(alias) = auth.as_ref().and_then(|a| a.credential.as_deref()) {
-        let var = local_credential_env_var(alias);
-        // An empty value counts as unset: `VAR="$(cat missing-file)"` yields
-        // an empty string, which would otherwise be sent as a blank key.
-        let value = std::env::var(&var)
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "credential alias `{}` is not set or empty; local mode reads it from ${}",
-                    alias,
-                    var
-                )
-            })?;
+        // Env var first, then the 600 file; blank values count as unset.
+        let value = crate::local_credentials::resolve(alias)?;
         ctx.set_secret(alias, value);
     }
 
@@ -1851,7 +1875,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             None,
-            Some("test-token-123"),
+            Some(("Authorization".to_string(), "Bearer test-token-123".to_string())),
         );
         assert_eq!(cfg.kind, "http");
         assert_eq!(
@@ -1870,7 +1894,7 @@ mod tests {
             &hdrs,
             &HashMap::new(),
             None,
-            Some("token"),
+            Some(("Authorization".to_string(), "Bearer token".to_string())),
         );
         assert_eq!(cfg.config["headers"]["X-Trace-Id"], "abc123");
         assert_eq!(cfg.config["headers"]["Authorization"], "Bearer token");
@@ -1931,9 +1955,105 @@ mod tests {
         let cfg = CliAuthConfig {
             provider: "azure".into(),
             scopes: vec![],
+            credential: None,
+            header: None,
         };
         let err = resolve_auth_to_bearer(&cfg).await.unwrap_err();
         assert!(err.to_string().contains("unsupported auth provider"));
+    }
+
+    fn http_auth(kind: &str, credential: Option<&str>, header: Option<&str>) -> CliAuthConfig {
+        CliAuthConfig {
+            provider: kind.into(),
+            scopes: vec![],
+            credential: credential.map(Into::into),
+            header: header.map(Into::into),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_auth_bearer_and_api_key_read_the_credential_store() {
+        std::env::set_var("NOETL_CREDENTIAL_HTTP_TEST_TOKEN", "tok-1");
+        let bearer = resolve_http_auth_header(&http_auth("bearer", Some("http-test-token"), None))
+            .await
+            .unwrap();
+        let api_key = resolve_http_auth_header(&http_auth("api_key", Some("http-test-token"), Some("x-key")))
+            .await
+            .unwrap();
+        std::env::remove_var("NOETL_CREDENTIAL_HTTP_TEST_TOKEN");
+        assert_eq!(bearer, ("Authorization".to_string(), "Bearer tok-1".to_string()));
+        assert_eq!(api_key, ("x-key".to_string(), "tok-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn http_auth_requires_a_credential_alias() {
+        let err = resolve_http_auth_header(&http_auth("bearer", None, None))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("credential: <alias>"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn http_auth_refuses_to_send_a_refresh_token_as_bearer() {
+        std::env::set_var(
+            "NOETL_CREDENTIAL_HTTP_TEST_GOOGLE_AS_BEARER",
+            r#"{"type":"google_oauth","client_id":"c","client_secret":"s","refresh_token":"rt"}"#,
+        );
+        let err = resolve_http_auth_header(&http_auth("bearer", Some("http-test-google-as-bearer"), None))
+            .await
+            .unwrap_err()
+            .to_string();
+        std::env::remove_var("NOETL_CREDENTIAL_HTTP_TEST_GOOGLE_AS_BEARER");
+        assert!(err.contains("use `type: google_oauth`"), "{err}");
+        assert!(!err.contains("rt"), "refresh token leaked: {err}");
+    }
+
+    #[tokio::test]
+    async fn http_google_oauth_refreshes_then_calls_with_bearer() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "gm-at", "expires_in": 3600
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/profile"))
+            .and(header("authorization", "Bearer gm-at"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"emailAddress": "me@example.com"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        std::env::set_var(
+            "NOETL_CREDENTIAL_HTTP_TEST_GMAIL",
+            serde_json::json!({
+                "type": "google_oauth", "client_id": "c", "client_secret": "s",
+                "refresh_token": "rt", "token_uri": format!("{}/token", server.uri()),
+            })
+            .to_string(),
+        );
+        let tool = Tool::Http {
+            method: "GET".into(),
+            url: format!("{}/gmail/v1/users/me/profile", server.uri()),
+            headers: HashMap::new(),
+            params: HashMap::new(),
+            body: None,
+            auth: Some(http_auth("google_oauth", Some("http-test-gmail"), None)),
+        };
+        let vars = empty_vars();
+        let outcome = dispatch_via_registry(&tool, &bridge_ctx(&vars)).await.unwrap();
+        std::env::remove_var("NOETL_CREDENTIAL_HTTP_TEST_GMAIL");
+        let parsed: serde_json::Value = serde_json::from_str(&outcome.result.unwrap()).unwrap();
+        assert_eq!(parsed["status"], 200);
+        assert_eq!(parsed["body"]["emailAddress"], "me@example.com");
     }
 
     // ---- PR-2c-6 — Tool::DuckDb bridge integration -------------------
@@ -2677,6 +2797,8 @@ mod tests {
         let _auth = CliAuthConfig {
             provider: "adc".into(),
             scopes: vec!["https://www.googleapis.com/auth/cloud-platform".into()],
+            credential: None,
+            header: None,
         };
     }
 

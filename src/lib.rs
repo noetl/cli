@@ -17,6 +17,7 @@
 //! implementation of anything.
 
 mod config;
+mod credential_cli;
 pub mod playbook_runner;
 mod provider_cli;
 mod subscribe;
@@ -333,6 +334,12 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
+    },
+    /// Local credential store for `--runtime local` playbooks
+    /// (`credential: <alias>` in `http` and `agent` steps)
+    Credential {
+        #[command(subcommand)]
+        command: credential_cli::CredentialCommand,
     },
     /// Register resources
     Register {
@@ -2677,7 +2684,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
     );
     let is_context_or_auth_command = matches!(
         &cli.command,
-        Some(Commands::Context { .. }) | Some(Commands::Auth { .. })
+        Some(Commands::Context { .. }) | Some(Commands::Auth { .. }) | Some(Commands::Credential { .. })
     );
 
     if use_gateway_proxy && session_token.is_none() && !is_auth_login_command && !is_context_or_auth_command {
@@ -2839,6 +2846,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
         }
         Some(Commands::Auth { command }) => {
             handle_auth_command(&mut config, &base_url, command).await?;
+        }
+        Some(Commands::Credential { command }) => {
+            credential_cli::handle_credential_command(command).await?;
         }
         Some(Commands::Register { resource }) => match resource {
             RegisterResource::Credential { file, directory } => {
@@ -4150,7 +4160,7 @@ fn build_auth0_dashboard_url(domain: &str, client_id: &str) -> Option<String> {
 }
 
 /// Wrapper around ``wait_for_pkce_callback`` that turns the bare
-/// "Timed out waiting for Auth0 PKCE callback" error into a hint
+/// "Timed out waiting for the OAuth (PKCE) callback" error into a hint
 /// pointing at the Auth0 application's allowed-callback-URLs page.
 /// When Auth0 rejects the ``/authorize`` request because the
 /// redirect_uri isn't in the application's allowed list, the user
@@ -4216,7 +4226,7 @@ async fn wait_for_pkce_callback(listener: &TcpListener, expected_path: &str, exp
     loop {
         let now = Instant::now();
         if now >= timeout_at {
-            anyhow::bail!("Timed out waiting for Auth0 PKCE callback.");
+            anyhow::bail!("Timed out waiting for the OAuth (PKCE) callback.");
         }
         let remaining = timeout_at.saturating_duration_since(now);
 
@@ -4285,7 +4295,7 @@ async fn wait_for_pkce_callback(listener: &TcpListener, expected_path: &str, exp
             )
             .await;
             let description = params.get("error_description").cloned().unwrap_or_default();
-            anyhow::bail!("Auth0 callback error: {} {}", error, description);
+            anyhow::bail!("OAuth callback error: {} {}", error, description);
         }
 
         let returned_state = params.get("state").map(String::as_str).unwrap_or_default();
@@ -4304,7 +4314,7 @@ async fn wait_for_pkce_callback(listener: &TcpListener, expected_path: &str, exp
             .get("code")
             .filter(|value| !value.trim().is_empty())
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Auth0 callback missing authorization code"))?;
+            .ok_or_else(|| anyhow::anyhow!("OAuth callback missing authorization code"))?;
 
         write_callback_http_response(
             &mut socket,
