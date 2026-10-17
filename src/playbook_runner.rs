@@ -1337,6 +1337,9 @@ impl PlaybookRunner {
                 allowed_tools,
                 mcp_config,
                 workdir,
+                thinking,
+                effort,
+                prompt_cache,
             } => {
                 // The runner drives the noetl-tools AgentSession turn by turn:
                 // each model turn is one async call, and every tool the model
@@ -1382,6 +1385,15 @@ impl PlaybookRunner {
                         Some(w) => Some(self.render_template(w, context)?),
                         None => None,
                     },
+                    thinking: match thinking {
+                        Some(t) => Some(self.render_template(t, context)?),
+                        None => None,
+                    },
+                    effort: match effort {
+                        Some(e) => Some(self.render_template(e, context)?),
+                        None => None,
+                    },
+                    prompt_cache: *prompt_cache,
                 };
                 let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
                     execution_id: 0,
