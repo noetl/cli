@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.1](https://github.com/noetl/cli/compare/v5.3.0...v5.3.1) (2026-10-17)
+
+### Bug Fixes
+
+* **executor:** render templates in a single pass ([276bceb](https://github.com/noetl/cli/commit/276bceb570f99dbd5927c34055d0d32680e03568)), closes [noetl/ai-meta#474](https://github.com/noetl/ai-meta/issues/474)
+
 ## [5.3.0](https://github.com/noetl/cli/compare/v5.2.0...v5.3.0) (2026-10-17)
 
 ### Features
