@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.2](https://github.com/noetl/cli/compare/v5.3.1...v5.3.2) (2026-10-17)
+
+### Bug Fixes
+
+* render bridged tool steps once in local runs ([a4039a6](https://github.com/noetl/cli/commit/a4039a6104308ac06f0f1569a42d08810dc32719)), closes [noetl/ai-meta#477](https://github.com/noetl/ai-meta/issues/477)
+
 ## [5.3.1](https://github.com/noetl/cli/compare/v5.3.0...v5.3.1) (2026-10-17)
 
 ### Bug Fixes
