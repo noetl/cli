@@ -59,6 +59,7 @@
 pub mod capabilities;
 pub mod condition;
 pub mod events;
+pub mod local_credentials;
 pub mod playbook;
 pub mod runtime;
 pub mod template;

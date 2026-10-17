@@ -892,7 +892,19 @@ impl PlaybookRunner {
                     headers: rendered_headers,
                     params: rendered_params,
                     body: rendered_body,
-                    auth: auth.clone(),
+                    // Only the credential alias is templated (e.g.
+                    // `gmail-{{ workload.account }}`); it is validated as an
+                    // alias before any lookup, so it cannot name a path.
+                    auth: match auth {
+                        Some(a) => Some(noetl_executor::playbook::AuthConfig {
+                            credential: match &a.credential {
+                                Some(c) => Some(self.render_template(c, context)?),
+                                None => None,
+                            },
+                            ..a.clone()
+                        }),
+                        None => None,
+                    },
                 };
                 let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
                     execution_id: 0,
@@ -1060,6 +1072,8 @@ impl PlaybookRunner {
                 let auth_cfg = noetl_executor::playbook::AuthConfig {
                     provider: provider.clone(),
                     scopes: scopes.clone(),
+                    credential: None,
+                    header: None,
                 };
                 let token = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(
@@ -1385,7 +1399,7 @@ impl PlaybookRunner {
                 })?;
 
                 if self.verbose {
-                    eprintln!("   🤖 Agent: {} ({} tools)", model, session.config().tools.len());
+                    eprintln!("   🤖 Agent: {} ({} tools)", session.config().model, session.config().tools.len());
                 }
 
                 loop {

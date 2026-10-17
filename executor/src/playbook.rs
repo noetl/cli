@@ -561,11 +561,21 @@ pub fn default_duckdb_path() -> String {
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthConfig {
-    /// Auth provider type: adc (Application Default Credentials), token, basic.
-    #[serde(alias = "source")]
+    /// Auth provider type: `gcp` / `google` / `adc` (Application Default
+    /// Credentials), `bearer`, `api_key`, or `google_oauth` (a stored refresh
+    /// token, exchanged per run).  `type:` is accepted as an alias so `http`
+    /// steps use the same spelling as `agent` steps.
+    #[serde(alias = "source", alias = "type")]
     pub provider: String,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Credential alias for `bearer` / `api_key` / `google_oauth`, resolved
+    /// from the local credential store (`noetl_executor::local_credentials`).
+    #[serde(default)]
+    pub credential: Option<String>,
+    /// Header for `api_key` (default `X-API-Key`).
+    #[serde(default)]
+    pub header: Option<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

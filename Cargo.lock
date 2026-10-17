@@ -3273,7 +3273,7 @@ dependencies = [
 
 [[package]]
 name = "noetl-executor"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3283,6 +3283,7 @@ dependencies = [
  "noetl-tools",
  "object_store",
  "regex",
+ "reqwest",
  "rhai",
  "schemars 1.2.3",
  "serde",
@@ -3291,6 +3292,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

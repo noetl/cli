@@ -1,5 +1,10 @@
 [package]
 name = "noetl-executor"
+# 0.12.0 — local credential store (`local_credentials`: env var or 600 file,
+# Google OAuth refresh with an in-process token cache) and `http` auth types
+# `bearer` / `api_key` / `google_oauth`.  `playbook::AuthConfig` gains public
+# `credential` and `header` fields on a non-#[non_exhaustive] struct, so a 0.x
+# MINOR; adds `tools_bridge::resolve_http_auth_header`.
 # 0.11.0 — `kind: agent` (noetl/cli#95).  Adds the `Tool::Agent` variant to the
 # public, non-#[non_exhaustive] `playbook::Tool` enum, which breaks exhaustive
 # matches downstream, so a 0.x MINOR; also adds `tools_bridge::{start_agent_session,
@@ -47,7 +52,7 @@ name = "noetl-executor"
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
@@ -125,6 +130,10 @@ object_store = { version = "0.11", features = ["gcp"] }
 # explicitly so the version contract is visible and to avoid relying
 # on the transitive dep from object_store.
 bytes = "1"
+# HTTP client for the local credential store's Google OAuth refresh
+# (`local_credentials::google_access_token`).  Already in the dependency tree
+# through noetl-tools, so it adds no compile weight.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [features]
 # Derive JsonSchema on the playbook document model.
@@ -143,3 +152,4 @@ duckdb-integration = ["noetl-tools/duckdb-integration"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock = "0.6"
