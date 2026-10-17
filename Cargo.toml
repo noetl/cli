@@ -105,7 +105,7 @@ noetl-executor = { path = "executor", version = "0.13", features = ["json-schema
 # Default features pull in the pubsub + kafka + gcs source/backends.
 # `noetl-events` is the shared `EventSink` trait + `ExecutorEvent` envelope the
 # local `FileEventSink` implements (same wire shape as the worker's NATS/HTTP sinks).
-noetl-tools = "4.1"
+noetl-tools = "4.2"
 noetl-events = { path = "events", version = "0.1.0" }
 async-trait = "0.1"
 
