@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.3.0](https://github.com/noetl/cli/compare/v5.2.0...v5.3.0) (2026-10-17)
+
+### Features
+
+* **agent:** pass thinking, effort and prompt_cache to the agent tool ([aa14c37](https://github.com/noetl/cli/commit/aa14c3779c40cd95fe7e8cd8c957ac18f8e2ec54)), closes [noetl/tools#113](https://github.com/noetl/tools/issues/113) [#113](https://github.com/noetl/cli/issues/113)
+
 ## [5.2.0](https://github.com/noetl/cli/compare/v5.1.0...v5.2.0) (2026-10-17)
 
 ### Features
