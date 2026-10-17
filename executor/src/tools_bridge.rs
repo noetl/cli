@@ -1097,6 +1097,70 @@ pub fn from_tools_result(result: ToolResult) -> Result<BridgeOutcome> {
 }
 
 // ---------------------------------------------------------------------------
+// Single-render guard (noetl/ai-meta#477).
+// ---------------------------------------------------------------------------
+
+/// Make the noetl-tools render pass a no-op for a config the CLI has
+/// already rendered.
+///
+/// Every bridged tool (shell / http / duckdb / rhai / provider) runs its
+/// config through `TemplateEngine::render_value` (minijinja) inside
+/// `execute`.  The CLI hands it config that `render_template` has
+/// already expanded, so any `{{ … }}` still present is *data* — a
+/// workload value, a prior step's output — and a second render would
+/// evaluate it: as `""` against the flat context, or for real against
+/// rhai's nested context (`{{ workload.secret }}` → the secret).
+///
+/// Each string that would be rendered (it holds `{{` or `{%`) is
+/// rewritten so minijinja prints it back verbatim; strings without
+/// markers are left alone, exactly as the tools leave them.  The tools
+/// still JSON-parse a rendered marker-bearing string, as they did
+/// before this guard.
+fn escape_prerendered(mut config: ToolConfig) -> ToolConfig {
+    escape_template_value(&mut config.config);
+    config
+}
+
+fn escape_template_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.contains("{{") || s.contains("{%") {
+                *s = escape_template_markers(s);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(escape_template_value),
+        serde_json::Value::Object(map) => map.values_mut().for_each(escape_template_value),
+        _ => {}
+    }
+}
+
+/// Rewrite `s` as a minijinja template whose output is `s`.
+///
+/// Every `{` that would open a tag (`{{`, `{%`, `{#`) becomes the
+/// expression `{{ '{' }}`.  One left-to-right pass, so the inserted
+/// expressions are never rescanned.  A trailing newline becomes
+/// `{{ '\n' }}` because minijinja drops a template's final newline.
+fn escape_template_markers(s: &str) -> String {
+    let (body, trailing_newline) = match s.strip_suffix('\n') {
+        Some(body) => (body, true),
+        None => (s, false),
+    };
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '{' && matches!(chars.peek(), Some('{' | '%' | '#')) {
+            out.push_str("{{ '{' }}");
+        } else {
+            out.push(c);
+        }
+    }
+    if trailing_newline {
+        out.push_str("{{ '\\n' }}");
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch — per-tool-kind match scaffold.
 // ---------------------------------------------------------------------------
 
@@ -1129,7 +1193,7 @@ pub async fn dispatch_via_registry(
             // helpers (log, print, parse_json, contains, http_*,
             // get_gcp_token, sleep, sleep_ms) match.
             let rhai_tool = RhaiTool::new();
-            let config = to_tools_config(tool);
+            let config = escape_prerendered(to_tools_config(tool));
             // rhai needs a nested variable shape so
             // `workload.region` is a Rhai field-access expression.
             let ctx = to_tools_context_for_rhai(bridge);
@@ -1173,7 +1237,7 @@ pub async fn dispatch_via_registry(
             let ctx = to_tools_context(bridge);
             let mut last_outcome = BridgeOutcome::empty();
             for command in commands {
-                let config = shell_command_config(&command);
+                let config = escape_prerendered(shell_command_config(&command));
                 let result = shell_tool
                     .execute(&config, &ctx)
                     .await
@@ -1238,7 +1302,14 @@ pub async fn dispatch_via_registry(
                 Some(auth_cfg) => Some(resolve_http_auth_header(auth_cfg).await?),
                 None => None,
             };
-            let config = http_tool_config(method, url, headers, params, body.as_deref(), auth_header);
+            let config = escape_prerendered(http_tool_config(
+                method,
+                url,
+                headers,
+                params,
+                body.as_deref(),
+                auth_header,
+            ));
             let http_tool = HttpTool::new();
             let ctx = to_tools_context(bridge);
             let result = http_tool
@@ -1277,7 +1348,7 @@ pub async fn dispatch_via_registry(
                 Some(q) if !q.trim().is_empty() => q,
                 _ => return Ok(BridgeOutcome::empty()),
             };
-            let config = duckdb_tool_config(db, query, params);
+            let config = escape_prerendered(duckdb_tool_config(db, query, params));
             let duckdb_tool = DuckdbTool::new();
             let ctx = to_tools_context(bridge);
             let result = duckdb_tool
@@ -1386,7 +1457,7 @@ pub async fn dispatch_via_registry(
             // auth.  For an apply-mode call the provider's `auth:` block is
             // mapped into the noetl-tools AuthConfig here; the ProviderTool
             // refuses an apply with no auth (no ambient ADC fallback).
-            let mut config = to_tools_config(tool);
+            let mut config = escape_prerendered(to_tools_config(tool));
             config.auth = match auth {
                 Some(a) => Some(provider_auth_to_tools(a)?),
                 None => None,
@@ -2898,5 +2969,77 @@ mod tests {
         let path = StorePath::from("empty.txt");
         let body = store.get(&path).await.unwrap().bytes().await.unwrap();
         assert_eq!(body.len(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Single-render guard (noetl/ai-meta#477)
+    // -----------------------------------------------------------------
+
+    /// Nested context, like rhai's, where a stray `{{ workload.secret }}`
+    /// would actually resolve.
+    fn secret_template_ctx() -> HashMap<String, serde_json::Value> {
+        let mut ctx = HashMap::new();
+        ctx.insert("workload".to_string(), serde_json::json!({ "secret": "S3CRET" }));
+        ctx.insert("secret".to_string(), serde_json::json!("S3CRET"));
+        ctx
+    }
+
+    #[test]
+    fn escape_template_markers_renders_back_verbatim() {
+        let engine = noetl_tools::template::TemplateEngine::new();
+        let ctx = secret_template_ctx();
+        for s in [
+            "x {{ workload.secret }}",
+            "{{secret}}",
+            "{% if true %}S3CRET{% endif %}",
+            "{# comment #} {{ secret }}",
+            "{{{ secret }}}",
+            "{{ '{' }}",
+            "{% raw %}{{ secret }}{% endraw %}",
+            "a { b } }} %} #} {{",
+            "trailing newline {{ secret }}\n",
+            "two newlines {{ secret }}\n\n",
+            "\n{{ secret }}\n",
+            "ünïcödé {{ secret }} ✓",
+            "ends with brace {",
+            "{{",
+        ] {
+            let escaped = escape_template_markers(s);
+            assert_eq!(engine.render(&escaped, &ctx).unwrap(), s, "escaped: {escaped}");
+        }
+    }
+
+    #[test]
+    fn escape_prerendered_only_touches_marker_strings() {
+        let config = ToolConfig {
+            kind: "shell".to_string(),
+            config: serde_json::json!({
+                "cmds": ["echo plain", "echo {{ workload.secret }}"],
+                "nested": { "s": "{% x %}", "n": 3, "b": true, "brace": "{ a }" },
+            }),
+            timeout: None,
+            retry: None,
+            auth: None,
+        };
+        let escaped = escape_prerendered(config).config;
+        assert_eq!(escaped["cmds"][0], "echo plain");
+        assert_eq!(escaped["cmds"][1], "echo {{ '{' }}{ workload.secret }}");
+        assert_eq!(escaped["nested"]["s"], "{{ '{' }}% x %}");
+        assert_eq!(escaped["nested"]["n"], 3);
+        assert_eq!(escaped["nested"]["b"], true);
+        assert_eq!(escaped["nested"]["brace"], "{ a }");
+    }
+
+    #[test]
+    fn escaped_config_survives_tools_render_value() {
+        let engine = noetl_tools::template::TemplateEngine::new();
+        let original = serde_json::json!({
+            "cmds": ["echo 'x {{ workload.secret }}'"],
+            "body": { "msg": "{{ secret }}", "plain": "ok" },
+        });
+        let mut escaped = original.clone();
+        escape_template_value(&mut escaped);
+        let rendered = engine.render_value(&escaped, &secret_template_ctx()).unwrap();
+        assert_eq!(rendered, original);
     }
 }

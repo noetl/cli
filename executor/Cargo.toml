@@ -1,5 +1,9 @@
 [package]
 name = "noetl-executor"
+# 0.13.2 — `tools_bridge::dispatch_via_registry` escapes `{{` / `{%` / `{#` in the
+# already-rendered config it hands noetl-tools, whose own minijinja pass then
+# reproduces it verbatim instead of rendering data a second time
+# (noetl/ai-meta#477).  Bug fix, no API change: a PATCH.
 # 0.13.1 — `template::render_template` / `render_template_with_result` substitute
 # in a single pass, so a substituted value is never re-scanned (it could carry
 # `{{ … }}` from untrusted data).  Bug fix, no API change: a PATCH.
@@ -58,7 +62,7 @@ name = "noetl-executor"
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"

@@ -278,3 +278,41 @@ async fn unsupported_tool_bails() {
     let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
     assert!(err.to_string().contains("unsupported"));
 }
+
+// ---- Single render (noetl/ai-meta#477) --------------------------------
+//
+// The bridge receives config the CLI has already rendered, so a `{{ … }}`
+// still in it is data and must reach the tool verbatim — not be rendered
+// a second time by the tool's minijinja pass.
+
+fn secret_vars() -> HashMap<String, String> {
+    [("workload.secret".into(), "S3CRET".into())].into()
+}
+
+#[tokio::test]
+async fn shell_does_not_rerender_prerendered_markers() {
+    let vars = secret_vars();
+    let bridge = ctx(&vars);
+    let tool = Tool::Shell {
+        cmds: CmdsList::Single(r#"echo "x {{ workload.secret }} {% if 1 %}y{% endif %}""#.into()),
+    };
+    let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+    assert_eq!(
+        outcome.result,
+        Some("x {{ workload.secret }} {% if 1 %}y{% endif %}".into())
+    );
+}
+
+#[tokio::test]
+async fn rhai_does_not_rerender_prerendered_markers() {
+    // Rhai gets the nested context, so before the fix this resolved to
+    // the secret itself.
+    let vars = secret_vars();
+    let bridge = ctx(&vars);
+    let tool = Tool::Rhai {
+        code: r#"let v = "x {{ workload.secret }}"; v"#.into(),
+        args: HashMap::new(),
+    };
+    let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
+    assert_eq!(outcome.result, Some("x {{ workload.secret }}".into()));
+}
