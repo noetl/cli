@@ -215,7 +215,12 @@ async fn outage_buffers_to_local_disk_then_replays_in_order_on_recovery() {
         "ordering": "global",
         "circuit": {
             "trip_after": 1,
-            "probe_after_ms": 10,
+            // The breaker's passive half-open timer runs on wall-clock time:
+            // once `probe_after_ms` elapses, `route_message` returns a Probe
+            // (→ Dispatch) instead of Spool.  Keep it far beyond any test
+            // stall so the outage stays open; recovery below goes through the
+            // active `maybe_probe`, which doesn't depend on this timer.
+            "probe_after_ms": 3_600_000,
             "probe_interval_ms": 0,
             "downstream": [ { "name": "warehouse", "type": "tcp", "target": target } ]
         },
