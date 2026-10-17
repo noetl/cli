@@ -417,6 +417,9 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             allowed_tools,
             mcp_config,
             workdir,
+            thinking,
+            effort,
+            prompt_cache,
         } => {
             // Optional fields are omitted when absent so the noetl-tools
             // AgentConfig serde defaults (max_turns=8, max_tokens=4096) apply.
@@ -453,6 +456,15 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             }
             if let Some(w) = workdir {
                 cfg.insert("workdir".into(), serde_json::json!(w));
+            }
+            if let Some(t) = thinking {
+                cfg.insert("thinking".into(), serde_json::json!(t));
+            }
+            if let Some(e) = effort {
+                cfg.insert("effort".into(), serde_json::json!(e));
+            }
+            if let Some(p) = prompt_cache {
+                cfg.insert("prompt_cache".into(), serde_json::json!(p));
             }
             ("agent", serde_json::Value::Object(cfg))
         }
@@ -1605,6 +1617,9 @@ mod tests {
             allowed_tools: None,
             mcp_config: None,
             workdir: None,
+            thinking: None,
+            effort: None,
+            prompt_cache: None,
         }
     }
 

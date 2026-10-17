@@ -545,6 +545,15 @@ pub enum Tool {
         /// `claude-code` only: working directory for the CLI.
         #[serde(default)]
         workdir: Option<String>,
+        /// `claude` only: `disabled` / `adaptive` thinking.
+        #[serde(default)]
+        thinking: Option<String>,
+        /// `claude` only: `low` / `medium` / `high` effort.
+        #[serde(default)]
+        effort: Option<String>,
+        /// `claude` only: Anthropic prompt caching (tool default: on).
+        #[serde(default)]
+        prompt_cache: Option<bool>,
     },
     #[serde(other)]
     Unsupported,
