@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.5.0](https://github.com/noetl/cli/compare/v5.4.0...v5.5.0) (2026-11-07)
+
+### Features
+
+* **buffer:** R-1.4 local Arrow Feather event buffer and noetl push ([6fc636f](https://github.com/noetl/cli/commit/6fc636f0e762981db85db185b01d6381631542da))
+
 ## [5.4.0](https://github.com/noetl/cli/compare/v5.3.2...v5.4.0) (2026-11-07)
 
 ### Features
