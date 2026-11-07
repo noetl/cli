@@ -487,6 +487,39 @@ List Resources:
 noetl list Playbook
 ```
 
+### Local Feather event buffer and `noetl push` (R-1.4)
+
+Blueprint § H.11. Each local execution gets a directory under `$NOETL_LOCAL_DIR`
+(default `~/.noetl/local`):
+
+```
+~/.noetl/local/<execution_id>/
+  events.feather   Feather V2 (Arrow IPC file): event_id, execution_id, event_type, step,
+                   status, created_at, context, result, meta, parent_event_id, payload_ref
+  metadata.json    execution_id, started_at, playbook_path, status, stack, labels, pushed_at
+```
+
+Every flush writes the complete file to a temp path and renames it into place, so the
+file on disk is always a valid Feather file, even after a crash. pyarrow reads it with
+`pyarrow.feather.read_table`.
+
+```bash
+noetl run ./foo.yaml -r local --event-buffer          # record the run's events
+EID=$(noetl buffer init --stack my-stack)             # or write from shell steps
+noetl buffer append $EID --event-type provider.fact --result-json '{"data":{"provider_fact":{…}}}'
+noetl buffer close $EID --status COMPLETED
+noetl buffer cat --stack my-stack --event-type provider.fact   # decode to JSON lines
+noetl provider drift --playbook infra.yaml --facts-file ~/.noetl/local/$EID/events.feather
+noetl push --all --stack my-stack --server http://localhost:8082
+```
+
+`noetl push` POSTs each closed execution's `events.feather` to `/api/events/batch` as
+`application/vnd.apache.arrow.file`, with `X-NoETL-Execution-Id` and `X-NoETL-Event-Count`
+headers. It pushes the oldest execution first, stops at the first failure, and records
+`pushed_at` so an execution is sent only once. The server appends the events to the EHDB
+event log (`NOETL_EVENTS_ARROW_INGEST=enabled` on the server; it is off by default) and
+`noetl provider --server` reads them back from there.
+
 ### Interactive TUI Mode
 
 Run `noetl` with the `-i` or `--interactive` flag:

@@ -18,6 +18,8 @@
 
 mod config;
 mod credential_cli;
+pub mod local_buffer;
+mod buffer_cli;
 pub mod playbook_runner;
 mod provider_cli;
 mod subscribe;
@@ -161,6 +163,13 @@ struct RunArgs {
     /// Read back with `noetl provider drift/orphans --facts-file <path>`.
     #[arg(long)]
     facts_out: Option<PathBuf>,
+
+    /// Local runtime: record this run's events (playbook.started, one step.exit
+    /// per executed step, playbook.completed/failed) in the R-1.4 Feather buffer
+    /// at $NOETL_LOCAL_DIR/<execution_id>/events.feather (default ~/.noetl/local).
+    /// Ship it later with `noetl push`.
+    #[arg(long)]
+    event_buffer: bool,
 
     /// Emit only JSON response (distributed runtime)
     #[arg(short, long)]
@@ -565,6 +574,42 @@ enum Commands {
         command: provider_cli::ProviderCommand,
     },
 
+    /// Local Arrow Feather event buffer (R-1.4, blueprint § H.11)
+    ///
+    /// One directory per local execution under $NOETL_LOCAL_DIR (default
+    /// ~/.noetl/local): `<execution_id>/events.feather` (Feather V2, the § H.11.3
+    /// schema) + `metadata.json`. Shell steps write to it with `append`; `cat`
+    /// decodes it back to JSON lines. IaC bootstrap state is the `provider.fact`
+    /// events in it (ops ADR-0007).
+    ///
+    /// Examples:
+    ///     EID=$(noetl buffer init --stack log-analytics --playbook iac.yaml)
+    ///     noetl buffer append $EID --event-type step.exit --step apply --result-json '{"ok":true}'
+    ///     jq -c . facts.jsonl | noetl buffer append $EID --jsonl -
+    ///     noetl buffer close $EID --status COMPLETED
+    ///     noetl buffer cat --stack log-analytics --event-type provider.fact
+    ///     noetl buffer list --json
+    #[command(verbatim_doc_comment)]
+    Buffer {
+        #[command(flatten)]
+        root: buffer_cli::BufferRoot,
+        #[command(subcommand)]
+        command: buffer_cli::BufferCommand,
+    },
+    /// Push closed local buffers to the server event log (§ H.11.5)
+    ///
+    /// POSTs each execution's events.feather to `/api/events/batch` as
+    /// `application/vnd.apache.arrow.file` with X-NoETL-Execution-Id and
+    /// X-NoETL-Event-Count. The server appends the events to the EHDB event log
+    /// (no orchestration). Pushes oldest first and records `pushed_at` in
+    /// metadata.json so an execution is sent once.
+    ///
+    /// Examples:
+    ///     noetl push 123456789012345678
+    ///     noetl push --all --stack log-analytics --server http://localhost:8082
+    ///     noetl push --all --dry-run
+    #[command(verbatim_doc_comment)]
+    Push(buffer_cli::PushArgs),
     /// Print the JSON Schema for a playbook document
     ///
     /// Generated from the Rust playbook model in `noetl-executor`, so it
@@ -1797,6 +1842,7 @@ async fn run_playbook(
         verbose,
         dry_run,
         facts_out,
+        event_buffer,
         json,
     } = args;
 
@@ -1891,7 +1937,7 @@ async fn run_playbook(
             // stdout when the playbook completes. This is what
             // lets the agent bridge (and any other programmatic
             // consumer) get clean JSON to pipe into `jq`.
-            let runner = playbook_runner::PlaybookRunner::new(playbook_path)
+            let runner = playbook_runner::PlaybookRunner::new(playbook_path.clone())
                 .with_variables(vars)
                 .with_verbose(verbose)
                 .with_target(effective_target)
@@ -1902,7 +1948,11 @@ async fn run_playbook(
                 .with_quiet(json)
                 .with_emit_json(json);
 
-            runner.run()?;
+            if event_buffer {
+                run_local_with_event_buffer(&runner, &playbook_path, json)?;
+            } else {
+                runner.run()?;
+            }
         }
         "distributed" => {
             // Distributed execution via server
@@ -1949,6 +1999,75 @@ async fn run_playbook(
     }
 
     Ok(())
+}
+
+/// `noetl run -r local --event-buffer`: the § H.11 local buffer around one run.
+///
+/// The runner itself is unchanged (it emits no events); the buffer records the
+/// run boundary and each executed step's result from the `RunOutcome`. A
+/// failed run records `playbook.failed` with the error and closes FAILED, then
+/// returns the original error.
+fn run_local_with_event_buffer(
+    runner: &playbook_runner::PlaybookRunner,
+    playbook_path: &std::path::Path,
+    quiet: bool,
+) -> Result<()> {
+    use local_buffer::{CreateOptions, LocalEventBuffer, NewEvent};
+    let root = local_buffer::default_root();
+    let mut buf = LocalEventBuffer::create(
+        &root,
+        CreateOptions {
+            playbook_path: playbook_path.display().to_string(),
+            ..Default::default()
+        },
+    )?;
+    let eid = buf.execution_id();
+    buf.append(NewEvent {
+        event_type: "playbook.started".into(),
+        status: "RUNNING".into(),
+        context: serde_json::json!({ "path": playbook_path.display().to_string() }),
+        ..Default::default()
+    })?;
+    match runner.run() {
+        Ok(outcome) => {
+            for step in &outcome.executed_steps {
+                let raw = outcome.step_results.get(step).cloned().unwrap_or_default();
+                let result = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or(serde_json::Value::String(raw));
+                buf.append(NewEvent {
+                    event_type: "step.exit".into(),
+                    step: step.clone(),
+                    status: "COMPLETED".into(),
+                    result: serde_json::json!({ "data": result }),
+                    ..Default::default()
+                })?;
+            }
+            buf.append(NewEvent {
+                event_type: "playbook.completed".into(),
+                status: "COMPLETED".into(),
+                result: serde_json::json!({ "duration_seconds": outcome.duration_seconds }),
+                ..Default::default()
+            })?;
+            buf.close("COMPLETED")?;
+            if !quiet {
+                eprintln!("event buffer: {}", local_buffer::execution_dir(&root, eid).display());
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = buf.append(NewEvent {
+                event_type: "playbook.failed".into(),
+                status: "FAILED".into(),
+                result: serde_json::json!({ "error": format!("{e:#}") }),
+                ..Default::default()
+            });
+            let _ = buf.close("FAILED");
+            eprintln!(
+                "event buffer: {} (FAILED)",
+                local_buffer::execution_dir(&root, eid).display()
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Build variables map from payload JSON and --set flags
@@ -2832,7 +2951,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     println!("Runtime: {}", effective_runtime);
                 }
 
-                let runner = playbook_runner::PlaybookRunner::new(playbook_path)
+                let runner = playbook_runner::PlaybookRunner::new(playbook_path.clone())
                     .with_variables(vars)
                     .with_merge(merge)
                     .with_verbose(verbose)
@@ -3062,6 +3181,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
         }
         Some(Commands::Provider { command }) => {
             provider_cli::run(&client, command).await?;
+        }
+        Some(Commands::Buffer { root, command }) => {
+            buffer_cli::run_buffer(&root, command)?;
+        }
+        Some(Commands::Push(args)) => {
+            buffer_cli::run_push(&client, &base_url, args).await?;
         }
         Some(Commands::Server { command }) => match command {
             ServerCommand::Start { init_db } => {

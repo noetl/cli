@@ -3189,6 +3189,9 @@ name = "noetl"
 version = "5.4.0"
 dependencies = [
  "anyhow",
+ "arrow-array 53.4.1",
+ "arrow-ipc",
+ "arrow-schema 53.4.1",
  "async-trait",
  "base64 0.22.1",
  "chrono",

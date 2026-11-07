@@ -142,6 +142,12 @@ rpassword = "7"
 rand = "0.8"
 sha2 = "0.10"
 url = "2.5"
+# R-1.4 local Feather event buffer (blueprint § H.11, `src/local_buffer.rs`).
+# Same arrow-rs 53 line noetl-tools already links (`arrow-ipc` is the Feather V2
+# / IPC file reader+writer), so this adds no second arrow major to the graph.
+arrow-array = "53"
+arrow-ipc = "53"
+arrow-schema = "53"
 
 [dev-dependencies]
 # Mock Anthropic Messages API for the `kind: agent` end-to-end test
