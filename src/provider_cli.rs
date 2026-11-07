@@ -105,7 +105,8 @@ pub struct ProviderCommonArgs {
     /// Offline last-known-desired source: a file of raw eventlog-tier records
     /// (or event bodies, or bare provider_facts).  Accepts either a JSON array
     /// or newline-delimited JSON (JSONL — the append format `--facts-out`
-    /// writes).  Mutually exclusive with `--server`.
+    /// writes), or a local Feather event buffer (`events.feather`, R-1.4;
+    /// detected by its ARROW1 magic).  Mutually exclusive with `--server`.
     #[arg(long)]
     pub facts_file: Option<PathBuf>,
     /// Append the emitted `provider_fact` to this JSONL file after a successful
@@ -565,10 +566,20 @@ async fn load_facts(client: &Client, common: &ProviderCommonArgs) -> Result<Vec<
         bail!("--server and --facts-file are mutually exclusive");
     }
     if let Some(path) = &common.facts_file {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("reading facts file {}", path.display()))?;
-        let records = parse_facts_content(&content)
-            .with_context(|| format!("parsing facts file {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("reading facts file {}", path.display()))?;
+        let records = if bytes.starts_with(crate::local_buffer::ARROW_MAGIC) {
+            // R-1.4: a local Feather event buffer (`events.feather`). Same facts,
+            // Arrow-encoded; each event's `result` carries `data.provider_fact`.
+            crate::local_buffer::decode_feather(&bytes)
+                .with_context(|| format!("decoding Feather facts file {}", path.display()))?
+                .iter()
+                .map(|e| crate::local_buffer::event_json(e, None))
+                .collect()
+        } else {
+            let content = String::from_utf8(bytes)
+                .with_context(|| format!("facts file {} is neither UTF-8 JSON nor Feather", path.display()))?;
+            parse_facts_content(&content).with_context(|| format!("parsing facts file {}", path.display()))?
+        };
         // Accept raw tier records (payload-string), decoded bodies, or bare
         // provider_facts — the tier extractor handles all three.
         return Ok(extract_and_report_coverage(&records, &format!("{}", path.display())));
@@ -783,6 +794,68 @@ mod facts_sink_tests {
         assert_eq!(after.lines().count(), 2, "planned/dry-run fact must NOT be appended");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn facts_file_accepts_a_feather_buffer_and_folds_identically() {
+        use crate::local_buffer::{self as lb, CreateOptions, LocalEventBuffer, NewEvent};
+        let fact = |urn: &str, verb: &str, outcome: &str| {
+            serde_json::json!({
+                "urn": urn, "provider": "kubernetes", "service": "core", "resource_type": "ConfigMap",
+                "verb": verb, "stack": "s", "outcome": outcome, "execution_id": 7, "desired": {"digest": "d"}
+            })
+        };
+        let facts = [
+            fact("k8s://a", "ensure", "changed"),
+            fact("k8s://b", "ensure", "changed"),
+            fact("k8s://a", "delete", "deleted"),
+        ];
+
+        // The same three facts, once as --facts-out JSONL and once as Feather.
+        let jsonl = tmp_path("cmp-jsonl");
+        let _ = std::fs::remove_file(&jsonl);
+        for f in &facts {
+            append_fact_jsonl(&jsonl, f).unwrap();
+        }
+        let root = std::env::temp_dir().join(format!("noetl-facts-feather-{}", lb::new_id()));
+        let mut b = LocalEventBuffer::create(&root, CreateOptions::default()).unwrap();
+        for f in &facts {
+            b.append(NewEvent {
+                event_type: lb::PROVIDER_FACT_EVENT.into(),
+                result: serde_json::json!({"data": {"provider_fact": f}}),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let feather = lb::execution_dir(&root, b.execution_id()).join(lb::EVENTS_FILE);
+        b.close("COMPLETED").unwrap();
+
+        let args = |p: &std::path::Path| ProviderCommonArgs {
+            playbook: p.to_path_buf(),
+            stack: None,
+            server: None,
+            facts_file: Some(p.to_path_buf()),
+            facts_out: None,
+            execution: None,
+            endpoint: None,
+            workload: None,
+            json: false,
+        };
+        let client = Client::new();
+        let a = provider_state::fold_facts(&load_facts(&client, &args(&jsonl)).await.unwrap());
+        let f = provider_state::fold_facts(&load_facts(&client, &args(&feather)).await.unwrap());
+        assert_eq!(a.owned.keys().collect::<Vec<_>>(), vec!["k8s://b"]);
+        assert_eq!(
+            a.owned.keys().collect::<Vec<_>>(),
+            f.owned.keys().collect::<Vec<_>>(),
+            "encoding must not change the fold"
+        );
+        assert_eq!(
+            a.tombstoned.keys().collect::<Vec<_>>(),
+            f.tombstoned.keys().collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_file(&jsonl);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
