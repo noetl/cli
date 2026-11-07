@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.4.0](https://github.com/noetl/cli/compare/v5.3.2...v5.4.0) (2026-11-07)
+
+### Features
+
+* **subscribe:** pass timer source keys (every, immediate, payload) ([f6f0d0b](https://github.com/noetl/cli/commit/f6f0d0bbd5f74b3d088d0e29bf640de9298b0d92))
+
 ## [5.3.2](https://github.com/noetl/cli/compare/v5.3.1...v5.3.2) (2026-10-17)
 
 ### Bug Fixes
