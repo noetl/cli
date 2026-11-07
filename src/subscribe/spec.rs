@@ -77,7 +77,7 @@ pub fn parse_spec(
     cfg.insert("source".to_string(), serde_json::json!(source));
     for key in [
         "url", "user", "password", "token", "stream", "consumer", "subscription", "endpoint",
-        "topic", "group", "brokers",
+        "topic", "group", "brokers", "every", "immediate", "payload",
     ] {
         if let Some(v) = spec.get(key) {
             cfg.insert(key.to_string(), serde_json::to_value(v)?);
@@ -232,6 +232,30 @@ spec:
         assert_eq!(spec.batch, 25);
         assert_eq!(spec.timeout_ms, Some(2000));
         assert!(!spec.spool.buffers());
+    }
+
+    #[test]
+    fn parses_timer_source_with_payload() {
+        let spec = parse_spec(
+            &yaml(
+                r#"
+kind: Subscription
+spec:
+  source: timer
+  every: 60s
+  immediate: false
+  payload: { home: /data/qnetmon, unifi_via: local }
+  dispatch: { playbook: ./playbooks/cycle.yaml }
+"#,
+            ),
+            "subscriptions/edge",
+            None,
+        )
+        .unwrap();
+        assert_eq!(spec.source_cfg.source, "timer");
+        assert_eq!(spec.source_cfg.every, Some(serde_json::json!("60s")));
+        assert_eq!(spec.source_cfg.immediate, Some(false));
+        assert_eq!(spec.source_cfg.payload.as_ref().unwrap()["home"], "/data/qnetmon");
     }
 
     #[test]
