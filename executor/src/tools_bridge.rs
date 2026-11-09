@@ -285,12 +285,20 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
                 "body": body.as_deref().map(http_body_value),
             }),
         ),
-        Tool::Playbook { path, args, input } => (
+        Tool::Playbook {
+            path,
+            args,
+            input,
+            return_result,
+            result_step,
+        } => (
             "playbook",
             serde_json::json!({
                 "path": path,
                 "args": args,
                 "input": input,
+                "return_result": return_result,
+                "result_step": result_step,
             }),
         ),
         Tool::DuckDb { db, query, params } => (
@@ -2687,6 +2695,8 @@ mod tests {
             path: "sub.yaml".into(),
             args: HashMap::new(),
             input: HashMap::new(),
+            return_result: false,
+            result_step: None,
         };
         let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
         let msg = err.to_string();
