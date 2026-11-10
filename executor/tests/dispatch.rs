@@ -225,6 +225,8 @@ async fn playbook_bridge_arm_bails_with_h10_message() {
         path: "child.yaml".into(),
         args: HashMap::new(),
         input: HashMap::new(),
+        return_result: false,
+        result_step: None,
     };
     let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
     let msg = err.to_string();

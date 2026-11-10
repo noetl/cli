@@ -417,6 +417,20 @@ pub enum Tool {
         #[serde(default)]
         #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
         input: HashMap<String, serde_yaml::Value>,
+        /// When `true`, the step's result is the child playbook's result, so
+        /// the parent can read it as `{{ <step>.result }}` and in `vars:`.
+        /// Same field and opt-in default as the cluster's `kind: playbook`
+        /// (noetl-tools `PlaybookConfig::return_result`, noetl/ai-meta#136),
+        /// so one playbook behaves the same on both runtimes.  Default
+        /// `false` keeps the historical local behaviour: no result.
+        #[serde(default)]
+        return_result: bool,
+        /// Child step whose result is returned when `return_result` is set.
+        /// Unset: the last child step that produced a result (the child
+        /// run's `final_result`).  Naming a step the child never ran is an
+        /// error, not an empty result.
+        #[serde(default)]
+        result_step: Option<String>,
     },
     #[serde(rename = "duckdb")]
     DuckDb {

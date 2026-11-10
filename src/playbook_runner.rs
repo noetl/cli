@@ -939,7 +939,13 @@ impl PlaybookRunner {
                 }
                 Ok(outcome.result)
             }
-            Tool::Playbook { path, args, input } => {
+            Tool::Playbook {
+                path,
+                args,
+                input,
+                return_result,
+                result_step,
+            } => {
                 // R-1.1 PR-2c-7: per § H.10, `Tool::Playbook` is
                 // the recursion case of the CLI's tree walker —
                 // the sub-playbook is dispatched through another
@@ -978,9 +984,21 @@ impl PlaybookRunner {
                     .with_variables(sub_vars)
                     .with_verbose(self.verbose)
                     .with_quiet(self.quiet);
-                let _sub_outcome = sub_runner.run()?;
+                let sub_outcome = sub_runner.run()?;
 
-                Ok(None)
+                if !*return_result {
+                    if result_step.is_some() && !self.quiet {
+                        eprintln!(
+                            "   ⚠️  `result_step` is ignored without `return_result: true`"
+                        );
+                    }
+                    return Ok(None);
+                }
+                let rendered_step = match result_step {
+                    Some(s) => Some(self.render_template(s, context)?),
+                    None => None,
+                };
+                child_result(&sub_outcome, rendered_step.as_deref())
             }
             Tool::DuckDb { db, query, params } => {
                 // R-1.1 PR-2c-6: dispatch through the noetl-tools
@@ -1770,6 +1788,42 @@ fn reject_unsupported_kinds(playbook: &Playbook, content: &str, path: &Path) -> 
 /// no pass matches.  Remove once the renderer substitutes in a single pass.
 fn defang_template_markers(value: &str) -> String {
     value.replace("{{", "{ {")
+}
+
+/// The result a `kind: playbook` step with `return_result: true` hands its
+/// parent.
+///
+/// - `result_step` named: that child step's result.  A step the child never
+///   ran, or ran without producing a result, is an error so a typo can't pass
+///   as an empty result.
+/// - Unset: the child's `final_result` (the last child step that produced a
+///   result), which mirrors the cluster's fallback to the latest non-terminal
+///   `call.done`.  A child with no result at all yields no result.
+fn child_result(outcome: &RunOutcome, result_step: Option<&str>) -> Result<Option<String>> {
+    if outcome.status != "ok" {
+        anyhow::bail!(
+            "sub-playbook {} ended with status `{}`: {}",
+            outcome.playbook_path,
+            outcome.status,
+            outcome.error.as_deref().unwrap_or("no error message")
+        );
+    }
+    match result_step {
+        Some(step) => match outcome.step_results.get(step) {
+            Some(r) => Ok(Some(r.clone())),
+            None => anyhow::bail!(
+                "result_step `{}` produced no result in sub-playbook {} (steps with results: {})",
+                step,
+                outcome.playbook_path,
+                if outcome.executed_steps.is_empty() {
+                    "none".to_string()
+                } else {
+                    outcome.executed_steps.join(", ")
+                }
+            ),
+        },
+        None => Ok(outcome.final_result.clone()),
+    }
 }
 
 struct ExecutionContext {

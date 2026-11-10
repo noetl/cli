@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.7.0](https://github.com/noetl/cli/compare/v5.6.0...v5.7.0) (2026-11-10)
+
+### Features
+
+* **instance:** `noetl instance` — identity, register, discover, hand off and serve ([d3b0278](https://github.com/noetl/cli/commit/d3b0278f3051693c4b9a825869f3bb066646ecc8)), closes [noetl/ai-meta#544](https://github.com/noetl/ai-meta/issues/544)
+
+## [5.6.0](https://github.com/noetl/cli/compare/v5.5.0...v5.6.0) (2026-11-10)
+
+### Features
+
+* **local:** kind: playbook returns the child's result with return_result ([de3844e](https://github.com/noetl/cli/commit/de3844eb04a88aa5fa9f4f586ec5f47b3548c388)), closes [noetl/ai-meta#136](https://github.com/noetl/ai-meta/issues/136) [noetl/ai-meta#539](https://github.com/noetl/ai-meta/issues/539)
+
 ## [5.5.0](https://github.com/noetl/cli/compare/v5.4.0...v5.5.0) (2026-11-07)
 
 ### Features
