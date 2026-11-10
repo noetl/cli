@@ -225,6 +225,11 @@ impl PlaybookRunner {
 
         // Validate playbook against local runtime capabilities
         self.validate_capabilities(&playbook)?;
+        // Refuse, before any step runs, a step whose tool kind this runtime
+        // cannot execute. Until this check such steps were skipped with a
+        // stderr note and the run still ended `ok` (noetl/ai-meta#539 build
+        // plan item 2).
+        reject_unsupported_kinds(&playbook, &content, &self.playbook_path)?;
 
         if !self.quiet {
             eprintln!("📋 Running playbook: {}", playbook.metadata.name);
@@ -1455,9 +1460,9 @@ impl PlaybookRunner {
                 }
             }
             Tool::Unsupported => {
-                eprintln!("   Tool not supported in local execution mode");
-                eprintln!("   Supported tools: shell, http, playbook, duckdb, auth, sink, provider, agent");
-                eprintln!("   For other tools (postgres, python, iterator, etc.), use distributed execution");
+                // `reject_unsupported_kinds` refuses every unknown kind before
+                // the run starts, except `noop`, which is a deliberate no-op.
+                // So `noop` is the only kind that reaches here.
                 Ok(None)
             }
         }
@@ -1717,6 +1722,60 @@ impl PlaybookRunner {
             .context("Failed to get playbook directory")?;
         Ok(base_dir.join(relative_path))
     }
+}
+
+/// Kinds that parse as [`Tool::Unsupported`] on purpose: they do nothing, so
+/// skipping them IS running them.
+const NOOP_KINDS: &[&str] = &["noop"];
+
+/// For the error message only. The check itself asks the [`Tool`] enum, so this
+/// list cannot make a kind pass or fail.
+const LOCAL_KINDS_FOR_MESSAGE: &str =
+    "shell, http, playbook, duckdb, auth, sink, rhai, provider, agent, noop";
+
+/// Fail when any workflow step uses a tool kind the local runtime cannot run.
+///
+/// The [`Tool`] enum decides: a step whose tool deserialized to
+/// [`Tool::Unsupported`] (`#[serde(other)]`) has a kind no local arm handles.
+/// Its kind name is read back from the raw document, by step index, because
+/// `serde(other)` drops it. Every offending step is listed, not just the first,
+/// so one run shows everything a playbook would need to move to a cluster.
+fn reject_unsupported_kinds(playbook: &Playbook, content: &str, path: &Path) -> Result<()> {
+    let raw: serde_yaml::Value = serde_yaml::from_str(content).unwrap_or(serde_yaml::Value::Null);
+    let raw_steps = raw.get("workflow").and_then(|w| w.as_sequence());
+    let offending: Vec<(String, String)> = playbook
+        .workflow
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| matches!(step.tool, Some(Tool::Unsupported)))
+        .map(|(i, step)| {
+            let kind = raw_steps
+                .and_then(|s| s.get(i))
+                .and_then(|s| s.get("tool"))
+                .and_then(|t| t.get("kind"))
+                .and_then(|k| k.as_str())
+                .unwrap_or("<missing>")
+                .to_string();
+            (step.step.clone(), kind)
+        })
+        .filter(|(_, kind)| !NOOP_KINDS.contains(&kind.as_str()))
+        .collect();
+    if offending.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<String> = offending
+        .iter()
+        .map(|(step, kind)| format!("  step `{step}`: kind `{kind}`"))
+        .collect();
+    anyhow::bail!(
+        "Playbook '{}' uses tool kinds the local runtime cannot run:\n{}\n\
+         Local tool kinds: {}.\n\
+         Run it on a cluster instead: noetl run {} --runtime distributed",
+        playbook.metadata.name,
+        lines.join("\n"),
+        LOCAL_KINDS_FOR_MESSAGE,
+        path.display(),
+    )
 }
 
 /// Break `{{` in a value that came from model output so the sub-playbook's
