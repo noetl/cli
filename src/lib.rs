@@ -23,6 +23,7 @@ mod buffer_cli;
 pub mod playbook_runner;
 mod provider_cli;
 mod subscribe;
+mod instance;
 
 /// The local execution engine and its structured outcome.
 ///
@@ -233,6 +234,16 @@ enum Commands {
     ///     noetl subscribe iot.yaml --max-messages 6 --spool-dir /tmp/spool
     ///     noetl subscribe orders.yaml --dispatch server --server-url http://localhost:8082
     #[command(verbatim_doc_comment)]
+    /// NoETL instance identity, registration, discovery and task handoff
+    ///
+    /// Give this NoETL an ML-DSA-87 identity, register it with a control plane
+    /// (outbound, heartbeating), find peers by capability, hand them playbook runs, and
+    /// take runs from them by pulling an inbox. Needs a server with
+    /// NOETL_INSTANCE_REGISTRY=true.
+    Instance {
+        #[command(subcommand)]
+        command: instance::InstanceCommand,
+    },
     Subscribe {
         /// Path to a kind:Subscription YAML spec
         #[arg(value_name = "SPEC")]
@@ -2071,7 +2082,7 @@ fn run_local_with_event_buffer(
 }
 
 /// Build variables map from payload JSON and --set flags
-fn build_variables(payload: Option<&str>, variables: &[String]) -> Result<HashMap<String, String>> {
+pub(crate) fn build_variables(payload: Option<&str>, variables: &[String]) -> Result<HashMap<String, String>> {
     let mut vars = HashMap::new();
 
     // Parse payload JSON if provided
@@ -2849,6 +2860,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 &config,
             )
             .await?;
+        }
+        Some(Commands::Instance { command }) => {
+            instance::run(command).await?;
         }
         Some(Commands::Subscribe {
             reference,
