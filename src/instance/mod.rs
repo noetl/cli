@@ -907,8 +907,21 @@ mod tests {
             offer: vec!["edge/*".into()],
             accept_tasks: true,
             peers: vec![],
+            reach: None,
+            endpoint: None,
         };
         let b = caps.body().unwrap();
+        assert!(b.get("reach").is_none(), "pull is the server default; not sent");
+        let mut push = caps.clone();
+        push.reach = Some("push".into());
+        push.endpoint = Some("https://edge.example/push".into());
+        let pb = push.body().unwrap();
+        assert_eq!(
+            (pb["reach"].as_str(), pb["endpoint"].as_str()),
+            (Some("push"), Some("https://edge.example/push"))
+        );
+        push.reach = Some("carrier-pigeon".into());
+        assert!(push.body().is_err());
         assert_eq!(b["tool_kinds"].as_array().unwrap().len(), LOCAL_TOOL_KINDS.len());
         assert_eq!(b["labels"]["arch"], "arm64");
         assert!(b["version"].as_str().unwrap().starts_with("noetl-cli/"));
