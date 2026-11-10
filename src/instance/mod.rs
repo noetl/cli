@@ -169,6 +169,13 @@ pub struct CapsArgs {
     /// A peer instance id this one knows, repeatable
     #[arg(long = "peer", value_name = "ID")]
     pub peers: Vec<String>,
+    /// How work reaches this instance: inbox (pull, the default) | push (also POSTed to
+    /// --endpoint when the control plane allows it). `serve --push-endpoint` sets both.
+    #[arg(long, value_name = "inbox|push")]
+    pub reach: Option<String>,
+    /// The URL a push goes to (a receiver this instance, or a sidecar, serves)
+    #[arg(long, value_name = "URL")]
+    pub endpoint: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -241,7 +248,17 @@ impl CapsArgs {
             "accepts_tasks": self.accept_tasks,
             "known_peers": self.peers,
         });
-        for (k, v) in [("name", &self.name), ("site", &self.site)] {
+        if let Some(r) = &self.reach {
+            if !matches!(r.as_str(), "inbox" | "push") {
+                bail!("--reach must be inbox or push");
+            }
+        }
+        for (k, v) in [
+            ("name", &self.name),
+            ("site", &self.site),
+            ("reach", &self.reach),
+            ("endpoint", &self.endpoint),
+        ] {
             if let Some(v) = v {
                 b[k] = json!(v);
             }
