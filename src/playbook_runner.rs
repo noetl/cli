@@ -1363,6 +1363,10 @@ impl PlaybookRunner {
                 thinking,
                 effort,
                 prompt_cache,
+                mcp_servers,
+                agents,
+                remote,
+                input,
             } => {
                 // The runner drives the noetl-tools AgentSession turn by turn:
                 // each model turn is one async call, and every tool the model
@@ -1417,6 +1421,22 @@ impl PlaybookRunner {
                         None => None,
                     },
                     prompt_cache: *prompt_cache,
+                    mcp_servers: match mcp_servers {
+                        Some(v) => Some(self.render_yaml_value(v, context)?),
+                        None => None,
+                    },
+                    agents: match agents {
+                        Some(v) => Some(self.render_yaml_value(v, context)?),
+                        None => None,
+                    },
+                    remote: match remote {
+                        Some(v) => Some(self.render_yaml_value(v, context)?),
+                        None => None,
+                    },
+                    input: match input {
+                        Some(v) => Some(self.render_yaml_value(v, context)?),
+                        None => None,
+                    },
                 };
                 let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
                     execution_id: 0,
@@ -1450,14 +1470,84 @@ impl PlaybookRunner {
                             return Ok(Some(serde_json::to_string(&value)?));
                         }
                         noetl_tools::tools::AgentTurn::ToolCalls(calls) => {
-                            let outputs = calls
-                                .iter()
-                                .map(|call| self.run_agent_tool_call(&session, call, context))
-                                .collect();
+                            let mut outputs = Vec::with_capacity(calls.len());
+                            for call in &calls {
+                                // `mcp_servers:` / `agents:` calls are answered by
+                                // the session itself (the same code the worker
+                                // runs); `tools:` calls run here as sub-playbooks.
+                                let sourced = tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current().block_on(session.run_source_tool(call))
+                                });
+                                outputs.push(match sourced {
+                                    Some(out) => out,
+                                    None => self.run_agent_tool_call(&session, call, context),
+                                });
+                            }
                             session.submit_tool_results(outputs);
                         }
                     }
                 }
+            }
+            Tool::Mcp {
+                endpoint,
+                server,
+                method,
+                tool,
+                arguments,
+                params,
+                timeout,
+                headers,
+                auth,
+                on_provider_error,
+                protocol_version,
+            } => {
+                let opt = |v: &Option<String>| -> Result<Option<String>> {
+                    v.as_ref().map(|s| self.render_template(s, context)).transpose()
+                };
+                let yaml = |v: &Option<serde_yaml::Value>| -> Result<Option<serde_yaml::Value>> {
+                    v.as_ref().map(|y| self.render_yaml_value(y, context)).transpose()
+                };
+                let rendered_tool = Tool::Mcp {
+                    endpoint: opt(endpoint)?,
+                    server: opt(server)?,
+                    method: opt(method)?,
+                    tool: opt(tool)?,
+                    arguments: yaml(arguments)?,
+                    params: yaml(params)?,
+                    timeout: yaml(timeout)?,
+                    headers: yaml(headers)?,
+                    auth: yaml(auth)?,
+                    on_provider_error: opt(on_provider_error)?,
+                    protocol_version: opt(protocol_version)?,
+                };
+                if self.verbose {
+                    eprintln!(
+                        "   🔌 MCP {} {}",
+                        match &rendered_tool {
+                            Tool::Mcp { method, .. } => method.as_deref().unwrap_or("tools/call"),
+                            _ => "",
+                        },
+                        match &rendered_tool {
+                            Tool::Mcp { tool, .. } => tool.as_deref().unwrap_or(""),
+                            _ => "",
+                        }
+                    );
+                }
+                let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
+                    execution_id: 0,
+                    step: "<cli-local>",
+                    variables: &context.variables,
+                    server_url: String::new(),
+                    worker_id: None,
+                    command_id: None,
+                };
+                let outcome = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(noetl_executor::tools_bridge::dispatch_via_registry(
+                        &rendered_tool,
+                        &bridge_ctx,
+                    ))
+                })?;
+                Ok(outcome.result)
             }
             Tool::Unsupported => {
                 // `reject_unsupported_kinds` refuses every unknown kind before
@@ -1731,7 +1821,7 @@ const NOOP_KINDS: &[&str] = &["noop"];
 /// For the error message only. The check itself asks the [`Tool`] enum, so this
 /// list cannot make a kind pass or fail.
 const LOCAL_KINDS_FOR_MESSAGE: &str =
-    "shell, http, playbook, duckdb, auth, sink, rhai, provider, agent, noop";
+    "shell, http, playbook, duckdb, auth, sink, rhai, provider, agent, mcp, noop";
 
 /// Fail when any workflow step uses a tool kind the local runtime cannot run.
 ///
@@ -1759,6 +1849,19 @@ fn reject_unsupported_kinds(playbook: &Playbook, content: &str, path: &Path) -> 
             (step.step.clone(), kind)
         })
         .filter(|(_, kind)| !NOOP_KINDS.contains(&kind.as_str()))
+        .chain(playbook.workflow.iter().filter_map(|step| match &step.tool {
+            // `server: mcp/<path>` with no endpoint names a catalog `kind: Mcp`
+            // resource, which only the cluster can resolve. Refuse it here
+            // rather than fail mid-run, unless an endpoint env var covers it.
+            Some(Tool::Mcp {
+                endpoint: None,
+                server: Some(server),
+                ..
+            }) if server.starts_with("mcp/") && !mcp_endpoint_env_set(server) => {
+                Some((step.step.clone(), format!("mcp` with catalog server `{server}")))
+            }
+            _ => None,
+        }))
         .collect();
     if offending.is_empty() {
         return Ok(());
@@ -1776,6 +1879,24 @@ fn reject_unsupported_kinds(playbook: &Playbook, content: &str, path: &Path) -> 
         LOCAL_KINDS_FOR_MESSAGE,
         path.display(),
     )
+}
+
+/// Is an endpoint for this MCP server name set in the environment (the same
+/// lookup noetl-tools' `McpTool` performs)?
+fn mcp_endpoint_env_set(server: &str) -> bool {
+    let slug: String = server
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    [format!("NOETL_MCP_{slug}_ENDPOINT"), "NOETL_MCP_URL".to_string()]
+        .iter()
+        .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
 }
 
 /// Break `{{` in a value that came from model output so the sub-playbook's

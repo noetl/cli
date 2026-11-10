@@ -37,7 +37,10 @@ workflow:
     let vars = [("marker".to_string(), marker.display().to_string())].into_iter().collect();
     let err = PlaybookRunner::new(path).with_variables(vars).with_quiet(true).run().unwrap_err();
     let msg = format!("{err:#}");
-    assert!(msg.contains("step `read`: kind `mcp`"), "{msg}");
+    assert!(
+        msg.contains("step `read`: kind `mcp` with catalog server `mcp/noetl-cluster`"),
+        "a catalog MCP reference is cluster-only: {msg}"
+    );
     assert!(msg.contains("step `also`: kind `postgres`"), "every offending step is listed: {msg}");
     assert!(msg.contains("--runtime distributed"), "{msg}");
     assert!(!marker.exists(), "refused at load: the shell step before it must not have run");

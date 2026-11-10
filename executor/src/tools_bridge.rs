@@ -63,7 +63,7 @@ use noetl_tools::auth::GcpAuth;
 use noetl_tools::context::ExecutionContext as ToolsExecutionContext;
 use noetl_tools::registry::{AuthConfig as ToolsAuthConfig, Tool as ToolsRegistryTool, ToolConfig};
 use noetl_tools::result::{ToolResult, ToolStatus};
-use noetl_tools::tools::{AgentSession, DuckdbTool, HttpTool, ProviderTool, RhaiTool, ShellTool};
+use noetl_tools::tools::{AgentSession, DuckdbTool, HttpTool, McpTool, ProviderTool, RhaiTool, ShellTool};
 use tracing::{info_span, Instrument};
 
 use crate::playbook::{AuthConfig as CliAuthConfig, CmdsList, SinkFormat, Tool};
@@ -428,6 +428,10 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             thinking,
             effort,
             prompt_cache,
+            mcp_servers,
+            agents,
+            remote,
+            input,
         } => {
             // Optional fields are omitted when absent so the noetl-tools
             // AgentConfig serde defaults (max_turns=8, max_tokens=4096) apply.
@@ -474,7 +478,56 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
             if let Some(p) = prompt_cache {
                 cfg.insert("prompt_cache".into(), serde_json::json!(p));
             }
+            for (key, value) in [
+                ("mcp_servers", mcp_servers),
+                ("agents", agents),
+                ("remote", remote),
+                ("input", input),
+            ] {
+                if let Some(v) = value {
+                    cfg.insert(key.into(), yaml_to_json(v));
+                }
+            }
             ("agent", serde_json::Value::Object(cfg))
+        }
+        Tool::Mcp {
+            endpoint,
+            server,
+            method,
+            tool,
+            arguments,
+            params,
+            timeout,
+            headers,
+            // Mapped to ToolConfig.auth by `mcp_tool_config`.
+            auth: _,
+            on_provider_error,
+            protocol_version,
+        } => {
+            let mut cfg = serde_json::Map::new();
+            let mut put = |k: &str, v: Option<serde_json::Value>| {
+                if let Some(v) = v {
+                    cfg.insert(k.into(), v);
+                }
+            };
+            put("endpoint", endpoint.as_ref().map(|v| serde_json::json!(v)));
+            put("server", server.as_ref().map(|v| serde_json::json!(v)));
+            put("method", method.as_ref().map(|v| serde_json::json!(v)));
+            put("tool", tool.as_ref().map(|v| serde_json::json!(v)));
+            put("arguments", arguments.as_ref().map(yaml_to_json));
+            put("params", params.as_ref().map(yaml_to_json));
+            put("timeout", timeout.as_ref().map(yaml_to_json));
+            put("headers", headers.as_ref().map(yaml_to_json));
+            put(
+                "on_provider_error",
+                on_provider_error.as_ref().map(|v| serde_json::json!(v)),
+            );
+            put(
+                "protocol_version",
+                protocol_version.as_ref().map(|v| serde_json::json!(v)),
+            );
+            put("client_name", Some(serde_json::json!("noetl-cli")));
+            ("mcp", serde_json::Value::Object(cfg))
         }
         Tool::Unsupported => ("unsupported", serde_json::json!({})),
     };
@@ -1478,6 +1531,18 @@ pub async fn dispatch_via_registry(
                 .map_err(|e| anyhow::anyhow!("provider dispatch failed: {}", e))?;
             from_tools_result(result)
         }
+        Tool::Mcp { .. } => {
+            // Same noetl-tools McpTool as the worker: one implementation of
+            // the MCP client, so a `kind: mcp` step behaves the same locally
+            // and on the cluster.  `auth:` resolves from the local
+            // credential store (env var, then the 0600 file).
+            let (config, ctx) = mcp_tool_config(tool, bridge)?;
+            let result = McpTool::new()
+                .execute(&escape_prerendered(config), &ctx)
+                .await
+                .map_err(|e| anyhow::anyhow!("mcp dispatch failed: {}", e))?;
+            from_tools_result(result)
+        }
         Tool::Agent { .. } => {
             // The agent loop runs tools between model turns, and in the CLI
             // those tools are sub-playbooks — so the runner drives the loop
@@ -1525,10 +1590,72 @@ pub async fn start_agent_session(tool: &Tool, bridge: &BridgeContext<'_>) -> Res
     }
 
     let mut config = to_tools_config(tool);
+    // The tool sources (`mcp_servers:`, `agents:`, `remote:`) each carry their
+    // own `auth:` block; resolve every alias they name from the same local
+    // store, so the session finds them in its context.
+    for alias in source_credential_aliases(&config.config) {
+        let value = crate::local_credentials::resolve(&alias)?;
+        ctx.set_secret(&alias, value);
+    }
     config.auth = auth;
     AgentSession::start(&config, &ctx)
         .await
         .map_err(|e| anyhow::anyhow!("agent start failed: {}", e))
+}
+
+/// Every `auth.credential` alias named by an agent's tool sources.
+fn source_credential_aliases(cfg: &serde_json::Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |v: &serde_json::Value| {
+        if let Some(a) = v.pointer("/auth/credential").and_then(|c| c.as_str()) {
+            if !out.iter().any(|x| x == a) {
+                out.push(a.to_string());
+            }
+        }
+    };
+    for key in ["mcp_servers", "agents"] {
+        for entry in cfg.get(key).and_then(|v| v.as_array()).into_iter().flatten() {
+            push(entry);
+        }
+    }
+    if let Some(r) = cfg.get("remote") {
+        push(r);
+    }
+    out
+}
+
+/// The noetl-tools config and context for a (template-rendered) `Tool::Mcp`.
+///
+/// `auth:` accepts a bare alias (sent as a bearer token) or an `auth:` block;
+/// the alias resolves from the local credential store, and an alias with no
+/// value is an error naming the variable to set.
+pub fn mcp_tool_config(tool: &Tool, bridge: &BridgeContext<'_>) -> Result<(ToolConfig, ToolsExecutionContext)> {
+    let auth = match tool {
+        Tool::Mcp { auth, .. } => auth.as_ref(),
+        _ => anyhow::bail!("mcp_tool_config called with a non-mcp tool"),
+    };
+    let auth = match auth {
+        None => None,
+        Some(serde_yaml::Value::String(alias)) if alias.trim().is_empty() => None,
+        Some(serde_yaml::Value::String(alias)) => Some(ToolsAuthConfig {
+            auth_type: noetl_tools::registry::AuthType::Bearer,
+            credential: Some(alias.trim().to_string()),
+            token: None,
+            username: None,
+            password: None,
+            header: None,
+            scopes: None,
+        }),
+        Some(block) => Some(yaml_auth_to_tools(block, "mcp")?),
+    };
+    let mut ctx = to_tools_context(bridge);
+    if let Some(alias) = auth.as_ref().and_then(|a| a.credential.as_deref()) {
+        let value = crate::local_credentials::resolve(alias)?;
+        ctx.set_secret(alias, value);
+    }
+    let mut config = to_tools_config(tool);
+    config.auth = auth;
+    Ok((config, ctx))
 }
 
 /// Convert a `serde_yaml::Value` to a `serde_json::Value` for the noetl-tools
@@ -1699,7 +1826,57 @@ mod tests {
             thinking: None,
             effort: None,
             prompt_cache: None,
+            mcp_servers: None,
+            agents: None,
+            remote: None,
+            input: None,
         }
+    }
+
+    #[test]
+    fn to_tools_config_agent_carries_tool_sources_and_remote() {
+        let mut tool = agent_tool(None);
+        if let Tool::Agent {
+            mcp_servers, remote, ..
+        } = &mut tool
+        {
+            *mcp_servers = Some(
+                serde_yaml::to_value(serde_json::json!([
+                    {"name": "ehg", "endpoint": "http://x/mcp", "auth": {"type": "bearer", "credential": "ehg_token"}}
+                ]))
+                .unwrap(),
+            );
+            *remote = Some(serde_yaml::to_value(serde_json::json!({"endpoint": "http://y", "agent": "a/b"})).unwrap());
+        }
+        let cfg = to_tools_config(&tool);
+        assert_eq!(cfg.config["mcp_servers"][0]["name"], "ehg");
+        assert_eq!(cfg.config["remote"]["agent"], "a/b");
+        assert_eq!(source_credential_aliases(&cfg.config), vec!["ehg_token".to_string()]);
+    }
+
+    #[test]
+    fn mcp_tool_config_maps_fields_and_a_bare_alias_to_bearer() {
+        let tool: Tool = serde_yaml::from_str(
+            "kind: mcp\nurl: http://x/mcp\nmethod: tools/call\ntool: t\nargs: {a: 1}\nauth: no_such_alias_for_test\non_provider_error: fail\n",
+        )
+        .unwrap();
+        let cfg = to_tools_config(&tool);
+        assert_eq!(cfg.kind, "mcp");
+        assert_eq!(cfg.config["endpoint"], "http://x/mcp");
+        assert_eq!(cfg.config["arguments"]["a"], 1);
+        assert_eq!(cfg.config["on_provider_error"], "fail");
+        let vars = std::collections::HashMap::new();
+        let bridge = BridgeContext {
+            execution_id: 0,
+            step: "s",
+            variables: &vars,
+            server_url: String::new(),
+            worker_id: None,
+            command_id: None,
+        };
+        // The alias has no value: the error names the variable to set.
+        let err = mcp_tool_config(&tool, &bridge).unwrap_err().to_string();
+        assert!(err.contains("NOETL_CREDENTIAL_NO_SUCH_ALIAS_FOR_TEST"), "{err}");
     }
 
     #[test]

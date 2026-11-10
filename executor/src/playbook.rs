@@ -523,9 +523,13 @@ pub enum Tool {
     /// and runs each tool the model calls as a sub-playbook (the tool entry's
     /// `playbook:` binding), so agent tools are ordinary playbooks.
     Agent {
-        /// Agent framework.  Only `claude` is implemented.
+        /// Agent framework: `claude`, `claude-code` or `remote`.
         framework: String,
+        /// Required for `claude` / `claude-code`; unused by `remote`.
+        #[serde(default)]
         model: String,
+        /// Required for `claude` / `claude-code`; `remote`'s default message.
+        #[serde(default)]
         prompt: String,
         #[serde(default)]
         system: Option<String>,
@@ -568,6 +572,68 @@ pub enum Tool {
         /// `claude` only: Anthropic prompt caching (tool default: on).
         #[serde(default)]
         prompt_cache: Option<bool>,
+        /// `claude` only: MCP servers whose tools the model may call
+        /// (`[{name, endpoint, auth?, headers?, tools?}]`).  The noetl-tools
+        /// session answers these calls itself.
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        mcp_servers: Option<serde_yaml::Value>,
+        /// `claude` only: external agents the model may call
+        /// (`[{name, endpoint, protocol: noetl|a2a, agent?, auth?}]`).
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        agents: Option<serde_yaml::Value>,
+        /// `remote` only: `{endpoint, protocol: noetl|a2a, agent?, auth?, timeout?}`.
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        remote: Option<serde_yaml::Value>,
+        /// `remote` only: the input sent to the remote agent.
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        input: Option<serde_yaml::Value>,
+    },
+    /// MCP call (`kind: mcp`): `initialize` + one JSON-RPC method against an
+    /// MCP server, through the noetl-tools `McpTool` — the same
+    /// implementation the cluster worker runs.
+    Mcp {
+        /// Server URL.  Unset: `NOETL_MCP_<SERVER>_ENDPOINT`, then `NOETL_MCP_URL`.
+        #[serde(default, alias = "url")]
+        endpoint: Option<String>,
+        /// Logical server name (env lookup key; reported in the result).
+        #[serde(default, alias = "name")]
+        server: Option<String>,
+        /// `tools/call` (default), `tools/list`, `health`, or any method.
+        #[serde(default, alias = "action")]
+        method: Option<String>,
+        /// Tool name for `tools/call`.
+        #[serde(default, alias = "tool_name")]
+        tool: Option<String>,
+        #[serde(default, alias = "args")]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        arguments: Option<serde_yaml::Value>,
+        /// Params for methods other than `tools/call` / `tools/list`.
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        params: Option<serde_yaml::Value>,
+        /// Seconds.
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        timeout: Option<serde_yaml::Value>,
+        /// Literal headers.
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        headers: Option<serde_yaml::Value>,
+        /// A credential alias (sent as a bearer token) or an `auth:` block
+        /// (`type: bearer|basic|api_key`, `credential: <alias>`), resolved from
+        /// the local credential store.
+        #[serde(default)]
+        #[cfg_attr(feature = "json-schema", schemars(with = "serde_json::Value"))]
+        auth: Option<serde_yaml::Value>,
+        /// `fail` | `continue` (default).
+        #[serde(default)]
+        on_provider_error: Option<String>,
+        #[serde(default)]
+        protocol_version: Option<String>,
     },
     #[serde(other)]
     Unsupported,

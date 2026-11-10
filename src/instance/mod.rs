@@ -27,8 +27,8 @@ use identity::InstanceKey;
 /// Tool kinds the local runtime executes, advertised by default. Guarded by a test that
 /// parses each one through the executor's `Tool` enum, so this list cannot claim a kind
 /// the runtime would reject.
-pub const LOCAL_TOOL_KINDS: [&str; 9] = [
-    "shell", "http", "playbook", "duckdb", "auth", "sink", "rhai", "provider", "agent",
+pub const LOCAL_TOOL_KINDS: [&str; 10] = [
+    "shell", "http", "playbook", "duckdb", "auth", "sink", "rhai", "provider", "agent", "mcp",
 ];
 
 #[derive(Subcommand, Debug)]
@@ -670,9 +670,9 @@ mod tests {
                 "`{kind}` is advertised but the local runtime does not know it"
             );
         }
-        let mcp: noetl_executor::playbook::Tool = serde_yaml::from_str("kind: mcp").unwrap();
+        let unknown: noetl_executor::playbook::Tool = serde_yaml::from_str("kind: postgres").unwrap();
         assert!(
-            matches!(mcp, noetl_executor::playbook::Tool::Unsupported),
+            matches!(unknown, noetl_executor::playbook::Tool::Unsupported),
             "control: an unknown kind is Unsupported"
         );
     }
