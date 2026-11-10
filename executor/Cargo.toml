@@ -1,5 +1,9 @@
 [package]
 name = "noetl-executor"
+# 0.14.0 — `Tool::Playbook` gains `return_result` and `result_step` (the local
+# runtime returns the child's result to the parent, same opt-in fields as the
+# cluster's noetl-tools `PlaybookConfig`).  New fields on a public enum variant
+# break exhaustive construction and patterns downstream, so a 0.x MINOR.
 # 0.13.2 — `tools_bridge::dispatch_via_registry` escapes `{{` / `{%` / `{#` in the
 # already-rendered config it hands noetl-tools, whose own minijinja pass then
 # reproduces it verbatim instead of rendering data a second time
@@ -62,7 +66,7 @@ name = "noetl-executor"
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.13.3"
+version = "0.14.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
