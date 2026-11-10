@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.0.0](https://github.com/noetl/cli/compare/v5.7.0...v6.0.0) (2026-11-10)
+
+### ⚠ BREAKING CHANGES
+
+* **local:** a local run of a playbook containing a tool kind the local
+runtime cannot execute now exits non-zero instead of skipping those steps.
+There is no opt-out switch; this was approved by the owner (build plan
+
+### Features
+
+* **local:** fail on unsupported tool kinds instead of skipping them ([e5753e4](https://github.com/noetl/cli/commit/e5753e490fffd8f7babf38b3ff0164b06fe60e5f)), closes [noetl/ai-meta#544](https://github.com/noetl/ai-meta/issues/544) [noetl/ai-meta#539](https://github.com/noetl/ai-meta/issues/539)
+
 ## [5.7.0](https://github.com/noetl/cli/compare/v5.6.0...v5.7.0) (2026-11-10)
 
 ### Features
