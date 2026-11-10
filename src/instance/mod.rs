@@ -101,6 +101,25 @@ pub enum InstanceCommand {
         /// Exit after handling this many tasks (0 = run until stopped)
         #[arg(long, default_value_t = 0)]
         max_tasks: u64,
+        /// Also accept tasks pushed by the control plane: listen here (e.g. 0.0.0.0:7410).
+        /// Needs --push-endpoint. The inbox is still polled, so nothing depends on the push.
+        #[arg(long, value_name = "ADDR", requires = "push_endpoint")]
+        push_listen: Option<String>,
+        /// The URL the control plane should push to (what reaches --push-listen). Its origin
+        /// must be in the control plane's NOETL_INSTANCE_PUSH_ORIGINS.
+        #[arg(long, value_name = "URL", requires = "push_listen")]
+        push_endpoint: Option<String>,
+    },
+    /// Become trusted by a control plane in enrollment mode, with a token an operator minted
+    Enroll {
+        #[command(flatten)]
+        conn: Conn,
+        /// The enrollment token (`nie-…`). Prefer --token-file to keep it out of shell history.
+        #[arg(long, conflicts_with = "token_file")]
+        token: Option<String>,
+        /// A file holding the enrollment token
+        #[arg(long, value_name = "FILE")]
+        token_file: Option<PathBuf>,
     },
 }
 
@@ -150,6 +169,13 @@ pub struct CapsArgs {
     /// A peer instance id this one knows, repeatable
     #[arg(long = "peer", value_name = "ID")]
     pub peers: Vec<String>,
+    /// How work reaches this instance: inbox (pull, the default) | push (also POSTed to
+    /// --endpoint when the control plane allows it). `serve --push-endpoint` sets both.
+    #[arg(long, value_name = "inbox|push")]
+    pub reach: Option<String>,
+    /// The URL a push goes to (a receiver this instance, or a sidecar, serves)
+    #[arg(long, value_name = "URL")]
+    pub endpoint: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -222,7 +248,17 @@ impl CapsArgs {
             "accepts_tasks": self.accept_tasks,
             "known_peers": self.peers,
         });
-        for (k, v) in [("name", &self.name), ("site", &self.site)] {
+        if let Some(r) = &self.reach {
+            if !matches!(r.as_str(), "inbox" | "push") {
+                bail!("--reach must be inbox or push");
+            }
+        }
+        for (k, v) in [
+            ("name", &self.name),
+            ("site", &self.site),
+            ("reach", &self.reach),
+            ("endpoint", &self.endpoint),
+        ] {
             if let Some(v) = v {
                 b[k] = json!(v);
             }
@@ -490,6 +526,44 @@ pub fn run_task(task: &Value, playbook_dir: &Path, offer: &[String]) -> std::res
     }
 }
 
+/// Constant-time equality for the push bearer.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// The push receiver: checks the bearer the control plane issued at registration and
+/// forwards each pushed task to the run loop. Answers 202 at once; results go back signed.
+async fn push_receiver(listener: tokio::net::TcpListener, token: String, tx: tokio::sync::mpsc::Sender<Value>) {
+    use axum::http::{HeaderMap, StatusCode};
+    let expected = format!("Bearer {token}");
+    let app = axum::Router::new().fallback(axum::routing::post(
+        move |headers: HeaderMap, body: axum::body::Bytes| {
+            let (expected, tx) = (expected.clone(), tx.clone());
+            async move {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                if !same(auth.as_bytes(), expected.as_bytes()) {
+                    return StatusCode::UNAUTHORIZED;
+                }
+                let Ok(v) = serde_json::from_slice::<Value>(&body) else {
+                    return StatusCode::BAD_REQUEST;
+                };
+                for t in v["tasks"].as_array().cloned().unwrap_or_default() {
+                    if tx.send(t).await.is_err() {
+                        return StatusCode::SERVICE_UNAVAILABLE;
+                    }
+                }
+                StatusCode::ACCEPTED
+            }
+        },
+    ));
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("push receiver stopped: {e}");
+    }
+}
+
 async fn heartbeat_forever(client: std::sync::Arc<Client>, caps: Value, mut every: u64) {
     loop {
         tokio::time::sleep(Duration::from_secs(every.max(1))).await;
@@ -586,18 +660,51 @@ pub async fn run(cmd: InstanceCommand) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
+        InstanceCommand::Enroll {
+            conn,
+            token,
+            token_file,
+        } => {
+            let token = match (token, token_file) {
+                (Some(t), _) => t,
+                (None, Some(f)) => {
+                    std::fs::read_to_string(&f).with_context(|| format!("--token-file {}", f.display()))?
+                }
+                (None, None) => bail!("give --token or --token-file"),
+            };
+            let client = Client::new(&conn)?;
+            let r = client
+                .ok("/api/instances/enroll", "enroll", json!({"token": token.trim()}))
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+        }
         InstanceCommand::Serve {
             conn,
             mut caps,
             playbook_dir,
             max_tasks,
+            push_listen,
+            push_endpoint,
         } => {
             caps.accept_tasks = true;
             if caps.offer.is_empty() {
                 bail!("serve needs at least one --offer PATH|GLOB: what this instance runs for others");
             }
             let client = std::sync::Arc::new(Client::new(&conn)?);
-            let body = caps.body()?;
+            let mut body = caps.body()?;
+            // Bind before registering, so a push that follows the registration has a listener.
+            let listener = match &push_listen {
+                Some(addr) => Some(
+                    tokio::net::TcpListener::bind(addr)
+                        .await
+                        .with_context(|| format!("--push-listen {addr}"))?,
+                ),
+                None => None,
+            };
+            if let Some(ep) = &push_endpoint {
+                body["reach"] = json!("push");
+                body["endpoint"] = json!(ep);
+            }
             let r = client.register(&body).await?;
             eprintln!(
                 "instance {} registered with {} as {}",
@@ -605,25 +712,57 @@ pub async fn run(cmd: InstanceCommand) -> Result<()> {
                 conn.server,
                 r["control_plane"]
             );
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(64);
+            let mut push = None;
+            if let Some(l) = listener {
+                match r["push_token"].as_str() {
+                    Some(tok) => {
+                        eprintln!(
+                            "accepting pushes on {} for {}",
+                            push_listen.as_deref().unwrap_or(""),
+                            push_endpoint.as_deref().unwrap_or("")
+                        );
+                        push = Some(tokio::spawn(push_receiver(l, tok.to_string(), tx.clone())));
+                    }
+                    None => eprintln!("the control plane issued no push token (push is off there); pulling only"),
+                }
+            }
             let every = r["heartbeat_secs"].as_u64().unwrap_or(60);
             let hb = tokio::spawn(heartbeat_forever(client.clone(), body, every));
+            // The inbox is always polled: push is an accelerator, never the only path.
+            let poller = {
+                let (client, tx) = (client.clone(), tx.clone());
+                tokio::spawn(async move {
+                    loop {
+                        match client
+                            .ok("/api/instances/inbox", "inbox.claim", json!({"wait_ms": 20_000}))
+                            .await
+                        {
+                            Ok(v) => {
+                                for t in v["tasks"].as_array().cloned().unwrap_or_default() {
+                                    if tx.send(t).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("inbox poll failed: {e:#}; retrying");
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                            }
+                        }
+                    }
+                })
+            };
+            drop(tx);
             let mut handled = 0u64;
-            let result = loop {
+            let result: Result<()> = loop {
                 if max_tasks > 0 && handled >= max_tasks {
                     break Ok(());
                 }
-                let claimed = match client
-                    .ok("/api/instances/inbox", "inbox.claim", json!({"wait_ms": 20_000}))
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("inbox poll failed: {e:#}; retrying");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
-                    }
+                let Some(task) = rx.recv().await else {
+                    break Ok(());
                 };
-                for task in claimed["tasks"].as_array().cloned().unwrap_or_default() {
+                {
                     let task_id = task["task_id"].clone();
                     eprintln!("task {task_id} from {}: {}", task["from"], task["playbook"]["path"]);
                     let (dir, offer, t) = (playbook_dir.clone(), caps.offer.clone(), task.clone());
@@ -647,6 +786,10 @@ pub async fn run(cmd: InstanceCommand) -> Result<()> {
                     handled += 1;
                 }
             };
+            poller.abort();
+            if let Some(p) = push {
+                p.abort();
+            }
             hb.abort();
             let _ = client.call("/api/instances/deregister", "deregister", json!({})).await;
             return result;
@@ -675,6 +818,44 @@ mod tests {
             matches!(mcp, noetl_executor::playbook::Tool::Unsupported),
             "control: an unknown kind is Unsupported"
         );
+    }
+
+    #[tokio::test]
+    async fn the_push_receiver_checks_the_bearer_and_forwards_tasks() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/push", l.local_addr().unwrap());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(push_receiver(l, "npt-secret".into(), tx));
+        let http = reqwest::Client::new();
+        let body = json!({"tasks": [{"task_id": "rt-1", "claim_id": "claim-1"}]});
+        let r = http
+            .post(&url)
+            .bearer_auth("npt-wrong")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 401);
+        let r = http.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 401, "no bearer");
+        let r = http
+            .post(&url)
+            .bearer_auth("npt-secret")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 202);
+        let t = rx.recv().await.unwrap();
+        assert_eq!(t["task_id"], "rt-1");
+        assert!(rx.try_recv().is_err(), "the refused pushes forwarded nothing");
+    }
+
+    #[test]
+    fn bearer_comparison() {
+        assert!(same(b"Bearer a", b"Bearer a"));
+        assert!(!same(b"Bearer a", b"Bearer b"));
+        assert!(!same(b"Bearer a", b"Bearer ab"));
     }
 
     #[test]
@@ -726,8 +907,21 @@ mod tests {
             offer: vec!["edge/*".into()],
             accept_tasks: true,
             peers: vec![],
+            reach: None,
+            endpoint: None,
         };
         let b = caps.body().unwrap();
+        assert!(b.get("reach").is_none(), "pull is the server default; not sent");
+        let mut push = caps.clone();
+        push.reach = Some("push".into());
+        push.endpoint = Some("https://edge.example/push".into());
+        let pb = push.body().unwrap();
+        assert_eq!(
+            (pb["reach"].as_str(), pb["endpoint"].as_str()),
+            (Some("push"), Some("https://edge.example/push"))
+        );
+        push.reach = Some("carrier-pigeon".into());
+        assert!(push.body().is_err());
         assert_eq!(b["tool_kinds"].as_array().unwrap().len(), LOCAL_TOOL_KINDS.len());
         assert_eq!(b["labels"]["arch"], "arm64");
         assert!(b["version"].as_str().unwrap().starts_with("noetl-cli/"));
