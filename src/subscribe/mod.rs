@@ -55,6 +55,8 @@ pub struct SubscribeArgs {
     pub once: bool,
     /// Verbose dispatch output.
     pub verbose: bool,
+    /// Serve exposed playbooks (MCP + agents) alongside the subscription.
+    pub serve: Option<crate::serve::ServeConfig>,
 }
 
 /// Entry point dispatched from `main`.
@@ -150,9 +152,33 @@ pub async fn run(args: SubscribeArgs) -> Result<()> {
         );
     }
 
-    // 6. Run with a Ctrl-C / SIGTERM shutdown.
+    // 6. Run with a Ctrl-C / SIGTERM shutdown.  With `--serve`, the MCP /
+    // agent listener runs for the daemon's lifetime and stops with it.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let server = match args.serve.clone() {
+        None => None,
+        Some(cfg) => {
+            let mut rx = stop_rx.clone();
+            Some(tokio::spawn(crate::serve::serve(cfg, async move {
+                let _ = rx.changed().await;
+            })))
+        }
+    };
     let rt = LocalRuntime::new(parsed, sink, dispatcher, ids, credential, stop);
-    let summary = rt.run(shutdown_signal()).await?;
+    let summary = rt
+        .run(async move {
+            shutdown_signal().await;
+        })
+        .await;
+    let _ = stop_tx.send(true);
+    if let Some(h) = server {
+        match h.await {
+            Ok(Err(e)) => eprintln!("serve stopped with an error: {e:#}"),
+            Err(e) => eprintln!("serve task failed: {e}"),
+            Ok(Ok(())) => {}
+        }
+    }
+    let summary = summary?;
 
     eprintln!(
         "✓ subscription stopped — received={} dispatched={} spooled={} replayed={} failed={} pending_spooled={}",

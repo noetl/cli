@@ -1,0 +1,12 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata: { name: d2_remote_a2a }
+workflow:
+  - step: start
+    next: [ { step: ask } ]
+  - step: ask
+    tool:
+      kind: agent
+      framework: remote
+      remote: { endpoint: "{{ workload.a2a }}", protocol: a2a }
+      prompt: d2-a2a

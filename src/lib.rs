@@ -23,6 +23,7 @@ mod buffer_cli;
 pub mod playbook_runner;
 mod provider_cli;
 mod subscribe;
+pub mod serve;
 mod instance;
 
 /// The local execution engine and its structured outcome.
@@ -282,6 +283,60 @@ enum Commands {
         once: bool,
 
         /// Verbose dispatch output
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Also serve the playbooks under --serve-playbooks as an MCP server
+        /// (POST /mcp) and as agents (/api/agents/*) on this address, for as
+        /// long as the daemon runs (same surface as `noetl serve`)
+        #[arg(long, value_name = "ADDR")]
+        serve: Option<std::net::SocketAddr>,
+
+        /// Directory of playbooks to serve (default: --playbook-dir, then the spec dir)
+        #[arg(long, value_name = "DIR")]
+        serve_playbooks: Option<PathBuf>,
+
+        /// Bearer token file required by the served routes (needed off loopback)
+        #[arg(long, value_name = "FILE")]
+        serve_token_file: Option<PathBuf>,
+
+        /// Allowed agent callback origin, scheme://host[:port] (repeatable)
+        #[arg(long = "callback-origin", value_name = "ORIGIN")]
+        callback_origins: Vec<String>,
+    },
+    /// Serve playbooks that opt in with metadata.expose as an MCP server
+    /// (POST /mcp) and as agents with callbacks (/api/agents/*), run on the
+    /// local runtime
+    Serve {
+        /// Directory scanned (recursively, on every request) for exposed playbooks
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        playbooks: PathBuf,
+
+        /// Listen address (loopback by default; any other address needs --token-file)
+        #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8765")]
+        listen: std::net::SocketAddr,
+
+        /// Bearer token file required on every route but /healthz
+        #[arg(long, value_name = "FILE")]
+        token_file: Option<PathBuf>,
+
+        /// Allowed agent callback origin, scheme://host[:port] (repeatable; none refuses every callback_url)
+        #[arg(long = "callback-origin", value_name = "ORIGIN")]
+        callback_origins: Vec<String>,
+
+        /// Do not serve POST /mcp
+        #[arg(long)]
+        no_mcp: bool,
+
+        /// Do not serve /api/agents
+        #[arg(long)]
+        no_agents: bool,
+
+        /// Playbooks run at once; more are refused with 503
+        #[arg(long, default_value_t = 4)]
+        max_concurrent: usize,
+
+        /// Verbose playbook output
         #[arg(short, long)]
         verbose: bool,
     },
@@ -2875,7 +2930,36 @@ async fn dispatch(cli: Cli) -> Result<()> {
             max_messages,
             once,
             verbose,
+            serve,
+            serve_playbooks,
+            serve_token_file,
+            callback_origins,
         }) => {
+            let serve = match serve {
+                None => None,
+                Some(listen) => Some(serve::ServeConfig {
+                    playbooks: serve_playbooks
+                        .clone()
+                        .or_else(|| playbook_dir.clone())
+                        .or_else(|| {
+                            std::path::Path::new(&reference).parent().map(|p| {
+                                if p.as_os_str().is_empty() {
+                                    PathBuf::from(".")
+                                } else {
+                                    p.to_path_buf()
+                                }
+                            })
+                        })
+                        .unwrap_or_else(|| PathBuf::from(".")),
+                    listen,
+                    mcp: true,
+                    agents: true,
+                    token: serve_token_file.as_deref().map(serve::read_token_file).transpose()?,
+                    callback_origins,
+                    max_concurrent: 4,
+                    verbose,
+                }),
+            };
             // Default the server URL (for --dispatch server) to the resolved
             // base URL when not given explicitly.
             let server_url = server_url.or_else(|| {
@@ -2896,6 +2980,32 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 max_messages,
                 once,
                 verbose,
+                serve,
+            })
+            .await?;
+        }
+        Some(Commands::Serve {
+            playbooks,
+            listen,
+            token_file,
+            callback_origins,
+            no_mcp,
+            no_agents,
+            max_concurrent,
+            verbose,
+        }) => {
+            let cfg = serve::ServeConfig {
+                playbooks,
+                listen,
+                mcp: !no_mcp,
+                agents: !no_agents,
+                token: token_file.as_deref().map(serve::read_token_file).transpose()?,
+                callback_origins,
+                max_concurrent,
+                verbose,
+            };
+            serve::serve(cfg, async {
+                let _ = tokio::signal::ctrl_c().await;
             })
             .await?;
         }

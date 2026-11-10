@@ -1,0 +1,13 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata: { name: d1_mcp }
+workflow:
+  - step: start
+    next: [ { step: call } ]
+  - step: call
+    tool:
+      kind: mcp
+      endpoint: "{{ workload.mcp }}"
+      tool: site_status
+      arguments: { question: d1 }
+      on_provider_error: fail

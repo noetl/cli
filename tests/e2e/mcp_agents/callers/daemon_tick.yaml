@@ -1,0 +1,31 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata: { name: daemon_tick }
+workflow:
+  - step: start
+    next: [ { step: d1 } ]
+  - step: d1
+    tool: { kind: playbook, path: d1_mcp.yaml, args: { mcp: "{{ workload.mcp }}", peer: "{{ workload.peer }}", a2a: "{{ workload.a2a }}", model: "{{ workload.model }}" }, return_result: true }
+    next: [ { step: d2a } ]
+  - step: d2a
+    tool: { kind: playbook, path: d2_remote_noetl.yaml, args: { mcp: "{{ workload.mcp }}", peer: "{{ workload.peer }}", a2a: "{{ workload.a2a }}", model: "{{ workload.model }}" }, return_result: true }
+    next: [ { step: d2b } ]
+  - step: d2b
+    tool: { kind: playbook, path: d2_remote_a2a.yaml, args: { mcp: "{{ workload.mcp }}", peer: "{{ workload.peer }}", a2a: "{{ workload.a2a }}", model: "{{ workload.model }}" }, return_result: true }
+    next: [ { step: d2c } ]
+  - step: d2c
+    tool: { kind: playbook, path: d2_agent_sources.yaml, args: { mcp: "{{ workload.mcp }}", peer: "{{ workload.peer }}", a2a: "{{ workload.a2a }}", model: "{{ workload.model }}" }, return_result: true }
+    next: [ { step: record } ]
+  # The daemon's JSONL trail records playbook start/finish only; write the
+  # step results where the e2e script can read them.
+  - step: record
+    tool:
+      kind: shell
+      cmds:
+        - |
+          cat > "$NOETL_E2E_OUT" <<'NOETL_E2E_EOF'
+          d1: {{ d1.result }}
+          d2a: {{ d2a.result }}
+          d2b: {{ d2b.result }}
+          d2c: {{ d2c.result }}
+          NOETL_E2E_EOF

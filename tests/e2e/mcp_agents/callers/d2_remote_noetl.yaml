@@ -1,0 +1,12 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata: { name: d2_remote_noetl }
+workflow:
+  - step: start
+    next: [ { step: ask } ]
+  - step: ask
+    tool:
+      kind: agent
+      framework: remote
+      remote: { endpoint: "{{ workload.peer }}", protocol: noetl, agent: site/ask, timeout: 60 }
+      input: { question: d2-noetl }
