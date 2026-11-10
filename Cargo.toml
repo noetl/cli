@@ -115,6 +115,8 @@ reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
 ] }
 tokio = { version = "1", features = ["full", "process"] }
+# The `noetl instance serve --push-listen` receiver (already in the tree via arrow-flight/tonic).
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
 dirs = "5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
