@@ -962,6 +962,7 @@ impl PlaybookRunner {
                 // `noetl_executor::tools_bridge::prepare_sub_playbook_vars`
                 // so future callers (and unit tests) can reuse it.
                 let rendered_path = self.render_template(path, context)?;
+                refuse_remote_reference(&rendered_path)?;
                 let playbook_path = self.resolve_playbook_path(&rendered_path)?;
 
                 if self.verbose {
@@ -1814,6 +1815,31 @@ impl PlaybookRunner {
     }
 }
 
+/// Cross-instance references (`noetl://<instance>/…`, `peer/<instance>/…`)
+/// name a playbook another NoETL instance holds (noetl/ai-meta#548
+/// follow-up). Resolving them needs an instance key, a peer registry and a
+/// catalog, which only a distributed server has (`NOETL_CATALOG_REMOTE_CALLS`).
+/// The local runtime, and `noetl serve` which runs on it, resolve a
+/// sub-playbook as a file next to its parent; without this check such a path
+/// failed as a missing file, which hid what was actually wrong.
+fn refuse_remote_reference(path: &str) -> Result<()> {
+    let remote = path.starts_with("noetl://")
+        || path
+            .strip_prefix("peer/")
+            .and_then(|r| r.split_once('/'))
+            .is_some_and(|(instance, rest)| !instance.is_empty() && !rest.is_empty());
+    if remote {
+        anyhow::bail!(
+            "`kind: playbook` path '{path}' names a playbook on another NoETL instance. \
+             The local runtime and `noetl serve` cannot call another instance (they have no \
+             instance key or peer registry); run this playbook on a distributed server with \
+             NOETL_CATALOG_REMOTE_CALLS=true (`noetl exec` against that server), or copy the \
+             sub-playbook next to this one and call it by its relative path"
+        );
+    }
+    Ok(())
+}
+
 /// Kinds that parse as [`Tool::Unsupported`] on purpose: they do nothing, so
 /// skipping them IS running them.
 const NOOP_KINDS: &[&str] = &["noop"];
@@ -1987,6 +2013,46 @@ impl ExecutionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_references_are_refused_by_name_and_local_paths_pass() {
+        for remote in [
+            "noetl://ni-b/xc/target",
+            "noetl://ni-b/xc/target@2",
+            "peer/ni-b/xc/target",
+        ] {
+            let e = refuse_remote_reference(remote).unwrap_err().to_string();
+            assert!(
+                e.contains("another NoETL instance") && e.contains("NOETL_CATALOG_REMOTE_CALLS"),
+                "{e}"
+            );
+        }
+        for local in ["child.yaml", "./sub/child.yaml", "peer/", "peer/x", "peers/a/b.yaml"] {
+            assert!(refuse_remote_reference(local).is_ok(), "{local}");
+        }
+    }
+
+    #[test]
+    fn a_local_run_that_calls_another_instance_fails_with_the_reason() {
+        let dir = std::env::temp_dir().join(format!("noetl-remote-ref-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pb = dir.join("caller.yaml");
+        std::fs::write(
+            &pb,
+            "apiVersion: noetl.io/v2\nkind: Playbook\nmetadata: { name: caller, path: t/caller }\nworkflow:\n  - step: start\n    tool: { kind: playbook, path: \"noetl://ni-b/xc/target\", remote: delegate, return_result: true }\n",
+        )
+        .unwrap();
+        let err = PlaybookRunner::new(pb)
+            .with_quiet(true)
+            .run()
+            .unwrap_err();
+        let chain = format!("{err:#}");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            chain.contains("names a playbook on another NoETL instance"),
+            "{chain}"
+        );
+    }
 
     #[test]
     fn test_template_rendering() {
