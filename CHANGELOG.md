@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.3.0](https://github.com/noetl/cli/compare/v6.2.0...v6.3.0) (2026-11-11)
+
+### Features
+
+* **serve:** durable agent tasks with --task-db (SQLite) ([770636f](https://github.com/noetl/cli/commit/770636f2f37d428eefea570271dc84b00e0dddd6))
+
 ## [6.2.0](https://github.com/noetl/cli/compare/v6.1.0...v6.2.0) (2026-11-11)
 
 ### Features
