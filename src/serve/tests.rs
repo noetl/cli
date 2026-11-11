@@ -83,6 +83,7 @@ fn cfg(d: &Path) -> ServeConfig {
         callback_origins: vec![],
         max_concurrent: 4,
         verbose: false,
+        task_db: None,
     }
 }
 
@@ -376,4 +377,218 @@ async fn a_non_loopback_listener_needs_a_token() {
     c.listen = "0.0.0.0:0".parse().unwrap();
     let err = serve(c, async {}).await.unwrap_err().to_string();
     assert!(err.contains("--token-file"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// --task-db: durable tasks
+// ---------------------------------------------------------------------------
+
+fn durable(d: &Path, db: &Path) -> ServeConfig {
+    ServeConfig {
+        task_db: Some(db.to_path_buf()),
+        ..cfg(d)
+    }
+}
+
+async fn poll_store(state: &AppState, id: &str) -> Value {
+    let mut view = Value::Null;
+    for _ in 0..80 {
+        let t = state.tasks.get(id).unwrap().expect("task row");
+        view = task_view(id, &t);
+        if view["status"] != "working" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    view
+}
+
+fn echo_input(question: &str, callback: Option<(String, String)>) -> store::TaskInput {
+    let mut args = Map::new();
+    args.insert("question".into(), json!(question));
+    store::TaskInput {
+        agent: "demo/echo".into(),
+        args,
+        result_step: None,
+        callback,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_task_answers_after_a_restart() {
+    let d = dir();
+    let db = d.path().join("state/tasks.db");
+    let base = start(durable(d.path(), &db)).await;
+    let http = reqwest::Client::new();
+    let sent: Value = http
+        .post(format!("{base}/api/agents/send"))
+        .json(&json!({"agent": "demo/echo", "input": {"question": "durable"}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = sent["task_id"].as_str().unwrap().to_string();
+    let mut view = Value::Null;
+    for _ in 0..50 {
+        view = http
+            .get(format!("{base}/api/agents/tasks/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if view["status"] != "working" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(view["result"], "answer: durable", "{view}");
+
+    // A new process on the same file: the task is still there.
+    let base2 = start(durable(d.path(), &db)).await;
+    let again: Value = http
+        .get(format!("{base2}/api/agents/tasks/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again, view);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the task db holds inputs and callback tokens");
+    }
+    // The default store still forgets: a memory server does not know the id.
+    let mem = start(cfg(d.path())).await;
+    let r = http.get(format!("{mem}/api/agents/tasks/{id}")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_task_working_at_the_crash_is_rerun_and_its_callback_delivered() {
+    let d = dir();
+    let db = d.path().join("tasks.db");
+    let cb = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/cb"))
+        .and(header("authorization", "Bearer tok-1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&cb)
+        .await;
+    // The previous process recorded the task, then died before finishing it.
+    {
+        let s = store::TaskStore::open_sqlite(&db).unwrap();
+        s.insert(
+            "1001",
+            &echo_input("after crash", Some((format!("{}/cb", cb.uri()), "tok-1".into()))),
+        )
+        .unwrap();
+    }
+    let state = AppState::open(durable(d.path(), &db)).unwrap();
+    assert_eq!(state.resume().unwrap(), (1, 0));
+    let view = poll_store(&state, "1001").await;
+    assert_eq!(view["status"], "completed", "{view}");
+    assert_eq!(view["result"], "answer: after crash");
+    for _ in 0..30 {
+        if !cb.received_requests().await.unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let got = cb.received_requests().await.unwrap();
+    assert_eq!(got.len(), 1, "the owed callback is delivered once");
+    // Delivered is recorded: another restart owes nothing.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let again = AppState::open(durable(d.path(), &db)).unwrap();
+    assert_eq!(again.resume().unwrap(), (0, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_undelivered_callback_of_a_finished_task_is_delivered_after_a_restart() {
+    let d = dir();
+    let db = d.path().join("tasks.db");
+    let cb = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/cb"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&cb)
+        .await;
+    {
+        let s = store::TaskStore::open_sqlite(&db).unwrap();
+        s.insert(
+            "2002",
+            &echo_input("q", Some((format!("{}/cb", cb.uri()), "tok-2".into()))),
+        )
+        .unwrap();
+        s.finish(
+            "2002",
+            "demo/echo",
+            TaskState::Completed(json!("done before the crash")),
+        )
+        .unwrap();
+    }
+    let state = AppState::open(durable(d.path(), &db)).unwrap();
+    assert_eq!(state.resume().unwrap(), (0, 1));
+    for _ in 0..30 {
+        if !cb.received_requests().await.unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let got = cb.received_requests().await.unwrap();
+    assert_eq!(got.len(), 1);
+    let body: Value = serde_json::from_slice(&got[0].body).unwrap();
+    assert_eq!(body["task_id"], "2002");
+    assert_eq!(body["result"], "done before the crash");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_task_that_keeps_dying_is_failed_by_name_after_the_attempt_limit() {
+    let d = dir();
+    let db = d.path().join("tasks.db");
+    {
+        let s = store::TaskStore::open_sqlite(&db).unwrap();
+        s.insert("3003", &echo_input("q", None)).unwrap();
+        // Two restarts that each died again before the task finished.
+        for _ in 0..(store::MAX_ATTEMPTS - 1) {
+            let n = s.recover().unwrap().len();
+            assert_eq!(n, 1);
+        }
+    }
+    let state = AppState::open(durable(d.path(), &db)).unwrap();
+    assert_eq!(state.resume().unwrap(), (0, 0));
+    let view = task_view("3003", &state.tasks.get("3003").unwrap().unwrap());
+    assert_eq!(view["status"], "failed");
+    assert!(
+        view["error"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted by a restart 3 time(s)"),
+        "{view}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resumed_task_whose_agent_is_gone_fails_by_name() {
+    let d = dir();
+    let db = d.path().join("tasks.db");
+    {
+        let s = store::TaskStore::open_sqlite(&db).unwrap();
+        let mut input = echo_input("q", None);
+        input.agent = "demo/removed".into();
+        s.insert("4004", &input).unwrap();
+    }
+    let state = AppState::open(durable(d.path(), &db)).unwrap();
+    assert_eq!(state.resume().unwrap(), (1, 0));
+    let view = task_view("4004", &state.tasks.get("4004").unwrap().unwrap());
+    assert_eq!(view["status"], "failed");
+    assert!(view["error"].as_str().unwrap().contains("no longer served"), "{view}");
 }
