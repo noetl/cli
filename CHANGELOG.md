@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.1.0](https://github.com/noetl/cli/compare/v6.0.0...v6.1.0) (2026-11-11)
+
+### Features
+
+* **run:** kind: mcp and external agents on the local runtime and daemon ([65aa8eb](https://github.com/noetl/cli/commit/65aa8ebe7559315aabdb27a1cbeb37c1c4cb3ec7)), closes [noetl/tools#118](https://github.com/noetl/tools/issues/118) [noetl/ai-meta#539](https://github.com/noetl/ai-meta/issues/539)
+
 ## [6.0.0](https://github.com/noetl/cli/compare/v5.7.0...v6.0.0) (2026-11-10)
 
 ### ⚠ BREAKING CHANGES
