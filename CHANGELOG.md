@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.2.0](https://github.com/noetl/cli/compare/v6.1.0...v6.2.0) (2026-11-11)
+
+### Features
+
+* **serve:** playbooks as an MCP server and as agents on the local runtime and daemon ([be96e27](https://github.com/noetl/cli/commit/be96e2731dbdb566991e769f5418743df0d4ae5b)), closes [noetl/ai-meta#539](https://github.com/noetl/ai-meta/issues/539)
+
 ## [6.1.0](https://github.com/noetl/cli/compare/v6.0.0...v6.1.0) (2026-11-11)
 
 ### Features
