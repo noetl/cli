@@ -1,5 +1,11 @@
 [package]
 name = "noetl-executor"
+# 0.15.0 — `Tool::Mcp` (`kind: mcp` on the local runtime) and `Tool::Agent` gains
+# `mcp_servers`, `agents`, `remote`, `input`; adds `tools_bridge::mcp_tool_config`
+# and requires noetl-tools 4.5 (McpTool auth/headers, remote agents, tool
+# sources).  A new variant and new fields on the public, non-#[non_exhaustive]
+# `playbook::Tool` enum break exhaustive matches and construction downstream,
+# so a 0.x MINOR.
 # 0.14.0 — `Tool::Playbook` gains `return_result` and `result_step` (the local
 # runtime returns the child's result to the parent, same opt-in fields as the
 # cluster's noetl-tools `PlaybookConfig`).  New fields on a public enum variant
@@ -66,7 +72,7 @@ name = "noetl-executor"
 # replaces _prev/_results injection with explicit set:/input: forward-
 # only data binding.  Bumped from noetl-tools "2.21" → "3" so both the
 # CLI and noetl-worker resolve to the same major version.
-version = "0.14.0"
+version = "0.15.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/noetl/cli"
