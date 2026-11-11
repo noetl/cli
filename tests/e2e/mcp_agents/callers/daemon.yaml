@@ -1,0 +1,10 @@
+apiVersion: noetl.io/v2
+kind: Subscription
+metadata: { name: mcp-agents-e2e }
+spec:
+  source: timer
+  every: 30s
+  immediate: true
+  payload: { mcp: "@MCP@", peer: "@PEER@", a2a: "@A2A@", model: "@MODEL@" }
+  dispatch:
+    playbook: daemon_tick.yaml

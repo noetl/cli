@@ -1,0 +1,20 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: site_ask
+  path: site/ask
+  expose:
+    mcp:
+      tool: site_status
+      description: Status of the site, answered by a NoETL playbook.
+      input_schema:
+        type: object
+        properties: { question: { type: string } }
+        required: [question]
+    agent:
+      card: { name: site-asker, description: Answers questions about the site., version: "1" }
+workflow:
+  - step: start
+    next: [ { step: answer } ]
+  - step: answer
+    tool: { kind: shell, cmds: [ "echo \"site ok ({{ workload.question }}) via $NOETL_E2E_WHO\"" ] }

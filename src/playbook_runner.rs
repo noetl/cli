@@ -1907,7 +1907,7 @@ fn mcp_endpoint_env_set(server: &str) -> bool {
 /// pass is re-scanned by the later ones, so `{{ workload.secret }}` inside an
 /// email the model quotes back would be expanded.  `{{` becomes `{ {`, which
 /// no pass matches.  Remove once the renderer substitutes in a single pass.
-fn defang_template_markers(value: &str) -> String {
+pub(crate) fn defang_template_markers(value: &str) -> String {
     value.replace("{{", "{ {")
 }
 

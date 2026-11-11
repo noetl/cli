@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata: { name: d2_agent_sources }
+workflow:
+  - step: start
+    next: [ { step: ask } ]
+  - step: ask
+    tool:
+      kind: agent
+      framework: claude
+      model: stub
+      prompt: Ask the site over MCP and the peer agent.
+      endpoint: "{{ workload.model }}"
+      max_turns: 3
+      auth: { type: api_key, credential: e2e_model }
+      mcp_servers:
+        - { name: site, endpoint: "{{ workload.mcp }}", tools: [site_status] }
+      agents:
+        - { name: peer_ask, endpoint: "{{ workload.peer }}", agent: site/ask }
