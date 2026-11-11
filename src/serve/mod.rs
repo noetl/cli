@@ -42,14 +42,18 @@
 //!
 //! # What this is not
 //!
-//! Tasks live in memory: they are lost on restart, and the oldest finished
-//! tasks are dropped past [`MAX_TASKS`]. At most `--max-concurrent` playbooks
-//! run at once; more are refused with 503 rather than queued without bound.
+//! By default tasks live in memory: they are lost on restart, and the oldest
+//! finished tasks are dropped past [`MAX_TASKS`]. With `--task-db FILE` they
+//! are kept in SQLite instead ([`store`]): a restart answers for finished
+//! tasks, reruns the ones that were working (at-least-once, bounded), and
+//! delivers callbacks that were still owed. At most `--max-concurrent`
+//! playbooks run at once; more are refused with 503 rather than queued without
+//! bound.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -95,7 +99,12 @@ pub struct ServeConfig {
     pub callback_origins: Vec<String>,
     pub max_concurrent: usize,
     pub verbose: bool,
+    /// SQLite file for durable agent tasks (`--task-db`); `None` = in memory.
+    pub task_db: Option<PathBuf>,
 }
+
+pub mod store;
+use store::{Recovered, TaskInput, TaskStore};
 
 // ---------------------------------------------------------------------------
 // Exposed playbooks
@@ -447,20 +456,20 @@ pub fn select_result(outcome: &RunOutcome, result_step: Option<&str>) -> Result<
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-enum TaskState {
+pub(crate) enum TaskState {
     Working,
     Completed(Value),
     Failed(String),
 }
 
 #[derive(Debug, Clone)]
-struct Task {
+pub(crate) struct Task {
     agent: String,
     state: TaskState,
 }
 
 #[derive(Default)]
-struct Tasks {
+pub(crate) struct Tasks {
     by_id: HashMap<String, Task>,
     order: VecDeque<String>,
 }
@@ -487,24 +496,80 @@ impl Tasks {
 #[derive(Clone)]
 pub struct AppState {
     cfg: Arc<ServeConfig>,
-    tasks: Arc<Mutex<Tasks>>,
+    tasks: Arc<TaskStore>,
     slots: Arc<Semaphore>,
     http: reqwest::Client,
 }
 
 impl AppState {
+    /// [`open`](Self::open), panicking if the task db cannot be opened.
     pub fn new(cfg: ServeConfig) -> Self {
+        Self::open(cfg).expect("open the task store")
+    }
+
+    /// Build the state, opening `cfg.task_db` when set.
+    pub fn open(cfg: ServeConfig) -> Result<Self> {
         let slots = Arc::new(Semaphore::new(cfg.max_concurrent.max(1)));
-        AppState {
+        let tasks = match &cfg.task_db {
+            Some(path) => TaskStore::open_sqlite(path)?,
+            None => TaskStore::memory(),
+        };
+        Ok(AppState {
             cfg: Arc::new(cfg),
-            tasks: Arc::new(Mutex::new(Tasks::default())),
+            tasks: Arc::new(tasks),
             slots,
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(10))
                 .build()
                 .unwrap_or_default(),
+        })
+    }
+
+    /// Resume what a previous process left behind in the durable store: rerun
+    /// working tasks, deliver owed callbacks. A no-op for the memory store.
+    /// Returns how many of each were scheduled.
+    pub fn resume(&self) -> Result<(usize, usize)> {
+        let (mut reruns, mut redeliveries) = (0, 0);
+        for r in self.tasks.recover()? {
+            match r {
+                Recovered::Rerun { id, input, attempt } => {
+                    reruns += 1;
+                    let cat = self.catalog();
+                    let Some(p) = cat.agent(&input.agent) else {
+                        let _ = self.tasks.finish(
+                            &id,
+                            &input.agent,
+                            TaskState::Failed(format!(
+                                "agent {} is no longer served; not rerun after restart",
+                                input.agent
+                            )),
+                        );
+                        continue;
+                    };
+                    tracing::info!(task_id = %id, agent = %input.agent, attempt, "resuming a task interrupted by a restart");
+                    let st = self.clone();
+                    let file = p.file.clone();
+                    tokio::spawn(async move {
+                        // Wait for a slot: a resumed task is queued, not refused.
+                        let Ok(permit) = st.slots.clone().acquire_owned().await else {
+                            return;
+                        };
+                        spawn_run(&st, id, input, file, permit);
+                    });
+                }
+                Recovered::Redeliver { id, url, token, view } => {
+                    redeliveries += 1;
+                    let st = self.clone();
+                    tokio::spawn(async move {
+                        if deliver_callback(&st.http, &url, &token, &view).await {
+                            let _ = st.tasks.callback_delivered(&id);
+                        }
+                    });
+                }
+            }
         }
+        Ok((reruns, redeliveries))
     }
 
     fn catalog(&self) -> Catalog {
@@ -563,7 +628,7 @@ fn outcome_to_state(outcome: Result<RunOutcome, String>, result_step: Option<&st
     }
 }
 
-fn task_view(id: &str, t: &Task) -> Value {
+pub(crate) fn task_view(id: &str, t: &Task) -> Value {
     let mut v = json!({"task_id": id, "agent": t.agent});
     match &t.state {
         TaskState::Working => v["status"] = json!("working"),
@@ -595,49 +660,67 @@ fn start_task(
         .try_acquire_owned()
         .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "all run slots are busy; retry later"))?;
     let id = new_id();
-    state.tasks.lock().unwrap().insert(
-        id.clone(),
-        Task {
-            agent: agent.clone(),
-            state: TaskState::Working,
-        },
-    );
+    let input = TaskInput {
+        agent,
+        args,
+        result_step,
+        callback: on_done,
+    };
+    if let Err(e) = state.tasks.insert(&id, &input) {
+        tracing::error!(error = %e, "task store insert failed");
+        return Err(error(StatusCode::INTERNAL_SERVER_ERROR, "could not record the task"));
+    }
+    spawn_run(state, id.clone(), input, file, permit);
+    Ok(id)
+}
+
+/// Run a recorded task, store its outcome, deliver its callback.
+fn spawn_run(
+    state: &AppState,
+    task_id: String,
+    input: TaskInput,
+    file: PathBuf,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
     let st = state.clone();
-    let task_id = id.clone();
-    let span = tracing::info_span!("serve.run", agent = %agent, task_id = %task_id);
+    let span = tracing::info_span!("serve.run", agent = %input.agent, task_id = %task_id);
     tokio::spawn(
         async move {
-            let outcome = run_playbook(file, args, st.cfg.verbose).await;
+            let outcome = run_playbook(file, input.args.clone(), st.cfg.verbose).await;
             drop(permit);
-            let new_state = outcome_to_state(outcome, result_step.as_deref());
-            let view = {
-                let mut tasks = st.tasks.lock().unwrap();
-                let entry = tasks.by_id.entry(task_id.clone()).or_insert(Task {
-                    agent: agent.clone(),
-                    state: TaskState::Working,
-                });
-                entry.state = new_state;
-                task_view(&task_id, entry)
-            };
+            let new_state = outcome_to_state(outcome, input.result_step.as_deref());
+            if let Err(e) = st.tasks.finish(&task_id, &input.agent, new_state.clone()) {
+                tracing::error!(task_id = %task_id, error = %e, "task store update failed");
+            }
+            let view = task_view(
+                &task_id,
+                &Task {
+                    agent: input.agent.clone(),
+                    state: new_state,
+                },
+            );
             tracing::info!(task_id = %task_id, status = %view["status"], "task finished");
-            if let Some((url, token)) = on_done {
-                deliver_callback(&st.http, &url, &token, &view).await;
+            if let Some((url, token)) = &input.callback {
+                if deliver_callback(&st.http, url, token, &view).await {
+                    let _ = st.tasks.callback_delivered(&task_id);
+                }
             }
         }
         .instrument(span),
     );
-    Ok(id)
 }
 
-async fn deliver_callback(http: &reqwest::Client, url: &str, token: &str, view: &Value) {
+/// Deliver a finished task's view; `true` once the receiver acknowledged it.
+async fn deliver_callback(http: &reqwest::Client, url: &str, token: &str, view: &Value) -> bool {
     for attempt in 0..4u32 {
         match http.post(url).bearer_auth(token).json(view).send().await {
-            Ok(r) if r.status().is_success() => return,
+            Ok(r) if r.status().is_success() => return true,
             Ok(r) => tracing::warn!(status = %r.status(), attempt, "callback refused"),
             Err(e) => tracing::warn!(error = %e, attempt, "callback failed"),
         }
         tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
     }
+    false
 }
 
 pub fn origin_of(url: &str) -> Option<String> {
@@ -865,12 +948,12 @@ fn call_helper(state: &AppState, name: &str, args: Option<&Value>) -> Result<Val
                 .or_else(|| v.as_u64().map(|n| n.to_string()))
         })
         .ok_or("`execution_id` is required")?;
-    let tasks = state.tasks.lock().unwrap();
-    let t = tasks
-        .by_id
+    let t = state
+        .tasks
         .get(&eid)
+        .map_err(|e| format!("task store: {e}"))?
         .ok_or_else(|| format!("no execution `{eid}` on this server"))?;
-    let view = task_view(&eid, t);
+    let view = task_view(&eid, &t);
     match name {
         HELPER_STATUS => Ok(tool_result(
             &json!({"execution_id": eid, "status": view["status"]}),
@@ -990,10 +1073,13 @@ async fn get_task(State(state): State<AppState>, headers: HeaderMap, AxPath(id):
     if !authorized(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or wrong bearer token");
     }
-    let tasks = state.tasks.lock().unwrap();
-    match tasks.by_id.get(&id) {
-        Some(t) => Json(task_view(&id, t)).into_response(),
-        None => error(StatusCode::NOT_FOUND, "no such task"),
+    match state.tasks.get(&id) {
+        Ok(Some(t)) => Json(task_view(&id, &t)).into_response(),
+        Ok(None) => error(StatusCode::NOT_FOUND, "no such task"),
+        Err(e) => {
+            tracing::error!(error = %e, "task store read failed");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "could not read the task")
+        }
     }
 }
 
@@ -1031,7 +1117,16 @@ pub async fn serve(cfg: ServeConfig, shutdown: impl std::future::Future<Output =
     for p in &cat.problems {
         eprintln!("   not served: {} — {}", p.source, p.reason);
     }
-    axum::serve(listener, router(AppState::new(cfg)))
+    let durable = cfg.task_db.clone();
+    let state = AppState::open(cfg)?;
+    if let Some(db) = durable {
+        let (reruns, redeliveries) = state.resume()?;
+        eprintln!(
+            "   tasks  : durable in {} ({reruns} resumed, {redeliveries} callback(s) owed)",
+            db.display()
+        );
+    }
+    axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown)
         .await
         .context("serve")

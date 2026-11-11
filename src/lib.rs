@@ -336,6 +336,12 @@ enum Commands {
         #[arg(long, default_value_t = 4)]
         max_concurrent: usize,
 
+        /// Keep agent tasks in this SQLite file so they survive a restart
+        /// (finished tasks stay readable, working ones rerun, owed callbacks
+        /// are delivered). Default: in memory, lost on restart
+        #[arg(long, value_name = "FILE")]
+        task_db: Option<PathBuf>,
+
         /// Verbose playbook output
         #[arg(short, long)]
         verbose: bool,
@@ -2958,6 +2964,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     callback_origins,
                     max_concurrent: 4,
                     verbose,
+                    task_db: None,
                 }),
             };
             // Default the server URL (for --dispatch server) to the resolved
@@ -2993,6 +3000,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             no_agents,
             max_concurrent,
             verbose,
+            task_db,
         }) => {
             let cfg = serve::ServeConfig {
                 playbooks,
@@ -3003,6 +3011,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 callback_origins,
                 max_concurrent,
                 verbose,
+                task_db,
             };
             serve::serve(cfg, async {
                 let _ = tokio::signal::ctrl_c().await;
