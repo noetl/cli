@@ -3249,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "noetl"
-version = "6.3.0"
+version = "6.4.0"
 dependencies = [
  "anyhow",
  "arrow-array 53.4.1",

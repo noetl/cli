@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.4.0](https://github.com/noetl/cli/compare/v6.3.0...v6.4.0) (2026-11-11)
+
+### Features
+
+* **local:** refuse a cross-instance playbook reference by name ([388dd4b](https://github.com/noetl/cli/commit/388dd4bb029fc3d2f753a2dc20e7e4ce09a99f71)), closes [noetl/ai-meta#548](https://github.com/noetl/ai-meta/issues/548)
+
 ## [6.3.0](https://github.com/noetl/cli/compare/v6.2.0...v6.3.0) (2026-11-11)
 
 ### Features
