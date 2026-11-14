@@ -1131,7 +1131,11 @@ impl PlaybookRunner {
                 //   for cloud-storage targets; follow-up to migrate
                 //   to `object_store` per § H.4 is tracked
                 //   separately).
-                let data = context.step_results.values().last().cloned().unwrap_or_default();
+                // The sink writes the result of the most recently
+                // completed step. `step_results` is a HashMap, so
+                // `.values().last()` picked an arbitrary step's result
+                // once two or more steps had produced one.
+                let data = context.last_result().unwrap_or_default();
                 let formatted_data =
                     noetl_executor::tools_bridge::format_sink_payload(format, &data)?;
 
@@ -1981,6 +1985,10 @@ struct ExecutionContext {
     /// the runner outcome a deterministic "what ran, in what order"
     /// for the JSON envelope's `executed_steps` field.
     executed_steps: Vec<String>,
+    /// Name of the step whose result was recorded most recently
+    /// (updated on every completion, including back-edge re-runs).
+    /// This is the sink's input.
+    last_result_step: Option<String>,
 }
 
 impl ExecutionContext {
@@ -1989,7 +1997,15 @@ impl ExecutionContext {
             variables: HashMap::new(),
             step_results: HashMap::new(),
             executed_steps: Vec::new(),
+            last_result_step: None,
         }
+    }
+
+    /// Result of the most recently completed step, if any.
+    fn last_result(&self) -> Option<String> {
+        self.last_result_step
+            .as_ref()
+            .and_then(|name| self.step_results.get(name).cloned())
     }
 
     fn set_variable(&mut self, key: String, value: String) {
@@ -2005,6 +2021,7 @@ impl ExecutionContext {
             self.executed_steps.push(step_name.clone());
         }
         self.step_results.insert(step_name.clone(), result.clone());
+        self.last_result_step = Some(step_name.clone());
         // Also set as variable for easy access
         self.variables.insert(format!("{}.result", step_name), result);
     }
@@ -2013,6 +2030,22 @@ impl ExecutionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_result_is_the_most_recent_completion() {
+        let mut ctx = ExecutionContext::new();
+        assert_eq!(ctx.last_result(), None);
+        // Enough names that HashMap iteration order would differ from
+        // insertion order for at least one prefix.
+        let names: Vec<String> = (0..32).map(|i| format!("step_{i}")).collect();
+        for (i, n) in names.iter().enumerate() {
+            ctx.set_step_result(n.clone(), format!("r{i}"));
+            assert_eq!(ctx.last_result(), Some(format!("r{i}")), "after {n}");
+        }
+        // A re-run (back-edge) of an earlier step becomes the latest.
+        ctx.set_step_result("step_3".into(), "again".into());
+        assert_eq!(ctx.last_result(), Some("again".into()));
+    }
 
     #[test]
     fn remote_references_are_refused_by_name_and_local_paths_pass() {
