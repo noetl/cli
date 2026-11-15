@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.4.1](https://github.com/noetl/cli/compare/v6.4.0...v6.4.1) (2026-11-15)
+
+### Bug Fixes
+
+* **local:** sink writes the most recent step's result, not an arbitrary one ([4b25321](https://github.com/noetl/cli/commit/4b25321c33ac9cfb7207085e18ab515d358aa9a3))
+
 ## [6.4.0](https://github.com/noetl/cli/compare/v6.3.0...v6.4.0) (2026-11-11)
 
 ### Features
