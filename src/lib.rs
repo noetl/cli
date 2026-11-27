@@ -5723,6 +5723,87 @@ async fn execute_playbook(
     .await
 }
 
+/// How `noetl status` renders an execution, derived from the status document.
+///
+/// Two document shapes reach `get_status`:
+///
+/// * the Rust control plane's `GET /api/executions/{id}/status` —
+///   `{execution_id, status: "RUNNING"|"COMPLETED"|"FAILED"|"CANCELLED",
+///   current_step, progress: {total_steps, completed_steps, running_steps,
+///   failed_steps}, is_cancelled}`, with NO `completed` / `failed` booleans;
+/// * the legacy (Python-era) document and the CLI's own executions-endpoint
+///   fallback, which carry `completed` / `failed` booleans.
+///
+/// The summary used to read only the booleans, so every execution served by
+/// the Rust server rendered as RUNNING forever while `--json` showed
+/// `"status":"COMPLETED"`. The server's `status` string is authoritative when
+/// present; the booleans are the fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusView {
+    /// Upper-case label shown to the user.
+    label: String,
+    /// The execution reached a terminal state (completed, failed or cancelled).
+    terminal: bool,
+    failed: bool,
+    completed_steps: usize,
+}
+
+fn status_view(result: &serde_json::Value) -> StatusView {
+    let bool_field = |key: &str| result.get(key).and_then(|v| v.as_bool());
+    let server_status = result
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| !s.is_empty());
+
+    let (label, terminal, failed) = match server_status.as_deref() {
+        Some("COMPLETED") => ("COMPLETED".to_string(), true, false),
+        Some("FAILED") => ("FAILED".to_string(), true, true),
+        Some("CANCELLED") | Some("CANCELED") => ("CANCELLED".to_string(), true, false),
+        Some(other) if bool_field("completed").is_none() => {
+            if bool_field("is_cancelled") == Some(true) {
+                ("CANCELLED".to_string(), true, false)
+            } else {
+                (other.to_string(), false, false)
+            }
+        }
+        // Legacy document: `completed` / `failed` decide.
+        _ => {
+            let completed = bool_field("completed").unwrap_or(false);
+            let failed = bool_field("failed").unwrap_or(false);
+            if completed {
+                if failed {
+                    ("FAILED".to_string(), true, true)
+                } else {
+                    ("COMPLETED".to_string(), true, false)
+                }
+            } else {
+                ("RUNNING".to_string(), false, false)
+            }
+        }
+    };
+
+    let completed_steps = result
+        .get("completed_steps")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .or_else(|| {
+            result
+                .get("progress")
+                .and_then(|p| p.get("completed_steps"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+        })
+        .unwrap_or(0);
+
+    StatusView {
+        label,
+        terminal,
+        failed,
+        completed_steps,
+    }
+}
+
 async fn get_status(
     client: &Client,
     base_url: &str,
@@ -5791,7 +5872,7 @@ async fn get_status(
             .get("end_time")
             .and_then(|v| v.as_str())
             .and_then(parse_status_timestamp);
-        let completed = result.get("completed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let completed = status_view(result).terminal;
 
         if let Some(start_dt) = start {
             let effective_end = end.or_else(|| if completed { None } else { Some(chrono::Utc::now()) });
@@ -5806,33 +5887,17 @@ async fn get_status(
 
     let summarize_and_print = |result: &serde_json::Value, show_fallback_note: bool| {
         // Show a concise summary by default
-        let completed = result.get("completed").and_then(|v| v.as_bool()).unwrap_or(false);
-        let failed = result.get("failed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let view = status_view(result);
+        let completed = view.terminal;
+        let failed = view.failed;
         let current_step = result.get("current_step").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let completed_steps = result
-            .get("completed_steps")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0);
+        let completed_steps = view.completed_steps;
+        let status_str = view.label.as_str();
 
-        let status_str = if completed {
-            if failed {
-                "FAILED"
-            } else {
-                "COMPLETED"
-            }
-        } else {
-            "RUNNING"
-        };
-
-        let status_color = if completed {
-            if failed {
-                "\x1b[31m"
-            } else {
-                "\x1b[32m"
-            } // red or green
-        } else {
-            "\x1b[33m" // yellow
+        let status_color = match status_str {
+            "COMPLETED" => "\x1b[32m",            // green
+            "FAILED" | "CANCELLED" => "\x1b[31m", // red
+            _ => "\x1b[33m",                      // yellow
         };
 
         println!("\n{}{}\x1b[0m", status_color, "=".repeat(60));
@@ -9521,5 +9586,71 @@ mod tests {
     fn effective_context_returns_none_when_no_current_and_no_override() {
         let config = Config::default();
         assert!(effective_context(None, &config).is_none());
+    }
+
+    // ---- `noetl status` summary (Rust server document has no `completed` bool) ----
+
+    #[test]
+    fn status_view_reads_the_rust_server_status_string() {
+        // Shape served by noetl-server-rust GET /api/executions/{id}/status.
+        let doc = serde_json::json!({
+            "execution_id": 384755448173039616_i64,
+            "status": "COMPLETED",
+            "current_step": "end",
+            "progress": {"total_steps": 2, "completed_steps": 2, "running_steps": 0, "failed_steps": 0},
+            "is_cancelled": false
+        });
+        let v = status_view(&doc);
+        assert_eq!(v.label, "COMPLETED");
+        assert!(v.terminal);
+        assert!(!v.failed);
+        assert_eq!(v.completed_steps, 2);
+    }
+
+    #[test]
+    fn status_view_rust_server_failed_cancelled_running() {
+        let mk = |status: &str, cancelled: bool| {
+            serde_json::json!({
+                "execution_id": 1, "status": status, "current_step": "s",
+                "progress": {"total_steps": 3, "completed_steps": 1, "running_steps": 1, "failed_steps": 0},
+                "is_cancelled": cancelled
+            })
+        };
+        let failed = status_view(&mk("FAILED", false));
+        assert_eq!(
+            (failed.label.as_str(), failed.terminal, failed.failed),
+            ("FAILED", true, true)
+        );
+        let cancelled = status_view(&mk("CANCELLED", true));
+        assert_eq!(
+            (cancelled.label.as_str(), cancelled.terminal, cancelled.failed),
+            ("CANCELLED", true, false)
+        );
+        let running = status_view(&mk("RUNNING", false));
+        assert_eq!((running.label.as_str(), running.terminal), ("RUNNING", false));
+        assert_eq!(running.completed_steps, 1);
+        // lower-case from older servers is normalised
+        assert_eq!(status_view(&mk("completed", false)).label, "COMPLETED");
+    }
+
+    #[test]
+    fn status_view_keeps_legacy_boolean_documents_working() {
+        let done = serde_json::json!({"completed": true, "failed": false, "completed_steps": ["a", "b"]});
+        let v = status_view(&done);
+        assert_eq!(
+            (v.label.as_str(), v.terminal, v.completed_steps),
+            ("COMPLETED", true, 2)
+        );
+
+        let failed = serde_json::json!({"completed": true, "failed": true, "completed_steps": []});
+        assert_eq!(status_view(&failed).label, "FAILED");
+
+        let running = serde_json::json!({"completed": false, "failed": false});
+        assert_eq!(status_view(&running).label, "RUNNING");
+
+        // The CLI's own executions-endpoint fallback carries both.
+        let fallback = serde_json::json!({"status": "COMPLETED", "completed": true, "failed": false});
+        assert_eq!(status_view(&fallback).label, "COMPLETED");
+        assert_eq!(status_view(&serde_json::json!({})).label, "RUNNING");
     }
 }
