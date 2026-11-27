@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.4.2](https://github.com/noetl/cli/compare/v6.4.1...v6.4.2) (2026-11-27)
+
+### Bug Fixes
+
+* **status:** show the server status for finished executions, not RUNNING ([86fbcb3](https://github.com/noetl/cli/commit/86fbcb3c082af7d34cc9414a31497e015cd8ecf5))
+
 ## [6.4.1](https://github.com/noetl/cli/compare/v6.4.0...v6.4.1) (2026-11-15)
 
 ### Bug Fixes
