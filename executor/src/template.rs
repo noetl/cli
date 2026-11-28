@@ -34,8 +34,7 @@ pub fn render_template(
 }
 
 /// Filter token: `{{ var | filter }}`.
-const FILTER_PATTERN: &str =
-    r"\{\{\s*(?P<fvar>[a-zA-Z_][a-zA-Z0-9_.]*)\s*\|\s*(?P<fname>[a-zA-Z_]+)\s*\}\}";
+const FILTER_PATTERN: &str = r"\{\{\s*(?P<fvar>[a-zA-Z_][a-zA-Z0-9_.]*)\s*\|\s*(?P<fname>[a-zA-Z_]+)\s*\}\}";
 /// Plain token: exactly `{{ key }}` (one space each side), matching the
 /// placeholders the previous `str::replace` passes looked for.
 const PLAIN_PATTERN: &str = r"\{\{ (?P<key>[^{}]*?) \}\}";
@@ -276,12 +275,7 @@ mod tests {
     fn render_template_applies_lower_filter() {
         let variables = vars(&[("workload.NAME", "NOETL")]);
         let step_results = HashMap::new();
-        let result = render_template(
-            "{{ workload.NAME | lower }}",
-            &variables,
-            &step_results,
-        )
-        .unwrap();
+        let result = render_template("{{ workload.NAME | lower }}", &variables, &step_results).unwrap();
         assert_eq!(result, "noetl");
     }
 

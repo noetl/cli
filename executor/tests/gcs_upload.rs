@@ -51,13 +51,9 @@ async fn gcs_upload_roundtrip_csv_payload() {
     let store = Arc::new(InMemory::new());
     let payload = "id,name\n1,alice\n2,bob\n";
 
-    gcs_upload_with_store(
-        Arc::clone(&store) as Arc<dyn ObjectStore>,
-        "exports/users.csv",
-        payload,
-    )
-    .await
-    .unwrap();
+    gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "exports/users.csv", payload)
+        .await
+        .unwrap();
 
     let path = StorePath::from("exports/users.csv");
     let got = store.get(&path).await.unwrap().bytes().await.unwrap();
@@ -71,8 +67,12 @@ async fn gcs_upload_overwrites_on_repeated_put() {
     let store = Arc::new(InMemory::new());
     let key = "reports/daily.json";
 
-    gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, key, "first").await.unwrap();
-    gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, key, "second").await.unwrap();
+    gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, key, "first")
+        .await
+        .unwrap();
+    gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, key, "second")
+        .await
+        .unwrap();
 
     let path = StorePath::from(key);
     let got = store.get(&path).await.unwrap().bytes().await.unwrap();
@@ -84,7 +84,9 @@ async fn gcs_upload_empty_string_succeeds() {
     // An empty payload is a valid GCS object and must not error.
     let store = Arc::new(InMemory::new());
 
-    gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "empty.json", "").await.unwrap();
+    gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "empty.json", "")
+        .await
+        .unwrap();
 
     let path = StorePath::from("empty.json");
     let got = store.get(&path).await.unwrap().bytes().await.unwrap();
@@ -98,7 +100,9 @@ async fn gcs_upload_nested_key_preserves_full_path() {
     let store = Arc::new(InMemory::new());
     let key = "year=2026/month=06/day=01/run-42/output.json";
 
-    gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, key, "{}").await.unwrap();
+    gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, key, "{}")
+        .await
+        .unwrap();
 
     let path = StorePath::from(key);
     let got = store.get(&path).await.unwrap().bytes().await.unwrap();

@@ -21,10 +21,7 @@ use std::collections::HashMap;
 ///
 /// Variable references are substituted from the supplied `variables`
 /// map before the comparison is run.
-pub fn evaluate_condition(
-    condition: &str,
-    variables: &HashMap<String, String>,
-) -> Result<bool> {
+pub fn evaluate_condition(condition: &str, variables: &HashMap<String, String>) -> Result<bool> {
     // Extract content from {{ ... }} if present.
     let expression = if condition.trim().starts_with("{{") && condition.trim().ends_with("}}") {
         condition
@@ -129,10 +126,7 @@ pub fn evaluate_condition(
 /// `<step>.<field>` maps derived from the supplied `variables` map.
 /// Three helper functions are registered: `eq(a, b)`, `ne(a, b)`,
 /// `contains(haystack, needle)`.
-pub fn evaluate_rhai_condition(
-    code: &str,
-    variables: &HashMap<String, String>,
-) -> Result<bool> {
+pub fn evaluate_rhai_condition(code: &str, variables: &HashMap<String, String>) -> Result<bool> {
     let mut engine = Engine::new();
     let mut scope = Scope::new();
 
@@ -327,8 +321,7 @@ pub fn evaluate_structured_condition(
         Operator::Matches => {
             let left_str = left.as_str().unwrap_or("");
             let pattern = right.as_ref().and_then(|r| r.as_str()).unwrap_or("");
-            let re = regex::Regex::new(pattern)
-                .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
+            let re = regex::Regex::new(pattern).map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
             Ok(re.is_match(left_str))
         }
         Operator::Truthy => Ok(is_truthy(&left)),
@@ -360,9 +353,7 @@ fn resolve_value(
 ) -> Result<serde_json::Value> {
     if let Some(path) = value.strip_prefix("result.") {
         if let Some(res) = result {
-            return Ok(json_path(res, path)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null));
+            return Ok(json_path(res, path).cloned().unwrap_or(serde_json::Value::Null));
         }
         return Ok(serde_json::Value::Null);
     }
@@ -418,11 +409,7 @@ fn json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_j
 }
 
 /// Compare two JSON values numerically.
-fn compare_numeric<F>(
-    left: &serde_json::Value,
-    right: &Option<serde_json::Value>,
-    cmp: F,
-) -> Result<bool>
+fn compare_numeric<F>(left: &serde_json::Value, right: &Option<serde_json::Value>, cmp: F) -> Result<bool>
 where
     F: Fn(f64, f64) -> bool,
 {
@@ -447,12 +434,8 @@ fn is_truthy(value: &serde_json::Value) -> bool {
 /// become 0.0; strings parse via `FromStr`.
 fn value_to_f64(value: &serde_json::Value) -> Result<f64> {
     match value {
-        serde_json::Value::Number(n) => n
-            .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("Invalid number")),
-        serde_json::Value::String(s) => s
-            .parse()
-            .map_err(|_| anyhow::anyhow!("Cannot parse '{s}' as number")),
+        serde_json::Value::Number(n) => n.as_f64().ok_or_else(|| anyhow::anyhow!("Invalid number")),
+        serde_json::Value::String(s) => s.parse().map_err(|_| anyhow::anyhow!("Cannot parse '{s}' as number")),
         serde_json::Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
         serde_json::Value::Null => Ok(0.0),
         _ => Err(anyhow::anyhow!("Cannot convert {value:?} to number")),
@@ -511,7 +494,9 @@ mod tests {
     /// different branch under `--runtime local` than on a cluster.
     #[test]
     fn the_falsy_set_matches_the_server() {
-        for falsy in ["", "false", "False", "FALSE", "0", "no", "none", "None", "null", "off", "{}", "[]"] {
+        for falsy in [
+            "", "false", "False", "FALSE", "0", "no", "none", "None", "null", "off", "{}", "[]",
+        ] {
             let mut vars = HashMap::new();
             vars.insert("v".to_string(), falsy.to_string());
             assert!(
@@ -599,11 +584,7 @@ mod tests {
     fn evaluate_rhai_condition_helpers() {
         let v = vars(&[("workload.action", "DEPLOY")]);
         assert!(evaluate_rhai_condition("eq(workload.action, \"DEPLOY\")", &v).unwrap());
-        assert!(evaluate_rhai_condition(
-            "contains(workload.action, \"DEP\")",
-            &v
-        )
-        .unwrap());
+        assert!(evaluate_rhai_condition("contains(workload.action, \"DEP\")", &v).unwrap());
     }
 
     // ---- R-1.2 PR-2b — structured condition tests --------------------

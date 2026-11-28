@@ -19,10 +19,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use noetl_events::{EventSink, ExecutorEvent};
-use noetl_tools::tools::source::{
-    AckMode, DispatchPlan, PollOptions, PolledMessage, SourceClient,
-};
 use noetl_tools::tools::build_source;
+use noetl_tools::tools::source::{AckMode, DispatchPlan, PollOptions, PolledMessage, SourceClient};
 use noetl_tools::ExecutionContext;
 
 use crate::subscribe::dispatch::Dispatcher;
@@ -100,19 +98,14 @@ impl LocalRuntime {
         if let Some((alias, json)) = &self.credential {
             ctx.set_secret(alias.clone(), json.clone());
         }
-        let source = build_source(&self.spec.source_cfg, &ctx)
-            .map_err(|e| anyhow::anyhow!("build source: {e}"))?;
+        let source = build_source(&self.spec.source_cfg, &ctx).map_err(|e| anyhow::anyhow!("build source: {e}"))?;
         self.run_with_source(source, shutdown).await
     }
 
     /// Drive the loop against a pre-built source (the test seam + the body of
     /// [`run`]).  Brackets the loop with the register/activate +
     /// drain/deactivate lifecycle events and builds the local spool.
-    pub async fn run_with_source<F>(
-        &self,
-        source: Box<dyn SourceClient>,
-        shutdown: F,
-    ) -> Result<RunSummary>
+    pub async fn run_with_source<F>(&self, source: Box<dyn SourceClient>, shutdown: F) -> Result<RunSummary>
     where
         F: std::future::Future<Output = ()>,
     {
@@ -396,13 +389,7 @@ impl LocalRuntime {
         .await;
     }
 
-    async fn emit_child(
-        &self,
-        execution_id: i64,
-        event_type: &str,
-        status: &str,
-        context: serde_json::Value,
-    ) {
+    async fn emit_child(&self, execution_id: i64, event_type: &str, status: &str, context: serde_json::Value) {
         let event = ExecutorEvent {
             execution_id,
             event_type: event_type.to_string(),

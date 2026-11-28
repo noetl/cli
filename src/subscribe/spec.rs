@@ -50,11 +50,7 @@ pub struct ParsedSpec {
 /// `spool_dir_override` (from `--spool-dir`) wins over the spec's
 /// `spool.path`; when neither is set and the spool buffers, a default under
 /// the events directory is used by the caller.
-pub fn parse_spec(
-    yaml: &serde_yaml::Value,
-    path: &str,
-    spool_dir_override: Option<&str>,
-) -> Result<ParsedSpec> {
+pub fn parse_spec(yaml: &serde_yaml::Value, path: &str, spool_dir_override: Option<&str>) -> Result<ParsedSpec> {
     let kind = yaml.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     if kind != "Subscription" {
         anyhow::bail!(
@@ -76,8 +72,20 @@ pub fn parse_spec(
     let mut cfg = serde_json::Map::new();
     cfg.insert("source".to_string(), serde_json::json!(source));
     for key in [
-        "url", "user", "password", "token", "stream", "consumer", "subscription", "endpoint",
-        "topic", "group", "brokers", "every", "immediate", "payload",
+        "url",
+        "user",
+        "password",
+        "token",
+        "stream",
+        "consumer",
+        "subscription",
+        "endpoint",
+        "topic",
+        "group",
+        "brokers",
+        "every",
+        "immediate",
+        "payload",
     ] {
         if let Some(v) = spec.get(key) {
             cfg.insert(key.to_string(), serde_json::to_value(v)?);
@@ -96,9 +104,7 @@ pub fn parse_spec(
         .and_then(|v| v.as_u64())
         .map(|b| b as u32)
         .unwrap_or(RUNTIME_BATCH_DEFAULT);
-    let timeout_ms = runtime
-        .and_then(|r| r.get("timeout_ms"))
-        .and_then(|v| v.as_u64());
+    let timeout_ms = runtime.and_then(|r| r.get("timeout_ms")).and_then(|v| v.as_u64());
 
     // dispatch block.
     let dispatch = spec.get("dispatch").context("subscription spec missing 'dispatch'")?;
@@ -120,10 +126,8 @@ pub fn parse_spec(
     // headers (directive allowlist) — optional.
     let directives = match spec.get("headers") {
         Some(h) => {
-            let json = serde_json::to_value(h)
-                .context("subscription spec 'headers' is not serializable")?;
-            DirectiveSpec::parse(&json)
-                .map_err(|e| anyhow::anyhow!("invalid subscription 'headers' block: {e}"))?
+            let json = serde_json::to_value(h).context("subscription spec 'headers' is not serializable")?;
+            DirectiveSpec::parse(&json).map_err(|e| anyhow::anyhow!("invalid subscription 'headers' block: {e}"))?
         }
         None => DirectiveSpec::default(),
     };
@@ -134,11 +138,9 @@ pub fn parse_spec(
     // locally (the engine + ordering + circuit logic are backend-agnostic).
     let spool = match spec.get("spool") {
         Some(s) => {
-            let mut json = serde_json::to_value(s)
-                .context("subscription spec 'spool' is not serializable")?;
+            let mut json = serde_json::to_value(s).context("subscription spec 'spool' is not serializable")?;
             localize_spool(&mut json, spool_dir_override, path);
-            SpoolSpec::parse(Some(&json))
-                .map_err(|e| anyhow::anyhow!("invalid subscription 'spool' block: {e}"))?
+            SpoolSpec::parse(Some(&json)).map_err(|e| anyhow::anyhow!("invalid subscription 'spool' block: {e}"))?
         }
         None if spool_dir_override.is_some() => {
             // `--spool-dir` with no spec block → buffer_and_ack/local_disk default.
@@ -147,8 +149,7 @@ pub fn parse_spec(
                 "backend": "local_disk",
                 "path": spool_dir_override.unwrap(),
             });
-            SpoolSpec::parse(Some(&json))
-                .map_err(|e| anyhow::anyhow!("invalid --spool-dir default: {e}"))?
+            SpoolSpec::parse(Some(&json)).map_err(|e| anyhow::anyhow!("invalid --spool-dir default: {e}"))?
         }
         None => SpoolSpec::off(),
     };

@@ -34,7 +34,13 @@ pub const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 pub fn env_var(alias: &str) -> String {
     let suffix: String = alias
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("NOETL_CREDENTIAL_{}", suffix)
 }
@@ -75,14 +81,18 @@ pub fn validate_alias(alias: &str) -> Result<()> {
 pub fn resolve(alias: &str) -> Result<String> {
     validate_alias(alias)?;
     let var = env_var(alias);
-    if let Some(v) = std::env::var(&var).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+    if let Some(v) = std::env::var(&var)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
         return Ok(v);
     }
     let path = credentials_dir().map(|d| d.join(alias));
     if let Some(path) = path.as_deref().filter(|p| p.exists()) {
         check_private(path)?;
-        let value = std::fs::read_to_string(path)
-            .with_context(|| format!("reading credential file {}", path.display()))?;
+        let value =
+            std::fs::read_to_string(path).with_context(|| format!("reading credential file {}", path.display()))?;
         let value = value.trim().to_string();
         if value.is_empty() {
             anyhow::bail!("credential file {} is empty", path.display());
@@ -144,7 +154,9 @@ pub fn store(alias: &str, value: &str) -> Result<PathBuf> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+        let mut file = options
+            .open(&tmp)
+            .with_context(|| format!("writing {}", tmp.display()))?;
         file.write_all(value.trim().as_bytes())?;
         file.write_all(b"\n")?;
         file.sync_all()?;
@@ -287,10 +299,10 @@ pub async fn google_access_token(alias: &str) -> Result<String> {
         .context("google token response has no access_token")?
         .to_string();
     let ttl = body["expires_in"].as_u64().unwrap_or(3600).saturating_sub(60);
-    token_cache()
-        .lock()
-        .unwrap()
-        .insert(alias.to_string(), (token.clone(), Instant::now() + Duration::from_secs(ttl)));
+    token_cache().lock().unwrap().insert(
+        alias.to_string(),
+        (token.clone(), Instant::now() + Duration::from_secs(ttl)),
+    );
     Ok(token)
 }
 
@@ -425,8 +437,14 @@ mod tests {
         std::env::set_var("NOETL_CREDENTIAL_LC_TEST_GOOGLE_BAD", &doc);
         let err = google_access_token("lc-test-google-bad").await.unwrap_err().to_string();
         std::env::remove_var("NOETL_CREDENTIAL_LC_TEST_GOOGLE_BAD");
-        assert!(err.contains("invalid_grant") && err.contains("noetl credential google"), "{err}");
-        assert!(!err.contains("rt-bad") && !err.contains("cs\""), "secrets leaked: {err}");
+        assert!(
+            err.contains("invalid_grant") && err.contains("noetl credential google"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("rt-bad") && !err.contains("cs\""),
+            "secrets leaked: {err}"
+        );
     }
 
     #[tokio::test]

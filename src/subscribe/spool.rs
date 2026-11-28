@@ -29,8 +29,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use noetl_events::{EventSink, ExecutorEvent};
 use noetl_tools::spool::{
-    probe_downstream, Admission, CircuitDecision, CircuitRegistry, DeadLetter, LocalDiskBackend,
-    SpoolEngine, SpoolItem, SpoolSpec,
+    probe_downstream, Admission, CircuitDecision, CircuitRegistry, DeadLetter, LocalDiskBackend, SpoolEngine,
+    SpoolItem, SpoolSpec,
 };
 use noetl_tools::tools::source::{DispatchPlan, PolledMessage};
 
@@ -143,10 +143,7 @@ impl LocalSpoolRuntime {
     }
 
     fn route(&mut self, plan: &DispatchPlan) -> (String, CircuitDecision) {
-        let resolved = plan
-            .execution_pool_override
-            .as_deref()
-            .or(self.default_pool.as_deref());
+        let resolved = plan.execution_pool_override.as_deref().or(self.default_pool.as_deref());
         let downstream = self.circuits.route(resolved).to_string();
         let now = now_ms();
         let decision = self.circuits.breaker_mut(&downstream).decide(now);
@@ -162,13 +159,7 @@ impl LocalSpoolRuntime {
         }
     }
 
-    async fn spool(
-        &mut self,
-        msg: &PolledMessage,
-        plan: &DispatchPlan,
-        downstream: &str,
-        reason: &str,
-    ) -> Routing {
+    async fn spool(&mut self, msg: &PolledMessage, plan: &DispatchPlan, downstream: &str, reason: &str) -> Routing {
         let now = now_ms();
         self.recv_seq += 1;
         let ordering_key = self.resolve_ordering_key(msg);
@@ -241,10 +232,7 @@ impl LocalSpoolRuntime {
 
     /// Feed a live-dispatch outcome to the breaker (passive signal).
     pub async fn report_dispatch(&mut self, plan: &DispatchPlan, msg: &PolledMessage, ok: bool) {
-        let resolved = plan
-            .execution_pool_override
-            .as_deref()
-            .or(self.default_pool.as_deref());
+        let resolved = plan.execution_pool_override.as_deref().or(self.default_pool.as_deref());
         let downstream = self.circuits.route(resolved).to_string();
         let now = now_ms();
         if ok {
@@ -341,9 +329,7 @@ impl LocalSpoolRuntime {
                             &source_name,
                         )
                         .await
-                        .map_err(|e| {
-                            noetl_tools::ToolError::ExecutionFailed(format!("replay dispatch: {e}"))
-                        })?;
+                        .map_err(|e| noetl_tools::ToolError::ExecutionFailed(format!("replay dispatch: {e}")))?;
                     if !result.ok() {
                         return Err(noetl_tools::ToolError::ExecutionFailed(
                             result.error.unwrap_or_else(|| "replay run failed".into()),
@@ -402,10 +388,7 @@ impl LocalSpoolRuntime {
 
     fn resolve_ordering_key(&self, msg: &PolledMessage) -> Option<String> {
         let key_name = self.engine.spec().ordering_key.as_deref()?;
-        msg.headers
-            .get(key_name)
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
+        msg.headers.get(key_name).and_then(|v| v.as_str()).map(str::to_string)
     }
 
     async fn on_circuit_opened(&mut self, downstream: &str) {
@@ -414,7 +397,11 @@ impl LocalSpoolRuntime {
             .breaker(downstream)
             .map(|b| b.state().clone())
             .unwrap_or_default();
-        tracing::warn!(downstream, trips = state.trips, "circuit opened — buffering to local spool");
+        tracing::warn!(
+            downstream,
+            trips = state.trips,
+            "circuit opened — buffering to local spool"
+        );
         self.emit(
             "subscription.circuit.opened",
             "OPEN",

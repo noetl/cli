@@ -34,16 +34,28 @@ workflow:
 "#,
     );
     let marker = dir.join("ran");
-    let vars = [("marker".to_string(), marker.display().to_string())].into_iter().collect();
-    let err = PlaybookRunner::new(path).with_variables(vars).with_quiet(true).run().unwrap_err();
+    let vars = [("marker".to_string(), marker.display().to_string())]
+        .into_iter()
+        .collect();
+    let err = PlaybookRunner::new(path)
+        .with_variables(vars)
+        .with_quiet(true)
+        .run()
+        .unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("step `read`: kind `mcp` with catalog server `mcp/noetl-cluster`"),
         "a catalog MCP reference is cluster-only: {msg}"
     );
-    assert!(msg.contains("step `also`: kind `postgres`"), "every offending step is listed: {msg}");
+    assert!(
+        msg.contains("step `also`: kind `postgres`"),
+        "every offending step is listed: {msg}"
+    );
     assert!(msg.contains("--runtime distributed"), "{msg}");
-    assert!(!marker.exists(), "refused at load: the shell step before it must not have run");
+    assert!(
+        !marker.exists(),
+        "refused at load: the shell step before it must not have run"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -77,7 +89,10 @@ workflow:
     tool: { kind: noop }
 "#,
     );
-    let outcome = PlaybookRunner::new(path).with_quiet(true).run().expect("noop steps run");
+    let outcome = PlaybookRunner::new(path)
+        .with_quiet(true)
+        .run()
+        .expect("noop steps run");
     assert_eq!(outcome.status, "ok");
     assert_eq!(outcome.step_results["say"], "hi");
     std::fs::remove_dir_all(&dir).ok();
@@ -97,7 +112,13 @@ async fn an_unsupported_kind_in_a_sub_playbook_fails_the_parent() {
         "apiVersion: noetl.io/v2\nkind: Playbook\nmetadata: { name: parent }\nworkflow:\n  - step: call\n    tool: { kind: playbook, path: child.yaml }\n",
     )
     .unwrap();
-    let msg = format!("{:#}", PlaybookRunner::new(dir.join("parent.yaml")).with_quiet(true).run().unwrap_err());
+    let msg = format!(
+        "{:#}",
+        PlaybookRunner::new(dir.join("parent.yaml"))
+            .with_quiet(true)
+            .run()
+            .unwrap_err()
+    );
     assert!(msg.contains("kind `workbook`"), "{msg}");
     std::fs::remove_dir_all(&dir).ok();
 }

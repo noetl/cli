@@ -44,10 +44,7 @@ pub enum ValidationError {
 /// satisfied by the supplied runtime capabilities.  Returns a
 /// [`ValidationReport`] describing every mismatch; the caller decides
 /// whether to bail on the first error or report them all.
-pub fn validate_capabilities(
-    playbook: &Playbook,
-    runtime: &RuntimeCapabilities,
-) -> Result<ValidationReport> {
+pub fn validate_capabilities(playbook: &Playbook, runtime: &RuntimeCapabilities) -> Result<ValidationReport> {
     let mut report = ValidationReport {
         playbook_name: playbook.metadata.name.clone(),
         errors: Vec::new(),
@@ -151,10 +148,7 @@ mod tests {
         let runtime = RuntimeCapabilities::local();
         let report = validate_capabilities(&playbook, &runtime).unwrap();
         assert!(!report.is_ok());
-        assert!(matches!(
-            report.errors[0],
-            ValidationError::IncompatibleProfile { .. }
-        ));
+        assert!(matches!(report.errors[0], ValidationError::IncompatibleProfile { .. }));
     }
 
     #[test]
