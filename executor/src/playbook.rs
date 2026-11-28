@@ -1226,8 +1226,7 @@ pub struct WorkbookTask {
 /// the field would reject them.
 #[cfg(feature = "json-schema")]
 pub fn playbook_json_schema() -> serde_json::Value {
-    let mut schema = serde_json::to_value(schemars::schema_for!(Playbook))
-        .expect("schemars emits valid JSON");
+    let mut schema = serde_json::to_value(schemars::schema_for!(Playbook)).expect("schemars emits valid JSON");
 
     if let Some(obj) = schema.as_object_mut() {
         obj.insert(
@@ -1236,14 +1235,9 @@ pub fn playbook_json_schema() -> serde_json::Value {
         );
         obj.insert(
             "$id".to_string(),
-            serde_json::Value::String(
-                "https://noetl.io/schema/playbook.schema.json".into(),
-            ),
+            serde_json::Value::String("https://noetl.io/schema/playbook.schema.json".into()),
         );
-        obj.insert(
-            "title".to_string(),
-            serde_json::Value::String("NoETL Playbook".into()),
-        );
+        obj.insert("title".to_string(), serde_json::Value::String("NoETL Playbook".into()));
         obj.insert(
             "description".to_string(),
             serde_json::Value::String(

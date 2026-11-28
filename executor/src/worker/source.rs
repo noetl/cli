@@ -277,10 +277,7 @@ mod tests {
         source.ack(11).await.unwrap();
 
         let log = log.lock().await;
-        assert_eq!(
-            *log,
-            vec![MockAck::Acked(7), MockAck::Nacked(9), MockAck::Acked(11)]
-        );
+        assert_eq!(*log, vec![MockAck::Acked(7), MockAck::Nacked(9), MockAck::Acked(11)]);
     }
 
     #[tokio::test]
@@ -297,9 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_later_outcome_carries_error_message() {
-        let mut source = MockSource::new(vec![
-            ClaimOutcome::RetryLater("overload".to_string()),
-        ]);
+        let mut source = MockSource::new(vec![ClaimOutcome::RetryLater("overload".to_string())]);
         let pulled = source.next().await.unwrap().unwrap();
         match pulled.outcome {
             ClaimOutcome::RetryLater(msg) => assert_eq!(msg, "overload"),
@@ -309,9 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_outcome_carries_error_message() {
-        let mut source = MockSource::new(vec![
-            ClaimOutcome::Failed("malformed payload".to_string()),
-        ]);
+        let mut source = MockSource::new(vec![ClaimOutcome::Failed("malformed payload".to_string())]);
         let pulled = source.next().await.unwrap().unwrap();
         match pulled.outcome {
             ClaimOutcome::Failed(msg) => assert_eq!(msg, "malformed payload"),

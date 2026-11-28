@@ -145,13 +145,7 @@ impl EventEmitter {
         Self { sink, execution_id }
     }
 
-    pub async fn emit(
-        &self,
-        event_type: &str,
-        step: &str,
-        status: &str,
-        context: serde_json::Value,
-    ) -> Result<()> {
+    pub async fn emit(&self, event_type: &str, step: &str, status: &str, context: serde_json::Value) -> Result<()> {
         let event = ExecutorEvent {
             execution_id: self.execution_id,
             event_type: event_type.to_string(),

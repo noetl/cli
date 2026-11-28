@@ -76,8 +76,8 @@ pub async fn run(args: SubscribeArgs) -> Result<()> {
     let spec_path = PathBuf::from(&args.reference);
     let yaml_str = std::fs::read_to_string(&spec_path)
         .with_context(|| format!("read subscription spec {}", spec_path.display()))?;
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&yaml_str)
-        .with_context(|| format!("parse subscription YAML {}", spec_path.display()))?;
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&yaml_str).with_context(|| format!("parse subscription YAML {}", spec_path.display()))?;
 
     let sub_name = yaml
         .get("metadata")
@@ -94,11 +94,11 @@ pub async fn run(args: SubscribeArgs) -> Result<()> {
     let parsed = parse_spec(&yaml, &sub_name, args.spool_dir.as_deref())?;
 
     // 2. Build the local FileEventSink (the replayable trail).
-    let events_path = args.events.clone().unwrap_or_else(|| {
-        PathBuf::from(format!("{}-events.jsonl", slug(&sub_name)))
-    });
-    let sink: Arc<dyn EventSink> =
-        Arc::new(FileEventSink::create(&events_path, true).context("create event sink")?);
+    let events_path = args
+        .events
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("{}-events.jsonl", slug(&sub_name))));
+    let sink: Arc<dyn EventSink> = Arc::new(FileEventSink::create(&events_path, true).context("create event sink")?);
 
     // 3. Build the dispatcher per the RFC §5.3 local dispatch model.
     let ids = Arc::new(LocalIdGen::new());
@@ -125,8 +125,8 @@ pub async fn run(args: SubscribeArgs) -> Result<()> {
     // 4. Resolve a local credential for the source's auth alias (no server call).
     let credential = match (&parsed.auth_alias, &args.credential) {
         (Some(alias), Some(file)) => {
-            let json = std::fs::read_to_string(file)
-                .with_context(|| format!("read credential file {}", file.display()))?;
+            let json =
+                std::fs::read_to_string(file).with_context(|| format!("read credential file {}", file.display()))?;
             Some((alias.clone(), json))
         }
         _ => None,
@@ -141,7 +141,10 @@ pub async fn run(args: SubscribeArgs) -> Result<()> {
         StopWhen::Never
     };
 
-    eprintln!("🔔 noetl subscribe — {} (source: {})", sub_name, parsed.source_cfg.source);
+    eprintln!(
+        "🔔 noetl subscribe — {} (source: {})",
+        sub_name, parsed.source_cfg.source
+    );
     eprintln!("   dispatch : {}", dispatcher.label());
     eprintln!("   events   : {}", events_path.display());
     if parsed.spool.buffers() {

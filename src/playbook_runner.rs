@@ -38,12 +38,10 @@ use std::path::{Path, PathBuf};
 // glob clean and the impl below stable.
 #[allow(unused_imports)]
 pub use noetl_executor::playbook::{
-    default_duckdb_path, default_method, default_profile, default_version, AuthConfig,
-    CaseCondition, CmdsList, Executor, ExecutorRequires, ExecutorSpec, LoopConfig, Metadata,
-    NextArc, NextFormat, NextMode, NextRouterSpec, NextStep, Playbook, RuntimeCapabilities,
-    SinkFormat, SinkTarget, Step, StepSpec, ThenBlock, Tool, WhenCondition,
+    default_duckdb_path, default_method, default_profile, default_version, AuthConfig, CaseCondition, CmdsList,
+    Executor, ExecutorRequires, ExecutorSpec, LoopConfig, Metadata, NextArc, NextFormat, NextMode, NextRouterSpec,
+    NextStep, Playbook, RuntimeCapabilities, SinkFormat, SinkTarget, Step, StepSpec, ThenBlock, Tool, WhenCondition,
 };
-
 
 /// Structured outcome of a local playbook run.
 ///
@@ -61,10 +59,10 @@ pub use noetl_executor::playbook::{
 ///   `emit_json` is set. Without it, `run()` is silent on stdout.
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct RunOutcome {
-    pub status: String,         // "ok" | "error"
+    pub status: String, // "ok" | "error"
     pub playbook_name: String,
     pub playbook_path: String,
-    pub started_at: String,     // RFC3339 UTC
+    pub started_at: String, // RFC3339 UTC
     pub completed_at: String,
     pub duration_seconds: f64,
     pub executed_steps: Vec<String>,
@@ -344,8 +342,7 @@ impl PlaybookRunner {
         // ExecutionContext's HashMap ordering isn't stable, so we
         // also keep a separate Vec<String> of executed step names.
         let executed_steps = context.executed_steps.clone();
-        let mut step_results: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
+        let mut step_results: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         for (name, value) in context.step_results.iter() {
             step_results.insert(name.clone(), value.clone());
         }
@@ -354,9 +351,7 @@ impl PlaybookRunner {
         // the last executed step's result, if any. Distributed runtime
         // has a richer notion (the final_step's output, possibly
         // transformed); local runtime keeps it simple.
-        let final_result = executed_steps
-            .last()
-            .and_then(|name| step_results.get(name).cloned());
+        let final_result = executed_steps.last().and_then(|name| step_results.get(name).cloned());
 
         let outcome = RunOutcome {
             status: "ok".to_string(),
@@ -529,9 +524,7 @@ impl PlaybookRunner {
                             // Handle pipe: blocks - pass to distributed executor
                             // For local CLI, we skip pipeline execution (requires distributed runtime)
                             if value.get("pipe").is_some() && self.verbose {
-                                eprintln!(
-                                    "   ⚠ Pipeline blocks require distributed runtime, skipping"
-                                );
+                                eprintln!("   ⚠ Pipeline blocks require distributed runtime, skipping");
                             }
                         }
                     }
@@ -824,9 +817,7 @@ impl PlaybookRunner {
                     }
                 };
 
-                let rendered_tool = Tool::Shell {
-                    cmds: rendered_cmds,
-                };
+                let rendered_tool = Tool::Shell { cmds: rendered_cmds };
                 let bridge_ctx = noetl_executor::tools_bridge::BridgeContext {
                     execution_id: 0,
                     step: "<cli-local>",
@@ -836,12 +827,10 @@ impl PlaybookRunner {
                     command_id: None,
                 };
                 let outcome = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
-                        noetl_executor::tools_bridge::dispatch_via_registry(
-                            &rendered_tool,
-                            &bridge_ctx,
-                        ),
-                    )
+                    tokio::runtime::Handle::current().block_on(noetl_executor::tools_bridge::dispatch_via_registry(
+                        &rendered_tool,
+                        &bridge_ctx,
+                    ))
                 })?;
                 Ok(outcome.result)
             }
@@ -920,12 +909,10 @@ impl PlaybookRunner {
                     command_id: None,
                 };
                 let outcome = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
-                        noetl_executor::tools_bridge::dispatch_via_registry(
-                            &rendered_tool,
-                            &bridge_ctx,
-                        ),
-                    )
+                    tokio::runtime::Handle::current().block_on(noetl_executor::tools_bridge::dispatch_via_registry(
+                        &rendered_tool,
+                        &bridge_ctx,
+                    ))
                 })?;
                 if self.verbose {
                     if let Some(ref r) = outcome.result {
@@ -969,12 +956,10 @@ impl PlaybookRunner {
                     eprintln!("   Executing sub-playbook: {}", playbook_path.display());
                 }
 
-                let sub_vars = noetl_executor::tools_bridge::prepare_sub_playbook_vars(
-                    &context.variables,
-                    args,
-                    input,
-                    |t| self.render_template(t, context),
-                )?;
+                let sub_vars =
+                    noetl_executor::tools_bridge::prepare_sub_playbook_vars(&context.variables, args, input, |t| {
+                        self.render_template(t, context)
+                    })?;
 
                 // Propagate quiet to sub-playbooks so they're consistently
                 // silent; deliberately do NOT propagate emit_json — we
@@ -989,9 +974,7 @@ impl PlaybookRunner {
 
                 if !*return_result {
                     if result_step.is_some() && !self.quiet {
-                        eprintln!(
-                            "   ⚠️  `result_step` is ignored without `return_result: true`"
-                        );
+                        eprintln!("   ⚠️  `result_step` is ignored without `return_result: true`");
                     }
                     return Ok(None);
                 }
@@ -1040,10 +1023,7 @@ impl PlaybookRunner {
                     fs::create_dir_all(parent)?;
                 }
 
-                let db_path_str = db_path
-                    .to_str()
-                    .context("DuckDB path is not valid UTF-8")?
-                    .to_string();
+                let db_path_str = db_path.to_str().context("DuckDB path is not valid UTF-8")?.to_string();
                 let rendered_tool = Tool::DuckDb {
                     db: db_path_str,
                     query: Some(rendered_query),
@@ -1058,12 +1038,10 @@ impl PlaybookRunner {
                     command_id: None,
                 };
                 let outcome = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
-                        noetl_executor::tools_bridge::dispatch_via_registry(
-                            &rendered_tool,
-                            &bridge_ctx,
-                        ),
-                    )
+                    tokio::runtime::Handle::current().block_on(noetl_executor::tools_bridge::dispatch_via_registry(
+                        &rendered_tool,
+                        &bridge_ctx,
+                    ))
                 })?;
                 Ok(outcome.result)
             }
@@ -1100,16 +1078,13 @@ impl PlaybookRunner {
                     header: None,
                 };
                 let token = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
-                        noetl_executor::tools_bridge::resolve_auth_to_bearer(&auth_cfg),
-                    )
+                    tokio::runtime::Handle::current()
+                        .block_on(noetl_executor::tools_bridge::resolve_auth_to_bearer(&auth_cfg))
                 })?;
 
-                for (key, value) in noetl_executor::tools_bridge::auth_context_updates(
-                    provider,
-                    &token,
-                    rendered_project.as_deref(),
-                ) {
+                for (key, value) in
+                    noetl_executor::tools_bridge::auth_context_updates(provider, &token, rendered_project.as_deref())
+                {
                     context.set_variable(key, value);
                 }
 
@@ -1136,8 +1111,7 @@ impl PlaybookRunner {
                 // `.values().last()` picked an arbitrary step's result
                 // once two or more steps had produced one.
                 let data = context.last_result().unwrap_or_default();
-                let formatted_data =
-                    noetl_executor::tools_bridge::format_sink_payload(format, &data)?;
+                let formatted_data = noetl_executor::tools_bridge::format_sink_payload(format, &data)?;
 
                 match target {
                     SinkTarget::File { path } => {
@@ -1181,13 +1155,11 @@ impl PlaybookRunner {
                         // Auth flows through ADC / workload-identity — same chain as
                         // `resolve_auth_to_bearer` and the former gsutil call.
                         tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(
-                                noetl_executor::tools_bridge::gcs_upload(
-                                    &rendered_bucket,
-                                    &rendered_path,
-                                    &formatted_data,
-                                ),
-                            )
+                            tokio::runtime::Handle::current().block_on(noetl_executor::tools_bridge::gcs_upload(
+                                &rendered_bucket,
+                                &rendered_path,
+                                &formatted_data,
+                            ))
                         })?;
                         Ok(Some(format!("Uploaded to {}", gcs_uri)))
                     }
@@ -1224,12 +1196,10 @@ impl PlaybookRunner {
                     command_id: None,
                 };
                 let outcome = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
-                        noetl_executor::tools_bridge::dispatch_via_registry(
-                            &rendered_tool,
-                            &bridge_ctx,
-                        ),
-                    )
+                    tokio::runtime::Handle::current().block_on(noetl_executor::tools_bridge::dispatch_via_registry(
+                        &rendered_tool,
+                        &bridge_ctx,
+                    ))
                 })?;
                 Ok(outcome.result)
             }
@@ -1332,12 +1302,10 @@ impl PlaybookRunner {
                     command_id: None,
                 };
                 let outcome = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
-                        noetl_executor::tools_bridge::dispatch_via_registry(
-                            &rendered_tool,
-                            &bridge_ctx,
-                        ),
-                    )
+                    tokio::runtime::Handle::current().block_on(noetl_executor::tools_bridge::dispatch_via_registry(
+                        &rendered_tool,
+                        &bridge_ctx,
+                    ))
                 })?;
                 // Git-backed state sink: persist the applied ownership fact.
                 // `outcome.result` is a JSON-serialized string; parse it, then
@@ -1459,7 +1427,11 @@ impl PlaybookRunner {
                 })?;
 
                 if self.verbose {
-                    eprintln!("   🤖 Agent: {} ({} tools)", session.config().model, session.config().tools.len());
+                    eprintln!(
+                        "   🤖 Agent: {} ({} tools)",
+                        session.config().model,
+                        session.config().tools.len()
+                    );
                 }
 
                 loop {
@@ -1636,15 +1608,9 @@ impl PlaybookRunner {
     /// CLI template renderer.  Used to render provider tool config sub-blocks
     /// (`input`, `poll`, `dry_run`, `auth`) before bridge dispatch.  Mapping
     /// keys are left verbatim; only values are rendered.
-    fn render_yaml_value(
-        &self,
-        value: &serde_yaml::Value,
-        context: &ExecutionContext,
-    ) -> Result<serde_yaml::Value> {
+    fn render_yaml_value(&self, value: &serde_yaml::Value, context: &ExecutionContext) -> Result<serde_yaml::Value> {
         match value {
-            serde_yaml::Value::String(s) => {
-                Ok(serde_yaml::Value::String(self.render_template(s, context)?))
-            }
+            serde_yaml::Value::String(s) => Ok(serde_yaml::Value::String(self.render_template(s, context)?)),
             serde_yaml::Value::Sequence(seq) => {
                 let mut out = Vec::with_capacity(seq.len());
                 for item in seq {
@@ -1663,8 +1629,6 @@ impl PlaybookRunner {
             other => Ok(other.clone()),
         }
     }
-
-
 
     // R-1.1 PR-2c-3: the rhai_to_json_string / json_to_rhai forwarders
     // that lived here were used only by execute_rhai_script (now
@@ -1850,8 +1814,7 @@ const NOOP_KINDS: &[&str] = &["noop"];
 
 /// For the error message only. The check itself asks the [`Tool`] enum, so this
 /// list cannot make a kind pass or fail.
-const LOCAL_KINDS_FOR_MESSAGE: &str =
-    "shell, http, playbook, duckdb, auth, sink, rhai, provider, agent, mcp, noop";
+const LOCAL_KINDS_FOR_MESSAGE: &str = "shell, http, playbook, duckdb, auth, sink, rhai, provider, agent, mcp, noop";
 
 /// Fail when any workflow step uses a tool kind the local runtime cannot run.
 ///
@@ -2075,16 +2038,10 @@ mod tests {
             "apiVersion: noetl.io/v2\nkind: Playbook\nmetadata: { name: caller, path: t/caller }\nworkflow:\n  - step: start\n    tool: { kind: playbook, path: \"noetl://ni-b/xc/target\", remote: delegate, return_result: true }\n",
         )
         .unwrap();
-        let err = PlaybookRunner::new(pb)
-            .with_quiet(true)
-            .run()
-            .unwrap_err();
+        let err = PlaybookRunner::new(pb).with_quiet(true).run().unwrap_err();
         let chain = format!("{err:#}");
         std::fs::remove_dir_all(&dir).ok();
-        assert!(
-            chain.contains("names a playbook on another NoETL instance"),
-            "{chain}"
-        );
+        assert!(chain.contains("names a playbook on another NoETL instance"), "{chain}");
     }
 
     #[test]

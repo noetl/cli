@@ -69,7 +69,17 @@ pub(crate) async fn handle_credential_command(command: CredentialCommand) -> Res
             login_hint,
             port,
             no_open,
-        } => google(&alias, &client_secret_file, &scopes, login_hint.as_deref(), port, no_open).await,
+        } => {
+            google(
+                &alias,
+                &client_secret_file,
+                &scopes,
+                login_hint.as_deref(),
+                port,
+                no_open,
+            )
+            .await
+        }
         CredentialCommand::List => list(),
         CredentialCommand::Path => {
             let dir = local_credentials::credentials_dir().context("cannot locate the credentials dir (HOME unset)")?;
@@ -109,7 +119,11 @@ fn list() -> Result<()> {
     }
     println!("{:<32} {:<14} MODE", "ALIAS", "TYPE");
     for c in creds {
-        let warn = if c.mode & 0o077 != 0 { "  ⚠ not private: chmod 600" } else { "" };
+        let warn = if c.mode & 0o077 != 0 {
+            "  ⚠ not private: chmod 600"
+        } else {
+            ""
+        };
         println!("{:<32} {:<14} {:o}{}", c.alias, c.kind, c.mode, warn);
     }
     Ok(())
@@ -201,7 +215,9 @@ async fn google(
 
     let code = super::wait_for_pkce_callback(&listener, "/", &state).await?;
 
-    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
     let response = http
         .post(&client.token_uri)
         .form(&[
@@ -267,7 +283,10 @@ mod tests {
 
     #[test]
     fn scope_short_names_expand() {
-        assert_eq!(expand_scope("gmail.readonly"), "https://www.googleapis.com/auth/gmail.readonly");
+        assert_eq!(
+            expand_scope("gmail.readonly"),
+            "https://www.googleapis.com/auth/gmail.readonly"
+        );
         assert_eq!(
             expand_scope("https://www.googleapis.com/auth/gmail.modify"),
             "https://www.googleapis.com/auth/gmail.modify"

@@ -316,9 +316,17 @@ async fn orphans(client: &Client, common: &ProviderCommonArgs) -> Result<()> {
             "declared": declared, "orphans": orphan_json, "conflicts": conflict_json,
         }));
     } else {
-        println!("Orphans (stack: {}) — {} declared, {} orphaned:\n", stack, declared.len(), orphaned.len());
+        println!(
+            "Orphans (stack: {}) — {} declared, {} orphaned:\n",
+            stack,
+            declared.len(),
+            orphaned.len()
+        );
         for o in &orphaned {
-            println!("  • {} ({})  — owned per EHDB, no longer declared", o.urn, o.resource_type);
+            println!(
+                "  • {} ({})  — owned per EHDB, no longer declared",
+                o.urn, o.resource_type
+            );
         }
         if !conflicts.is_empty() {
             println!("\n⚠ cross-stack conflicts ({}):", conflicts.len());
@@ -407,8 +415,7 @@ async fn adopt(
 
 /// Parse a playbook and lift out its `kind: provider` steps.
 fn load_resources(path: &Path) -> Result<Vec<DeclaredResource>> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading playbook {}", path.display()))?;
+    let content = std::fs::read_to_string(path).with_context(|| format!("reading playbook {}", path.display()))?;
     let pb: Playbook =
         serde_yaml::from_str(&content).with_context(|| format!("parsing playbook {}", path.display()))?;
     let mut out = Vec::new();
@@ -418,10 +425,7 @@ fn load_resources(path: &Path) -> Result<Vec<DeclaredResource>> {
         }
     }
     if out.is_empty() {
-        bail!(
-            "playbook {} declares no `kind: provider` steps",
-            path.display()
-        );
+        bail!("playbook {} declares no `kind: provider` steps", path.display());
     }
     Ok(out)
 }
@@ -440,8 +444,8 @@ fn parse_facts_content(content: &str) -> Result<Vec<serde_json::Value>> {
         if line.is_empty() {
             continue;
         }
-        let v: serde_json::Value = serde_json::from_str(line)
-            .with_context(|| format!("parsing JSONL line {}", i + 1))?;
+        let v: serde_json::Value =
+            serde_json::from_str(line).with_context(|| format!("parsing JSONL line {}", i + 1))?;
         out.push(v);
     }
     Ok(out)
@@ -475,12 +479,7 @@ fn append_fact_jsonl(path: &Path, fact: &serde_json::Value) -> Result<()> {
 fn mask_fact_identifiers(fact: &serde_json::Value) -> serde_json::Value {
     let mut f = fact.clone();
     if let Some(desired) = f.get_mut("desired").and_then(|d| d.as_object_mut()) {
-        for k in [
-            "billing_account",
-            "billingAccount",
-            "billingAccountName",
-            "member",
-        ] {
+        for k in ["billing_account", "billingAccount", "billingAccountName", "member"] {
             if desired.contains_key(k) {
                 desired.insert(k.to_string(), serde_json::json!("<masked>"));
             }
@@ -541,9 +540,12 @@ async fn resource_urn(
         .execute(&cfg, ctx)
         .await
         .with_context(|| format!("deriving URN for step {:?}", r.step))?;
-    Ok(res
-        .data
-        .and_then(|d| d.get("provider_fact").and_then(|f| f.get("urn")).and_then(|v| v.as_str()).map(String::from)))
+    Ok(res.data.and_then(|d| {
+        d.get("provider_fact")
+            .and_then(|f| f.get("urn"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }))
 }
 
 /// Load the folded ownership model (server or offline facts file).
@@ -553,9 +555,7 @@ async fn load_ownership_model(client: &Client, common: &ProviderCommonArgs) -> R
 
 /// Adopt path: no shared `client` in scope, build one locally when a server is
 /// configured.
-async fn load_ownership_model_offline_or_server(
-    common: &ProviderCommonArgs,
-) -> Result<provider_state::OwnershipModel> {
+async fn load_ownership_model_offline_or_server(common: &ProviderCommonArgs) -> Result<provider_state::OwnershipModel> {
     let client = Client::new();
     load_ownership_model(&client, common).await
 }
@@ -624,10 +624,7 @@ async fn load_facts(client: &Client, common: &ProviderCommonArgs) -> Result<Vec<
 /// exist for the operator running it.
 ///
 /// stderr, not stdout: `provider report --json` output must stay machine-parseable.
-fn extract_and_report_coverage(
-    records: &[serde_json::Value],
-    source: &str,
-) -> Vec<provider_state::ProviderFact> {
+fn extract_and_report_coverage(records: &[serde_json::Value], source: &str) -> Vec<provider_state::ProviderFact> {
     let (facts, coverage) = provider_state::extract_facts_from_tier_records_with_coverage(records);
     if coverage.is_suspicious() {
         eprintln!(
@@ -669,8 +666,7 @@ fn build_context(common: &ProviderCommonArgs) -> Result<ToolsExecutionContext> {
     // these CLI verbs run outside a playbook execution).
     let mut ctx = ToolsExecutionContext::new(0, "provider-cli", "");
     if let Some(w) = &common.workload {
-        let val: serde_json::Value =
-            serde_json::from_str(w).context("--workload must be a JSON object")?;
+        let val: serde_json::Value = serde_json::from_str(w).context("--workload must be a JSON object")?;
         ctx.set_variable("workload", val);
     }
     Ok(ctx)
@@ -765,7 +761,10 @@ mod facts_sink_tests {
 
         // Masking: the committed line must not carry the billing account id.
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains("AAAAAA-BBBBBB-CCCCCC"), "billing account id must be masked in the sink");
+        assert!(
+            !raw.contains("AAAAAA-BBBBBB-CCCCCC"),
+            "billing account id must be masked in the sink"
+        );
         assert!(raw.contains("<masked>"), "masked placeholder present");
         assert_eq!(raw.lines().count(), 2, "one JSONL line per appended fact");
 
@@ -778,16 +777,24 @@ mod facts_sink_tests {
             "adopted project is owned after the append→read-back round-trip"
         );
         assert!(
-            model.owned.contains_key("google:cloudbilling:billing_link:shastaratech-youtube-prod"),
+            model
+                .owned
+                .contains_key("google:cloudbilling:billing_link:shastaratech-youtube-prod"),
             "billing link is owned after round-trip (masking does not break the fold)"
         );
 
         // The planned/dry-run fact is filtered out by the apply-only gate.
         let planned_data = serde_json::json!({ "provider_fact": planned });
         let common = ProviderCommonArgs {
-            playbook: path.clone(), stack: None, server: None,
-            facts_file: None, facts_out: Some(path.clone()), execution: None,
-            endpoint: None, workload: None, json: false,
+            playbook: path.clone(),
+            stack: None,
+            server: None,
+            facts_file: None,
+            facts_out: Some(path.clone()),
+            execution: None,
+            endpoint: None,
+            workload: None,
+            json: false,
         };
         maybe_append_applied_fact(&common, &planned_data).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
@@ -863,6 +870,10 @@ mod facts_sink_tests {
         let array = r#"[{"urn":"u1","provider":"google","service":"s","resource_type":"project","verb":"ensure","stack":"x","outcome":"changed","execution_id":1,"desired":{}}]"#;
         assert_eq!(parse_facts_content(array).unwrap().len(), 1);
         let jsonl = "{\"a\":1}\n\n{\"b\":2}\n";
-        assert_eq!(parse_facts_content(jsonl).unwrap().len(), 2, "JSONL: blank lines skipped");
+        assert_eq!(
+            parse_facts_content(jsonl).unwrap().len(),
+            2,
+            "JSONL: blank lines skipped"
+        );
     }
 }

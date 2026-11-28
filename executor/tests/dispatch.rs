@@ -58,8 +58,7 @@ async fn rhai_reads_workload_field_via_nested_scope() {
     // PR-2c-3 introduced `to_tools_context_for_rhai` so that flat
     // `workload.region` keys in the CLI variable map are reshaped
     // into a nested `workload.region` Rhai field access.
-    let vars: HashMap<String, String> =
-        [("workload.region".into(), "eu-west-2".into())].into();
+    let vars: HashMap<String, String> = [("workload.region".into(), "eu-west-2".into())].into();
     let bridge = ctx(&vars);
     let tool = Tool::Rhai {
         code: r#"workload.region.to_string()"#.into(),
@@ -89,11 +88,7 @@ async fn shell_multiple_returns_last_command_stdout() {
     let vars = empty_vars();
     let bridge = ctx(&vars);
     let tool = Tool::Shell {
-        cmds: CmdsList::Multiple(vec![
-            "echo first".into(),
-            "echo second".into(),
-            "echo last".into(),
-        ]),
+        cmds: CmdsList::Multiple(vec!["echo first".into(), "echo second".into(), "echo last".into()]),
     };
     let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
     assert_eq!(outcome.result, Some("last".into()));
@@ -164,16 +159,12 @@ async fn duckdb_in_memory_select_returns_rows_array() {
         return;
     }
     let outcome = outcome.unwrap();
-    let parsed: serde_json::Value =
-        serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
     let arr = parsed.as_array().expect("result should be a JSON array");
     assert_eq!(arr.len(), 2);
     // Order is implementation-defined for UNION without ORDER BY;
     // verify by id rather than positional.
-    let ids: Vec<i64> = arr
-        .iter()
-        .filter_map(|v| v["id"].as_i64())
-        .collect();
+    let ids: Vec<i64> = arr.iter().filter_map(|v| v["id"].as_i64()).collect();
     assert!(ids.contains(&1) && ids.contains(&2));
 }
 
@@ -210,8 +201,7 @@ async fn duckdb_select_empty_result_returns_empty_array() {
         return;
     }
     let outcome = outcome.unwrap();
-    let parsed: serde_json::Value =
-        serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
     assert_eq!(parsed.as_array().unwrap().len(), 0);
 }
 
@@ -248,8 +238,7 @@ async fn auth_bridge_arm_bails_pointing_at_helpers() {
     let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("resolve_auth_to_bearer")
-            && msg.contains("auth_context_updates"),
+        msg.contains("resolve_auth_to_bearer") && msg.contains("auth_context_updates"),
         "expected message to point at helpers: {msg}"
     );
 }

@@ -139,7 +139,11 @@ impl Dispatcher for LocalDispatcher {
         match outcome {
             Ok(run) => Ok(DispatchResult {
                 execution_id,
-                status: if run.status == "ok" { "COMPLETED".into() } else { "FAILED".into() },
+                status: if run.status == "ok" {
+                    "COMPLETED".into()
+                } else {
+                    "FAILED".into()
+                },
                 error: run.error,
             }),
             Err(e) => Ok(DispatchResult {

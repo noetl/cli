@@ -12,9 +12,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use noetl_events::{EventSink, ExecutorEvent};
 use noetl_tools::spool::SpoolSpec;
-use noetl_tools::tools::source::{
-    DispatchPlan, PollOptions, PollOutcome, PolledMessage, SourceClient,
-};
+use noetl_tools::tools::source::{DispatchPlan, PollOptions, PollOutcome, PolledMessage, SourceClient};
 use noetl_tools::ToolError;
 
 use super::dispatch::{DispatchResult, Dispatcher};
@@ -35,9 +33,7 @@ impl VecSource {
     fn new(batch: Vec<PolledMessage>) -> Self {
         let mut q = VecDeque::new();
         q.push_back(batch);
-        Self {
-            batches: Mutex::new(q),
-        }
+        Self { batches: Mutex::new(q) }
     }
 }
 
@@ -167,10 +163,7 @@ async fn full_loop_emits_event_sourced_trail_to_filesink() {
         msg("m2", serde_json::json!({"order_id": 2})),
     ]));
 
-    let summary = rt
-        .run_with_source(source, futures_pending())
-        .await
-        .unwrap();
+    let summary = rt.run_with_source(source, futures_pending()).await.unwrap();
     assert_eq!(summary.received, 2);
     assert_eq!(summary.dispatched, 2);
     assert_eq!(dispatcher.dispatched(), vec!["m1", "m2"]);
@@ -269,7 +262,10 @@ async fn outage_buffers_to_local_disk_then_replays_in_order_on_recovery() {
     let _listener = std::net::TcpListener::bind(format!("127.0.0.1:{probe_port}")).unwrap();
     dispatcher.set_fail(false);
     let recovered = spool.maybe_probe().await;
-    assert!(recovered.contains(&"warehouse".to_string()), "circuit recovered: {recovered:?}");
+    assert!(
+        recovered.contains(&"warehouse".to_string()),
+        "circuit recovered: {recovered:?}"
+    );
 
     // --- Drain: ordered replay of the 6 buffered messages. ---
     spool.drain().await.unwrap();

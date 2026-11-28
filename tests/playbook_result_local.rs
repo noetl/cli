@@ -175,6 +175,9 @@ workflow:
     let err = run(parent).expect_err("a typo in result_step must fail the run");
     let msg = format!("{err:#}");
     assert!(msg.contains("result_step `nope`"), "{msg}");
-    assert!(msg.contains("first, last"), "lists the steps that did produce results: {msg}");
+    assert!(
+        msg.contains("first, last"),
+        "lists the steps that did produce results: {msg}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

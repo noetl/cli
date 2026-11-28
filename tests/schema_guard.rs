@@ -9,8 +9,7 @@ use std::path::PathBuf;
 
 fn committed() -> serde_json::Value {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema/playbook.schema.json");
-    let text = std::fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()));
+    let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()));
     serde_json::from_str(&text).expect("committed schema is valid JSON")
 }
 
@@ -64,8 +63,14 @@ fn schema_matches_the_reference_shape() {
     assert_eq!(
         props,
         vec![
-            "apiVersion", "executor", "keychain", "kind", "metadata", "workbook",
-            "workflow", "workload"
+            "apiVersion",
+            "executor",
+            "keychain",
+            "kind",
+            "metadata",
+            "workbook",
+            "workflow",
+            "workload"
         ],
         "root property set must match the reference schema"
     );

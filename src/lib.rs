@@ -16,15 +16,15 @@
 //! Both are re-exports of the code the binary already ran; there is no second
 //! implementation of anything.
 
+mod buffer_cli;
 mod config;
 mod credential_cli;
+mod instance;
 pub mod local_buffer;
-mod buffer_cli;
 pub mod playbook_runner;
 mod provider_cli;
-mod subscribe;
 pub mod serve;
-mod instance;
+mod subscribe;
 
 /// The local execution engine and its structured outcome.
 ///
@@ -2395,18 +2395,12 @@ fn api_url(base_url: &str, path: &str, use_gateway_proxy: bool) -> String {
 /// Returns ``Some((name, context))`` when ``--context`` is honoured,
 /// or ``None`` when the caller should fall back to
 /// ``Config::get_current_context``.
-fn resolve_named_context<'a>(
-    requested: Option<&str>,
-    config: &'a Config,
-) -> Option<(&'a String, &'a Context)> {
+fn resolve_named_context<'a>(requested: Option<&str>, config: &'a Config) -> Option<(&'a String, &'a Context)> {
     let requested = requested?;
     match config.contexts.get_key_value(requested) {
         Some((name, ctx)) => Some((name, ctx)),
         None => {
-            eprintln!(
-                "Context '{}' (from --context flag) not found.",
-                requested
-            );
+            eprintln!("Context '{}' (from --context flag) not found.", requested);
             eprintln!("  Configured contexts:  noetl context list");
             eprintln!(
                 "  Create it:            noetl context add {} --server-url=...",
@@ -2420,10 +2414,7 @@ fn resolve_named_context<'a>(
 /// Effective context for this invocation — ``--context <name>`` if
 /// passed (validated by ``resolve_named_context``), otherwise
 /// whatever ``Config`` reports as current.
-fn effective_context<'a>(
-    requested: Option<&str>,
-    config: &'a Config,
-) -> Option<(&'a String, &'a Context)> {
+fn effective_context<'a>(requested: Option<&str>, config: &'a Config) -> Option<(&'a String, &'a Context)> {
     resolve_named_context(requested, config).or_else(|| config.get_current_context())
 }
 
@@ -3028,7 +3019,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             verbose,
         }) => {
             // Get context runtime preference (honours --context override).
-            let context_runtime = effective_context(context_override.as_deref(), &config).map(|(_, ctx)| ctx.runtime.as_str());
+            let context_runtime =
+                effective_context(context_override.as_deref(), &config).map(|(_, ctx)| ctx.runtime.as_str());
 
             // Determine effective runtime (context takes precedence for "auto")
             let effective_runtime = if runtime == "auto" {
@@ -3171,16 +3163,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     dry_run,
                     json,
                 } => {
-                    bulk_load_catalog(
-                        &client,
-                        &base_url,
-                        use_gateway_proxy,
-                        &paths,
-                        batch_size,
-                        dry_run,
-                        json,
-                    )
-                    .await?;
+                    bulk_load_catalog(&client, &base_url, use_gateway_proxy, &paths, batch_size, dry_run, json).await?;
                 }
                 CatalogCommand::List { resource_type, json } => {
                     list_resources(&client, &base_url, use_gateway_proxy, &resource_type, json).await?;
@@ -3245,8 +3228,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     .await?;
                 }
                 EhdbQueryCommand::Execution { execution_id, json } => {
-                    ehdb_query_execution(&client, &base_url, use_gateway_proxy, &execution_id, json)
-                        .await?;
+                    ehdb_query_execution(&client, &base_url, use_gateway_proxy, &execution_id, json).await?;
                 }
                 EhdbQueryCommand::Events {
                     execution_id,
@@ -3254,16 +3236,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     after,
                     json,
                 } => {
-                    ehdb_query_events(
-                        &client,
-                        &base_url,
-                        use_gateway_proxy,
-                        &execution_id,
-                        limit,
-                        after,
-                        json,
-                    )
-                    .await?;
+                    ehdb_query_events(&client, &base_url, use_gateway_proxy, &execution_id, limit, after, json).await?;
                 }
                 EhdbQueryCommand::Tier {
                     tier,
@@ -3295,8 +3268,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                         limit,
                         execution_id,
                     };
-                    ehdb_query_tier(&client, &base_url, use_gateway_proxy, &tier, &args, json)
-                        .await?;
+                    ehdb_query_tier(&client, &base_url, use_gateway_proxy, &tier, &args, json).await?;
                 }
             },
         },
@@ -3305,8 +3277,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let text = serde_json::to_string_pretty(&schema)? + "\n";
             match output {
                 Some(path) => {
-                    std::fs::write(&path, &text)
-                        .with_context(|| format!("failed to write schema to {path}"))?;
+                    std::fs::write(&path, &text).with_context(|| format!("failed to write schema to {path}"))?;
                     println!("wrote {} bytes to {path}", text.len());
                 }
                 None => print!("{text}"),
@@ -3451,16 +3422,13 @@ async fn handle_context_command(config: &mut Config, command: ContextCommand) ->
                 }
             }
             if let Some(value) = kube_context {
-                context.kube_context =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                context.kube_context = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(value) = kube_namespace {
-                context.kube_namespace =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                context.kube_namespace = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(value) = kube_service {
-                context.kube_service =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                context.kube_service = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(port) = kube_remote_port {
                 context.kube_remote_port = if port == 0 { None } else { Some(port) };
@@ -3538,8 +3506,7 @@ async fn handle_context_command(config: &mut Config, command: ContextCommand) ->
             runtime,
             set_current,
         } => {
-            handle_context_init(config, &name, &from_gateway, &runtime, non_interactive, set_current)
-                .await?;
+            handle_context_init(config, &name, &from_gateway, &runtime, non_interactive, set_current).await?;
         }
         ContextCommand::Update {
             name,
@@ -3583,10 +3550,7 @@ async fn handle_context_command(config: &mut Config, command: ContextCommand) ->
             }
             if let Some(rt) = runtime {
                 if !["local", "distributed", "auto"].contains(&rt.as_str()) {
-                    eprintln!(
-                        "Invalid runtime '{}'. Use: local, distributed, or auto",
-                        rt
-                    );
+                    eprintln!("Invalid runtime '{}'. Use: local, distributed, or auto", rt);
                     std::process::exit(1);
                 }
                 ctx.runtime = rt;
@@ -3595,37 +3559,29 @@ async fn handle_context_command(config: &mut Config, command: ContextCommand) ->
             // it.  Mirrors the clear-on-empty behaviour the existing
             // ``Add`` handler uses for audience + client_secret.
             if let Some(value) = auth0_domain {
-                ctx.gateway_auth0_domain =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                ctx.gateway_auth0_domain = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(value) = auth0_client_id {
-                ctx.gateway_auth0_client_id =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                ctx.gateway_auth0_client_id = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(value) = auth0_redirect_uri {
-                ctx.gateway_auth0_redirect_uri =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                ctx.gateway_auth0_redirect_uri = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(value) = auth0_audience {
-                ctx.gateway_auth0_audience =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                ctx.gateway_auth0_audience = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(value) = auth0_client_secret {
-                ctx.gateway_auth0_client_secret =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                ctx.gateway_auth0_client_secret = if value.trim().is_empty() { None } else { Some(value) };
             }
             // Kubernetes fields (paired with ``noetl context port-forward``).
             if let Some(value) = kube_context {
-                ctx.kube_context =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                ctx.kube_context = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(value) = kube_namespace {
-                ctx.kube_namespace =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                ctx.kube_namespace = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(value) = kube_service {
-                ctx.kube_service =
-                    if value.trim().is_empty() { None } else { Some(value) };
+                ctx.kube_service = if value.trim().is_empty() { None } else { Some(value) };
             }
             if let Some(port) = kube_remote_port {
                 ctx.kube_remote_port = if port == 0 { None } else { Some(port) };
@@ -3708,10 +3664,7 @@ fn port_forward_pid_path(context_name: &str) -> Result<PathBuf> {
 fn port_forward_target(ctx: &Context) -> Option<(String, String, String, u16, u16)> {
     let kube_context = ctx.kube_context.clone()?;
     let kube_namespace = ctx.kube_namespace.clone()?;
-    let service = ctx
-        .kube_service
-        .clone()
-        .unwrap_or_else(|| "noetl".to_string());
+    let service = ctx.kube_service.clone().unwrap_or_else(|| "noetl".to_string());
     let remote_port = ctx.kube_remote_port.unwrap_or(8082);
     let local_port = parse_local_port_from_server_url(&ctx.server_url)?;
     Some((kube_context, kube_namespace, service, local_port, remote_port))
@@ -3739,9 +3692,7 @@ fn parse_local_port_from_server_url(url: &str) -> Option<u16> {
 ///
 /// Split from the HTTP-fetching wrapper so it can be unit-tested
 /// without a live gateway.
-fn parse_auth0_block_from_contract(
-    contract: &serde_json::Value,
-) -> Option<(String, String, String, String)> {
+fn parse_auth0_block_from_contract(contract: &serde_json::Value) -> Option<(String, String, String, String)> {
     let auth0 = contract.get("auth0")?.as_object()?;
     let domain = auth0
         .get("domain")
@@ -3839,7 +3790,11 @@ async fn handle_context_init(
         );
         println!(
             "  auth0_redirect_uri:   {}",
-            if redirect_uri.is_empty() { "(none)" } else { &redirect_uri }
+            if redirect_uri.is_empty() {
+                "(none)"
+            } else {
+                &redirect_uri
+            }
         );
         println!(
             "  auth0_audience:       {}",
@@ -3869,12 +3824,8 @@ async fn handle_context_init(
     }
 
     if auth0.is_none() {
-        eprintln!(
-            "Warning: gateway runtime contract does not carry an ``auth0`` block."
-        );
-        eprintln!(
-            "  Either the gateway image is older than v2.10 (no Auth0 exposure)"
-        );
+        eprintln!("Warning: gateway runtime contract does not carry an ``auth0`` block.");
+        eprintln!("  Either the gateway image is older than v2.10 (no Auth0 exposure)");
         eprintln!("  or the deployment is configured without Auth0.  Context will be");
         eprintln!("  created with ``server_url`` only.  Add Auth0 fields manually if needed:");
         eprintln!(
@@ -3915,13 +3866,7 @@ async fn handle_context_init(
     Ok(())
 }
 
-fn handle_port_forward(
-    config: &Config,
-    name: &str,
-    detach: bool,
-    stop: bool,
-    status: bool,
-) -> Result<()> {
+fn handle_port_forward(config: &Config, name: &str, detach: bool, stop: bool, status: bool) -> Result<()> {
     let ctx = match config.contexts.get(name) {
         Some(c) => c,
         None => {
@@ -3987,12 +3932,8 @@ fn handle_port_forward(
                 name
             );
             eprintln!();
-            eprintln!(
-                "The local port is derived from the context's ``server_url`` (must be a"
-            );
-            eprintln!(
-                "loopback URL like http://127.0.0.1:18082 or http://localhost:8082)."
-            );
+            eprintln!("The local port is derived from the context's ``server_url`` (must be a");
+            eprintln!("loopback URL like http://127.0.0.1:18082 or http://localhost:8082).");
             std::process::exit(1);
         }
     };
@@ -4047,9 +3988,7 @@ fn handle_port_forward(
                 eprintln!("  If it's a stray ``kubectl port-forward`` from another shell:");
                 eprintln!("    pkill -f 'port-forward svc/noetl'");
                 eprintln!();
-                eprintln!(
-                    "  If it's another noetl-managed daemon: ``noetl context port-forward <other> --stop``."
-                );
+                eprintln!("  If it's another noetl-managed daemon: ``noetl context port-forward <other> --stop``.");
                 std::process::exit(1);
             }
         }
@@ -4069,10 +4008,7 @@ fn handle_port_forward(
     ];
 
     if !detach {
-        println!(
-            "Starting kubectl port-forward (foreground) for context '{}':",
-            name
-        );
+        println!("Starting kubectl port-forward (foreground) for context '{}':", name);
         println!(
             "  kubectl --context {} -n {} port-forward {} {}",
             kube_ctx, kube_ns, svc_arg, port_arg
@@ -4091,9 +4027,8 @@ fn handle_port_forward(
 
     // Detached path — fork via std::process::Command with stdio detached.
     if let Some(parent) = pid_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("Failed to create port-forward PID directory: {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create port-forward PID directory: {}", parent.display()))?;
     }
     let child = std::process::Command::new("kubectl")
         .args(&kubectl_args)
@@ -4126,10 +4061,7 @@ fn handle_port_forward(
         std::process::exit(1);
     }
 
-    println!(
-        "Detached kubectl port-forward for context '{}' (pid {}).",
-        name, pid
-    );
+    println!("Detached kubectl port-forward for context '{}' (pid {}).", name, pid);
     println!("  Local:  http://127.0.0.1:{}", local_port_str);
     println!("  Remote: {}/{} port {}", kube_ns, service, remote_port);
     println!("  PID:    {}", pid_path.display());
@@ -4141,8 +4073,8 @@ fn read_pid_file(path: &PathBuf) -> Result<Option<u32>> {
     if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read PID file: {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("Failed to read PID file: {}", path.display()))?;
     let pid: u32 = content
         .trim()
         .parse()
@@ -4380,9 +4312,7 @@ fn extract_auth0_tenant_and_region(domain: &str) -> Option<(String, Option<Strin
     // URL.
     match labels.as_slice() {
         [tenant, "auth0", "com"] => Some(((*tenant).to_string(), None)),
-        [tenant, region, "auth0", "com"]
-            if matches!(*region, "us" | "eu" | "au" | "jp") =>
-        {
+        [tenant, region, "auth0", "com"] if matches!(*region, "us" | "eu" | "au" | "jp") => {
             Some(((*tenant).to_string(), Some((*region).to_string())))
         }
         _ => None,
@@ -4442,20 +4372,15 @@ async fn wait_for_pkce_callback_with_hint(
             // ``anyhow`` chain root for log surfaces that want it,
             // but the human-facing hint is prepended to the
             // displayed bail message.
-            let dashboard_url = build_auth0_dashboard_url(domain, client_id)
-                .unwrap_or_else(|| {
-                    format!(
-                        "https://manage.auth0.com/dashboard/<tenant>/applications/{}/settings",
-                        client_id.trim()
-                    )
-                });
+            let dashboard_url = build_auth0_dashboard_url(domain, client_id).unwrap_or_else(|| {
+                format!(
+                    "https://manage.auth0.com/dashboard/<tenant>/applications/{}/settings",
+                    client_id.trim()
+                )
+            });
             eprintln!();
-            eprintln!(
-                "PKCE callback did not arrive in time.  The most common cause is that"
-            );
-            eprintln!(
-                "Auth0 rejected the /authorize request because the redirect URI"
-            );
+            eprintln!("PKCE callback did not arrive in time.  The most common cause is that");
+            eprintln!("Auth0 rejected the /authorize request because the redirect URI");
             eprintln!("isn't in the application's allowed callbacks list:");
             eprintln!();
             eprintln!("  redirect_uri: {}", redirect_uri);
@@ -4465,12 +4390,8 @@ async fn wait_for_pkce_callback_with_hint(
             eprintln!();
             eprintln!("  {}", dashboard_url);
             eprintln!();
-            eprintln!(
-                "Then retry the login.  If the URI was already allowed, the timeout"
-            );
-            eprintln!(
-                "may indicate a different failure (network, browser blocked the"
-            );
+            eprintln!("Then retry the login.  If the URI was already allowed, the timeout");
+            eprintln!("may indicate a different failure (network, browser blocked the");
             eprintln!("listener, or the Auth0 tenant/client_id is wrong).  Original error:");
             eprintln!("  {}", err);
             Err(err)
@@ -4643,9 +4564,7 @@ async fn auth0_pkce_authorize(
     if !json {
         println!("PKCE callback listener ready at {}", listener_addr);
         println!("Redirect URI: {}", redirect_uri);
-        println!(
-            "  NOTE: this URI must appear in the Auth0 application's"
-        );
+        println!("  NOTE: this URI must appear in the Auth0 application's");
         println!("        \"Allowed Callback URLs\" list, otherwise Auth0");
         println!("        will reject the /authorize request with a");
         println!("        \"Callback URL mismatch\" page and this CLI");
@@ -4669,15 +4588,8 @@ async fn auth0_pkce_authorize(
         println!("Waiting for Auth0 callback...");
     }
 
-    let code = wait_for_pkce_callback_with_hint(
-        &listener,
-        redirect.path(),
-        &state,
-        redirect_uri,
-        client_id,
-        domain,
-    )
-    .await?;
+    let code =
+        wait_for_pkce_callback_with_hint(&listener, redirect.path(), &state, redirect_uri, client_id, domain).await?;
 
     let http_client = Client::new();
     let mut form: Vec<(String, String)> = vec![
@@ -5046,7 +4958,7 @@ async fn handle_auth_command(config: &mut Config, base_url: &str, command: AuthC
                             token = Some(id_token.to_string());
                         } else {
                             // Browser flow: print authorization URL
-                                if !json {
+                            if !json {
                                 println!("Auth0 login hint: {}", auth0_input.trim());
                                 if let (Some(domain), Some(client_id)) = (early_domain, early_client_id) {
                                     let nonce = std::time::SystemTime::now()
@@ -5397,11 +5309,9 @@ pub fn classify_for_bulk_load(file: &Path, content: &str) -> Result<String, Stri
         return Err("file is empty".to_string());
     }
     if content.contains("kind: Credential") {
-        return Err(
-            "credential resources are not bulk-loaded through the catalog; use \
+        return Err("credential resources are not bulk-loaded through the catalog; use \
              `noetl catalog register <file>`"
-                .to_string(),
-        );
+            .to_string());
     }
     // The server derives kind from the YAML's own `kind:`; `resource_type` is
     // only the fallback when that is absent, so mirroring the single-register
@@ -5438,10 +5348,7 @@ pub fn discover_resources(paths: &[PathBuf]) -> Result<(Vec<DiscoveredResource>,
             }
         };
         match classify_for_bulk_load(&f, &content) {
-            Ok(resource_type) => found.push(DiscoveredResource {
-                file: f,
-                resource_type,
-            }),
+            Ok(resource_type) => found.push(DiscoveredResource { file: f, resource_type }),
             Err(reason) => skipped.push(SkippedResource { file: f, reason }),
         }
     }
@@ -5523,8 +5430,7 @@ async fn bulk_load_catalog(
     for chunk in found.chunks(batch_size) {
         let mut items = Vec::with_capacity(chunk.len());
         for r in chunk {
-            let content = fs::read_to_string(&r.file)
-                .context(format!("Failed to read file: {}", r.file.display()))?;
+            let content = fs::read_to_string(&r.file).context(format!("Failed to read file: {}", r.file.display()))?;
             items.push(RegisterRequest {
                 content: BASE64_STANDARD.encode(&content),
                 resource_type: r.resource_type.clone(),
@@ -6299,12 +6205,7 @@ async fn get_credential(
 /// Issue a read-only GET against an `/api/ehdb/...` endpoint and return the
 /// parsed JSON body. On a non-success status, print the error and exit 1
 /// (mirrors the existing CLI error handling in `execute_query` / `get_status`).
-async fn ehdb_get(
-    client: &Client,
-    base_url: &str,
-    use_gateway_proxy: bool,
-    path: &str,
-) -> Result<serde_json::Value> {
+async fn ehdb_get(client: &Client, base_url: &str, use_gateway_proxy: bool, path: &str) -> Result<serde_json::Value> {
     let url = api_url(base_url, path, use_gateway_proxy);
     let response = client
         .get(&url)
@@ -6417,10 +6318,7 @@ async fn ehdb_query_executions(
             ]
         })
         .collect();
-    render_ehdb_table(
-        &["execution_id", "status", "path", "events", "started_at"],
-        &rows,
-    );
+    render_ehdb_table(&["execution_id", "status", "path", "events", "started_at"], &rows);
     Ok(())
 }
 
@@ -6502,10 +6400,7 @@ async fn ehdb_query_events(
             ]
         })
         .collect();
-    render_ehdb_table(
-        &["event_id", "event_type", "node_name", "status", "created_at"],
-        &rows,
-    );
+    render_ehdb_table(&["event_id", "event_type", "node_name", "status", "created_at"], &rows);
     if let Some(cursor) = body.get("next_cursor").and_then(|c| c.as_str()) {
         println!("next_cursor: {} (pass --after {})", cursor, cursor);
     }
@@ -6520,9 +6415,7 @@ fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for &b in value.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -6622,10 +6515,7 @@ async fn ehdb_query_tier(
                     ]
                 })
                 .collect();
-            render_ehdb_table(
-                &["global_seq", "execution_id", "transaction_id", "byte_len"],
-                &rows,
-            );
+            render_ehdb_table(&["global_seq", "execution_id", "transaction_id", "byte_len"], &rows);
         }
         "kv" => {
             // `get` returns a single `entry`; `scan` returns `entries`.
@@ -9111,10 +9001,7 @@ mod tests {
             "apiVersion: noetl.io/v2\nkind: Credential\nmetadata: {name: x}\n",
         );
         let reason = r.expect_err("a credential must not be bulk-loaded into the catalog");
-        assert!(
-            reason.contains("credential"),
-            "the refusal must say why: {reason}"
-        );
+        assert!(reason.contains("credential"), "the refusal must say why: {reason}");
     }
 
     #[test]
@@ -9324,14 +9211,8 @@ mod tests {
         // haven't heard of.  Returning None forces the dashboard-URL
         // builder to fall back to the ``<tenant>`` placeholder
         // rather than constructing a URL Auth0 won't recognise.
-        assert_eq!(
-            extract_auth0_tenant_and_region("acme.xx.auth0.com"),
-            None
-        );
-        assert_eq!(
-            extract_auth0_tenant_and_region("a.b.c.auth0.com"),
-            None
-        );
+        assert_eq!(extract_auth0_tenant_and_region("acme.xx.auth0.com"), None);
+        assert_eq!(extract_auth0_tenant_and_region("a.b.c.auth0.com"), None);
     }
 
     #[test]
@@ -9346,10 +9227,7 @@ mod tests {
         // region in dashboard URL.
         assert_eq!(
             build_auth0_dashboard_url("acme.auth0.com", "Abc123"),
-            Some(
-                "https://manage.auth0.com/dashboard/acme/applications/Abc123/settings"
-                    .to_string()
-            )
+            Some("https://manage.auth0.com/dashboard/acme/applications/Abc123/settings".to_string())
         );
     }
 
@@ -9372,10 +9250,7 @@ mod tests {
         );
         assert_eq!(
             build_auth0_dashboard_url("acme.eu.auth0.com", "EuClientId"),
-            Some(
-                "https://manage.auth0.com/dashboard/eu/acme/applications/EuClientId/settings"
-                    .to_string()
-            )
+            Some("https://manage.auth0.com/dashboard/eu/acme/applications/EuClientId/settings".to_string())
         );
     }
 
@@ -9383,20 +9258,14 @@ mod tests {
     fn build_auth0_dashboard_url_returns_none_for_custom_domain() {
         // CNAMEd custom domains can't be parsed for tenant/region.
         // Caller falls back to a ``<tenant>`` placeholder URL.
-        assert_eq!(
-            build_auth0_dashboard_url("login.example.com", "anything"),
-            None
-        );
+        assert_eq!(build_auth0_dashboard_url("login.example.com", "anything"), None);
     }
 
     #[test]
     fn build_auth0_dashboard_url_trims_whitespace_in_client_id() {
         assert_eq!(
             build_auth0_dashboard_url("acme.auth0.com", "  Abc123  "),
-            Some(
-                "https://manage.auth0.com/dashboard/acme/applications/Abc123/settings"
-                    .to_string()
-            )
+            Some("https://manage.auth0.com/dashboard/acme/applications/Abc123/settings".to_string())
         );
     }
 
@@ -9510,8 +9379,7 @@ mod tests {
                 "client_id": "Jqop7YoaiZalLHdBRo5ScNQ1RJhbhbDN"
             }
         });
-        let (domain, client_id, redirect_uri, audience) =
-            parse_auth0_block_from_contract(&contract).unwrap();
+        let (domain, client_id, redirect_uri, audience) = parse_auth0_block_from_contract(&contract).unwrap();
         assert_eq!(domain, "mestumre-development.us.auth0.com");
         assert_eq!(client_id, "Jqop7YoaiZalLHdBRo5ScNQ1RJhbhbDN");
         assert_eq!(redirect_uri, "");
@@ -9539,10 +9407,22 @@ mod tests {
 
     #[test]
     fn gateway_url_normalisation_strips_trailing_slash_and_whitespace() {
-        assert_eq!(normalise_gateway_url("https://gateway.mestumre.dev"), "https://gateway.mestumre.dev");
-        assert_eq!(normalise_gateway_url("https://gateway.mestumre.dev/"), "https://gateway.mestumre.dev");
-        assert_eq!(normalise_gateway_url("  https://gateway.mestumre.dev/  "), "https://gateway.mestumre.dev");
-        assert_eq!(normalise_gateway_url("http://127.0.0.1:18082/"), "http://127.0.0.1:18082");
+        assert_eq!(
+            normalise_gateway_url("https://gateway.mestumre.dev"),
+            "https://gateway.mestumre.dev"
+        );
+        assert_eq!(
+            normalise_gateway_url("https://gateway.mestumre.dev/"),
+            "https://gateway.mestumre.dev"
+        );
+        assert_eq!(
+            normalise_gateway_url("  https://gateway.mestumre.dev/  "),
+            "https://gateway.mestumre.dev"
+        );
+        assert_eq!(
+            normalise_gateway_url("http://127.0.0.1:18082/"),
+            "http://127.0.0.1:18082"
+        );
         assert_eq!(normalise_gateway_url(""), "");
     }
 

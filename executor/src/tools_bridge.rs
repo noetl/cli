@@ -56,14 +56,14 @@ use std::time::Instant;
 
 use anyhow::Result;
 use bytes::Bytes;
-use object_store::path::Path as StorePath;
-use object_store::ObjectStore;
-use object_store::PutPayload;
 use noetl_tools::auth::GcpAuth;
 use noetl_tools::context::ExecutionContext as ToolsExecutionContext;
 use noetl_tools::registry::{AuthConfig as ToolsAuthConfig, Tool as ToolsRegistryTool, ToolConfig};
 use noetl_tools::result::{ToolResult, ToolStatus};
 use noetl_tools::tools::{AgentSession, DuckdbTool, HttpTool, McpTool, ProviderTool, RhaiTool, ShellTool};
+use object_store::path::Path as StorePath;
+use object_store::ObjectStore;
+use object_store::PutPayload;
 use tracing::{info_span, Instrument};
 
 use crate::playbook::{AuthConfig as CliAuthConfig, CmdsList, SinkFormat, Tool};
@@ -179,8 +179,7 @@ pub fn to_tools_context_for_rhai(bridge: &BridgeContext) -> ToolsExecutionContex
     let mut variables: HashMap<String, serde_json::Value> = HashMap::new();
     let mut workload_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     let mut vars_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    let mut step_maps: HashMap<String, serde_json::Map<String, serde_json::Value>> =
-        HashMap::new();
+    let mut step_maps: HashMap<String, serde_json::Map<String, serde_json::Value>> = HashMap::new();
 
     for (key, value) in bridge.variables {
         let val = serde_json::Value::String(value.clone());
@@ -201,10 +200,7 @@ pub fn to_tools_context_for_rhai(bridge: &BridgeContext) -> ToolsExecutionContex
     }
 
     if !workload_map.is_empty() {
-        variables.insert(
-            "workload".to_string(),
-            serde_json::Value::Object(workload_map),
-        );
+        variables.insert("workload".to_string(), serde_json::Value::Object(workload_map));
     }
     if !vars_map.is_empty() {
         variables.insert("vars".to_string(), serde_json::Value::Object(vars_map));
@@ -335,7 +331,11 @@ pub fn to_tools_config(tool: &Tool) -> ToolConfig {
                 "args": args,
             }),
         ),
-        Tool::Auth { provider, scopes, project } => (
+        Tool::Auth {
+            provider,
+            scopes,
+            project,
+        } => (
             "auth",
             serde_json::json!({
                 "provider": provider,
@@ -595,10 +595,7 @@ pub async fn resolve_auth_to_bearer(cfg: &CliAuthConfig) -> Result<String> {
             };
             Ok(token)
         }
-        other => anyhow::bail!(
-            "unsupported auth provider: {}. Supported: gcp, google, adc",
-            other
-        ),
+        other => anyhow::bail!("unsupported auth provider: {}. Supported: gcp, google, adc", other),
     }
 }
 
@@ -617,9 +614,10 @@ pub async fn resolve_auth_to_bearer(cfg: &CliAuthConfig) -> Result<String> {
 /// sent verbatim to whatever host the step names.
 pub async fn resolve_http_auth_header(cfg: &CliAuthConfig) -> Result<(String, String)> {
     let credential = || -> Result<&str> {
-        cfg.credential.as_deref().filter(|c| !c.trim().is_empty()).ok_or_else(|| {
-            anyhow::anyhow!("http auth type `{}` needs `credential: <alias>`", cfg.provider)
-        })
+        cfg.credential
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("http auth type `{}` needs `credential: <alias>`", cfg.provider))
     };
     let secret = |alias: &str| -> Result<String> {
         let value = crate::local_credentials::resolve(alias)?;
@@ -714,14 +712,8 @@ fn http_tool_config(
 /// statuses come back inside the JSON envelope.
 fn reshape_http_result(result: ToolResult) -> Result<BridgeOutcome> {
     if let Some(data) = result.data {
-        let status_code = data
-            .get("status_code")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as i32;
-        let body = data
-            .get("body")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
+        let status_code = data.get("status_code").and_then(|v| v.as_u64()).unwrap_or(0) as i32;
+        let body = data.get("body").cloned().unwrap_or(serde_json::Value::Null);
         let envelope = serde_json::json!({
             "status": status_code,
             "body": body,
@@ -742,11 +734,7 @@ fn reshape_http_result(result: ToolResult) -> Result<BridgeOutcome> {
 /// directory are handled at the CLI call site BEFORE the bridge is
 /// invoked, so this helper receives an already-resolved absolute
 /// path string (or `:memory:` for in-memory mode).
-fn duckdb_tool_config(
-    db_path: &str,
-    query: &str,
-    params: &[String],
-) -> ToolConfig {
+fn duckdb_tool_config(db_path: &str, query: &str, params: &[String]) -> ToolConfig {
     ToolConfig {
         kind: "duckdb".to_string(),
         config: serde_json::json!({
@@ -913,11 +901,7 @@ where
 /// Matching the CLI's pre-PR-2c-8 ordering — `auth.project` set
 /// first by the inline arm, then the token + provider after the
 /// `resolve_auth_to_bearer` call.
-pub fn auth_context_updates(
-    provider: &str,
-    token: &str,
-    project: Option<&str>,
-) -> Vec<(String, String)> {
+pub fn auth_context_updates(provider: &str, token: &str, project: Option<&str>) -> Vec<(String, String)> {
     let mut updates: Vec<(String, String)> = Vec::with_capacity(3);
     if let Some(p) = project {
         if !p.is_empty() {
@@ -1077,20 +1061,12 @@ pub async fn gcs_upload(bucket: &str, key: &str, data: &str) -> Result<()> {
 /// Production: called by [`gcs_upload`] with a real
 /// `GoogleCloudStorage` store.
 /// Tests: called directly with `Arc<InMemory>` — no GCS dependency.
-pub async fn gcs_upload_with_store(
-    store: Arc<dyn ObjectStore>,
-    key: &str,
-    data: &str,
-) -> Result<()> {
+pub async fn gcs_upload_with_store(store: Arc<dyn ObjectStore>, key: &str, data: &str) -> Result<()> {
     let bytes = Bytes::from(data.to_string());
     let byte_len = bytes.len();
     let path = StorePath::from(key);
 
-    let span = info_span!(
-        "gcs.upload",
-        key = key,
-        bytes = byte_len,
-    );
+    let span = info_span!("gcs.upload", key = key, bytes = byte_len,);
 
     async move {
         let start = Instant::now();
@@ -1232,10 +1208,7 @@ fn escape_template_markers(s: &str) -> String {
 /// implementation is async (`Tool::execute` is `async`).  The CLI
 /// adapts via `tokio::runtime::Handle::current().block_on(...)` if
 /// the call site is sync — see PR-2c-3's wiring for the pattern.
-pub async fn dispatch_via_registry(
-    tool: &Tool,
-    bridge: &BridgeContext<'_>,
-) -> Result<BridgeOutcome> {
+pub async fn dispatch_via_registry(tool: &Tool, bridge: &BridgeContext<'_>) -> Result<BridgeOutcome> {
     let _config = to_tools_config(tool);
     let _ctx = to_tools_context(bridge);
 
@@ -1317,10 +1290,7 @@ pub async fn dispatch_via_registry(
                         .as_ref()
                         .and_then(|d| d.get("exit_code"))
                         .and_then(|v| v.as_i64());
-                    anyhow::bail!(
-                        "Command failed with exit code: {:?}",
-                        exit_code
-                    );
+                    anyhow::bail!("Command failed with exit code: {:?}", exit_code);
                 }
                 let stdout = result
                     .data
@@ -1715,8 +1685,7 @@ mod tests {
 
     #[test]
     fn to_tools_context_wraps_string_variables_as_json_value() {
-        let vars: HashMap<String, String> =
-            [("workload.region".into(), "us-west-1".into())].into();
+        let vars: HashMap<String, String> = [("workload.region".into(), "us-west-1".into())].into();
         let ctx = to_tools_context(&bridge_ctx(&vars));
         assert_eq!(ctx.execution_id, 12345);
         assert_eq!(ctx.step, "test_step");
@@ -1748,14 +1717,18 @@ mod tests {
             action: "google.cloudresourcemanager.folders.list".into(),
             service: None,
             dry_run: Some(serde_yaml::Value::Bool(true)),
-            input: Some(serde_yaml::to_value(serde_json::json!({
-                "parent": "organizations/1"
-            }))
-            .unwrap()),
-            poll: Some(serde_yaml::to_value(serde_json::json!({
-                "max_attempts": 5
-            }))
-            .unwrap()),
+            input: Some(
+                serde_yaml::to_value(serde_json::json!({
+                    "parent": "organizations/1"
+                }))
+                .unwrap(),
+            ),
+            poll: Some(
+                serde_yaml::to_value(serde_json::json!({
+                    "max_attempts": 5
+                }))
+                .unwrap(),
+            ),
             endpoint: None,
             stack: None,
             confirm: None,
@@ -1767,10 +1740,7 @@ mod tests {
         let cfg = to_tools_config(&tool);
         assert_eq!(cfg.kind, "provider");
         assert_eq!(cfg.config["provider"], "google");
-        assert_eq!(
-            cfg.config["action"],
-            "google.cloudresourcemanager.folders.list"
-        );
+        assert_eq!(cfg.config["action"], "google.cloudresourcemanager.folders.list");
         assert_eq!(cfg.config["runtime"], "rest");
         assert_eq!(cfg.config["dry_run"], true);
         assert_eq!(cfg.config["input"]["parent"], "organizations/1");
@@ -1960,9 +1930,7 @@ mod tests {
             action: "google.cloudresourcemanager.folders.list".into(),
             service: None,
             dry_run: Some(serde_yaml::Value::Bool(true)),
-            input: Some(
-                serde_yaml::to_value(serde_json::json!({ "parent": "organizations/42" })).unwrap(),
-            ),
+            input: Some(serde_yaml::to_value(serde_json::json!({ "parent": "organizations/42" })).unwrap()),
             poll: None,
             endpoint: None,
             stack: None,
@@ -1973,18 +1941,14 @@ mod tests {
             auth: None,
         };
         let vars = empty_vars();
-        let outcome = dispatch_via_registry(&tool, &bridge_ctx(&vars))
-            .await
-            .unwrap();
+        let outcome = dispatch_via_registry(&tool, &bridge_ctx(&vars)).await.unwrap();
         let result = outcome.result.expect("provider dry-run returns a result");
         let json: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(json["dry_run"], serde_json::json!(true));
         assert_eq!(json["would_call"]["method"], serde_json::json!("GET"));
         assert_eq!(
             json["would_call"]["url"],
-            serde_json::json!(
-                "https://cloudresourcemanager.googleapis.com/v3/folders?parent=organizations/42"
-            )
+            serde_json::json!("https://cloudresourcemanager.googleapis.com/v3/folders?parent=organizations/42")
         );
     }
 
@@ -2036,8 +2000,7 @@ mod tests {
         let outcome = dispatch_via_registry(&provider_enable_without_auth(None), &bridge_ctx(&vars))
             .await
             .expect("a default (report) run never fails");
-        let parsed: serde_json::Value =
-            serde_json::from_str(outcome.result.as_deref().expect("report body")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(outcome.result.as_deref().expect("report body")).unwrap();
         assert_eq!(parsed["reconcile"], "report", "default policy is report");
         assert_eq!(parsed["changed"], false, "a report must not mutate");
         assert_eq!(
@@ -2056,12 +2019,9 @@ mod tests {
         // Without this, the rewrite above would have quietly retired the
         // guard instead of relocating it.
         let vars = empty_vars();
-        let err = dispatch_via_registry(
-            &provider_enable_without_auth(Some("enforce")),
-            &bridge_ctx(&vars),
-        )
-        .await
-        .unwrap_err();
+        let err = dispatch_via_registry(&provider_enable_without_auth(Some("enforce")), &bridge_ctx(&vars))
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("apply mode") || err.to_string().contains("auth"),
             "error names the missing auth: {err}"
@@ -2149,10 +2109,7 @@ mod tests {
             Some(("Authorization".to_string(), "Bearer test-token-123".to_string())),
         );
         assert_eq!(cfg.kind, "http");
-        assert_eq!(
-            cfg.config["headers"]["Authorization"],
-            "Bearer test-token-123"
-        );
+        assert_eq!(cfg.config["headers"]["Authorization"], "Bearer test-token-123");
     }
 
     #[test]
@@ -2194,8 +2151,7 @@ mod tests {
         }));
         result.exit_code = Some(0);
         let outcome = reshape_http_result(result).unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
         assert_eq!(parsed["status"], 200);
         assert_eq!(parsed["body"], serde_json::json!({"ok": true}));
     }
@@ -2215,8 +2171,7 @@ mod tests {
             .with_duration(5);
         assert_eq!(result.status, ToolStatus::Error);
         let outcome = reshape_http_result(result).unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
         assert_eq!(parsed["status"], 404);
         assert_eq!(parsed["body"], serde_json::json!({"error": "not found"}));
     }
@@ -2331,11 +2286,7 @@ mod tests {
 
     #[test]
     fn duckdb_tool_config_emits_noetl_tools_schema() {
-        let cfg = duckdb_tool_config(
-            ":memory:",
-            "SELECT 1",
-            &["arg1".to_string()],
-        );
+        let cfg = duckdb_tool_config(":memory:", "SELECT 1", &["arg1".to_string()]);
         assert_eq!(cfg.kind, "duckdb");
         assert_eq!(cfg.config["db_path"], ":memory:");
         assert_eq!(cfg.config["query"], "SELECT 1");
@@ -2382,8 +2333,7 @@ mod tests {
             "row_count": 2
         }));
         let outcome = reshape_duckdb_result(result).unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
         let arr = parsed.as_array().expect("result is an array");
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["id"], 1);
@@ -2399,8 +2349,7 @@ mod tests {
             "row_count": 0
         }));
         let outcome = reshape_duckdb_result(result).unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
         assert_eq!(parsed.as_array().unwrap().len(), 0);
     }
 
@@ -2457,8 +2406,7 @@ mod tests {
             params: vec![],
         };
         let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
         let arr = parsed.as_array().expect("result is an array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["num"], 1);
@@ -2497,15 +2445,8 @@ mod tests {
 
     #[test]
     fn prepare_sub_playbook_vars_passes_parent_vars_through() {
-        let parent: HashMap<String, String> =
-            [("vars.timeout".into(), "30".into())].into();
-        let sub = prepare_sub_playbook_vars(
-            &parent,
-            &HashMap::new(),
-            &HashMap::new(),
-            |t| Ok(t.to_string()),
-        )
-        .unwrap();
+        let parent: HashMap<String, String> = [("vars.timeout".into(), "30".into())].into();
+        let sub = prepare_sub_playbook_vars(&parent, &HashMap::new(), &HashMap::new(), |t| Ok(t.to_string())).unwrap();
         assert_eq!(sub.get("vars.timeout"), Some(&"30".to_string()));
     }
 
@@ -2513,17 +2454,11 @@ mod tests {
     fn prepare_sub_playbook_vars_v2_input_takes_precedence_over_v1_args() {
         let parent: HashMap<String, String> = HashMap::new();
         let mut input = HashMap::new();
-        input.insert(
-            "region".into(),
-            serde_yaml::Value::String("us-east-1".into()),
-        );
+        input.insert("region".into(), serde_yaml::Value::String("us-east-1".into()));
         let mut args = HashMap::new();
         args.insert("region".into(), "us-west-1".into());
 
-        let sub = prepare_sub_playbook_vars(&parent, &args, &input, |t| {
-            Ok(t.to_string())
-        })
-        .unwrap();
+        let sub = prepare_sub_playbook_vars(&parent, &args, &input, |t| Ok(t.to_string())).unwrap();
         // input wins; args ignored when input is non-empty.
         assert_eq!(sub.get("workload.region"), Some(&"us-east-1".to_string()));
     }
@@ -2533,13 +2468,7 @@ mod tests {
         let parent: HashMap<String, String> = HashMap::new();
         let mut args = HashMap::new();
         args.insert("tier".into(), "prod".into());
-        let sub = prepare_sub_playbook_vars(
-            &parent,
-            &args,
-            &HashMap::new(),
-            |t| Ok(t.to_string()),
-        )
-        .unwrap();
+        let sub = prepare_sub_playbook_vars(&parent, &args, &HashMap::new(), |t| Ok(t.to_string())).unwrap();
         assert_eq!(sub.get("workload.tier"), Some(&"prod".to_string()));
     }
 
@@ -2547,21 +2476,12 @@ mod tests {
     fn prepare_sub_playbook_vars_renders_input_templates() {
         let parent: HashMap<String, String> = HashMap::new();
         let mut input = HashMap::new();
-        input.insert(
-            "url".into(),
-            serde_yaml::Value::String("{{base}}/api".into()),
-        );
-        let sub = prepare_sub_playbook_vars(
-            &parent,
-            &HashMap::new(),
-            &input,
-            |t| Ok(t.replace("{{base}}", "https://example.com")),
-        )
+        input.insert("url".into(), serde_yaml::Value::String("{{base}}/api".into()));
+        let sub = prepare_sub_playbook_vars(&parent, &HashMap::new(), &input, |t| {
+            Ok(t.replace("{{base}}", "https://example.com"))
+        })
         .unwrap();
-        assert_eq!(
-            sub.get("workload.url"),
-            Some(&"https://example.com/api".to_string())
-        );
+        assert_eq!(sub.get("workload.url"), Some(&"https://example.com/api".to_string()));
     }
 
     #[test]
@@ -2573,53 +2493,28 @@ mod tests {
             serde_yaml::Value::Number(serde_yaml::Number::from(30)),
         );
         input.insert("verbose".into(), serde_yaml::Value::Bool(true));
-        let sub = prepare_sub_playbook_vars(
-            &parent,
-            &HashMap::new(),
-            &input,
-            |t| Ok(t.to_string()),
-        )
-        .unwrap();
+        let sub = prepare_sub_playbook_vars(&parent, &HashMap::new(), &input, |t| Ok(t.to_string())).unwrap();
         assert_eq!(sub.get("workload.timeout"), Some(&"30".to_string()));
         assert_eq!(sub.get("workload.verbose"), Some(&"true".to_string()));
     }
 
     #[test]
     fn prepare_sub_playbook_vars_passes_through_when_both_empty() {
-        let parent: HashMap<String, String> = [(
-            "workload.region".into(),
-            "us-east-1".into(),
-        )]
-        .into();
-        let sub = prepare_sub_playbook_vars(
-            &parent,
-            &HashMap::new(),
-            &HashMap::new(),
-            |t| Ok(t.to_string()),
-        )
-        .unwrap();
+        let parent: HashMap<String, String> = [("workload.region".into(), "us-east-1".into())].into();
+        let sub = prepare_sub_playbook_vars(&parent, &HashMap::new(), &HashMap::new(), |t| Ok(t.to_string())).unwrap();
         // No input or args; parent vars come through unchanged.
         assert_eq!(sub.len(), 1);
-        assert_eq!(
-            sub.get("workload.region"),
-            Some(&"us-east-1".to_string())
-        );
+        assert_eq!(sub.get("workload.region"), Some(&"us-east-1".to_string()));
     }
 
     #[test]
     fn prepare_sub_playbook_vars_render_error_propagates() {
         let parent: HashMap<String, String> = HashMap::new();
         let mut input = HashMap::new();
-        input.insert(
-            "bad".into(),
-            serde_yaml::Value::String("{{nope}}".into()),
-        );
-        let result = prepare_sub_playbook_vars(
-            &parent,
-            &HashMap::new(),
-            &input,
-            |_| Err(anyhow::anyhow!("render exploded")),
-        );
+        input.insert("bad".into(), serde_yaml::Value::String("{{nope}}".into()));
+        let result = prepare_sub_playbook_vars(&parent, &HashMap::new(), &input, |_| {
+            Err(anyhow::anyhow!("render exploded"))
+        });
         assert!(result.unwrap_err().to_string().contains("render exploded"));
     }
 
@@ -2638,10 +2533,7 @@ mod tests {
     fn auth_context_updates_includes_project_when_set() {
         let updates = auth_context_updates("adc", "t", Some("my-project"));
         let map: HashMap<String, String> = updates.into_iter().collect();
-        assert_eq!(
-            map.get("auth.project"),
-            Some(&"my-project".to_string())
-        );
+        assert_eq!(map.get("auth.project"), Some(&"my-project".to_string()));
         assert_eq!(map.get("auth.token"), Some(&"t".to_string()));
         assert_eq!(map.get("auth.provider"), Some(&"adc".to_string()));
     }
@@ -2746,10 +2638,7 @@ mod tests {
         let lines: Vec<&str> = csv.lines().collect();
         // The second data row should end with a trailing comma or
         // have an empty field for `b`.
-        assert!(
-            lines[2].ends_with(",") || lines[2].contains(",,"),
-            "csv: {csv}"
-        );
+        assert!(lines[2].ends_with(",") || lines[2].contains(",,"), "csv: {csv}");
     }
 
     #[test]
@@ -2878,9 +2767,7 @@ mod tests {
         let err = dispatch_via_registry(&tool, &bridge).await.unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("Tool::Playbook")
-                && msg.contains("not bridgeable")
-                && msg.contains("§ H.10"),
+            msg.contains("Tool::Playbook") && msg.contains("not bridgeable") && msg.contains("§ H.10"),
             "error message should explain the § H.10 finding: {msg}"
         );
     }
@@ -2909,11 +2796,7 @@ mod tests {
         let vars = empty_vars();
         let bridge = bridge_ctx(&vars);
         let tool = Tool::Shell {
-            cmds: CmdsList::Multiple(vec![
-                "echo first".into(),
-                "echo second".into(),
-                "echo third".into(),
-            ]),
+            cmds: CmdsList::Multiple(vec!["echo first".into(), "echo second".into(), "echo third".into()]),
         };
         let outcome = dispatch_via_registry(&tool, &bridge).await.unwrap();
         assert_eq!(outcome.result, Some("third".into()));
@@ -2932,9 +2815,7 @@ mod tests {
         // result with exit_code set; either way the bridge's
         // from_tools_result converts that into an anyhow::Error.
         assert!(
-            err.to_string().contains("shell")
-                || err.to_string().contains("exit")
-                || err.to_string().contains("failed"),
+            err.to_string().contains("shell") || err.to_string().contains("exit") || err.to_string().contains("failed"),
             "error message: {}",
             err
         );
@@ -2982,8 +2863,7 @@ mod tests {
         // `to_tools_context_for_rhai` groups the CLI's flat
         // `workload.region` key into a nested `workload` Map.
         // Rhai's `workload.region` then resolves as field access.
-        let vars: HashMap<String, String> =
-            [("workload.region".into(), "us-west-1".into())].into();
+        let vars: HashMap<String, String> = [("workload.region".into(), "us-west-1".into())].into();
         let bridge = bridge_ctx(&vars);
         let tool = Tool::Rhai {
             code: r#"workload.region.to_string()"#.into(),
@@ -3039,10 +2919,7 @@ mod tests {
         let step_a = ctx.variables.get("step_a").and_then(|v| v.as_object()).unwrap();
         assert_eq!(step_a.get("result"), Some(&serde_json::json!("done")));
 
-        assert_eq!(
-            ctx.variables.get("toplevel"),
-            Some(&serde_json::json!("kept_at_root"))
-        );
+        assert_eq!(ctx.variables.get("toplevel"), Some(&serde_json::json!("kept_at_root")));
     }
 
     #[tokio::test]
@@ -3094,9 +2971,13 @@ mod tests {
         use object_store::ObjectStore;
 
         let store = Arc::new(InMemory::new());
-        gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "output/data.json", r#"{"k":"v"}"#)
-            .await
-            .expect("upload should succeed");
+        gcs_upload_with_store(
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            "output/data.json",
+            r#"{"k":"v"}"#,
+        )
+        .await
+        .expect("upload should succeed");
 
         let path = StorePath::from("output/data.json");
         let retrieved = store.get(&path).await.expect("should read back uploaded object");
@@ -3113,8 +2994,12 @@ mod tests {
         use object_store::ObjectStore;
 
         let store = Arc::new(InMemory::new());
-        gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "data.csv", "first").await.unwrap();
-        gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "data.csv", "second").await.unwrap();
+        gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "data.csv", "first")
+            .await
+            .unwrap();
+        gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "data.csv", "second")
+            .await
+            .unwrap();
 
         let path = StorePath::from("data.csv");
         let body = store.get(&path).await.unwrap().bytes().await.unwrap();
@@ -3151,7 +3036,9 @@ mod tests {
         use object_store::ObjectStore;
 
         let store = Arc::new(InMemory::new());
-        gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "empty.txt", "").await.unwrap();
+        gcs_upload_with_store(Arc::clone(&store) as Arc<dyn ObjectStore>, "empty.txt", "")
+            .await
+            .unwrap();
 
         let path = StorePath::from("empty.txt");
         let body = store.get(&path).await.unwrap().bytes().await.unwrap();

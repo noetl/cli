@@ -183,7 +183,10 @@ workflow:
     let result: serde_json::Value = serde_json::from_str(&outcome.step_results["ask"]).unwrap();
     let text = result["text"].as_str().unwrap();
     assert!(text.contains("prompt=hello world"), "{text}");
-    assert!(text.contains("--model claude-test") && text.contains("--allowed-tools Read"), "{text}");
+    assert!(
+        text.contains("--model claude-test") && text.contains("--allowed-tools Read"),
+        "{text}"
+    );
     assert_eq!(result["framework"], "claude-code");
 
     std::fs::remove_dir_all(&dir).ok();
