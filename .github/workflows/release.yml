@@ -20,6 +20,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      assets_matrix: ${{ steps.matrix.outputs.assets_matrix }}
     steps:
       - uses: actions/checkout@v4
       - id: version
@@ -46,6 +47,25 @@ jobs:
           fi
           echo "version=${CARGO_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+      - id: matrix
+        shell: bash
+        env:
+          # The darwin-arm64 binary is built on the Mac Studio (noetl/ops
+          # scripts/local-build/noetl-publish-mac.sh --repo cli --upload). Set the repo
+          # variable MACOS_BUILDS_ON_GITHUB=true to use GitHub's paid macOS runner again.
+          MACOS_ON_GITHUB: ${{ vars.MACOS_BUILDS_ON_GITHUB }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          LIN_X86='{"os":"ubuntu-latest","artifact_os":"linux","artifact_arch":"x86_64"}'
+          LIN_ARM='{"os":"ubuntu-24.04-arm","artifact_os":"linux","artifact_arch":"aarch64"}'
+          MAC='{"os":"macos-latest","artifact_os":"darwin","artifact_arch":"arm64"}'
+          if [[ "${MACOS_ON_GITHUB:-}" == "true" ]]; then
+            printf 'assets_matrix={"include":[%s,%s,%s]}\n' "${LIN_X86}" "${LIN_ARM}" "${MAC}" >> "${GITHUB_OUTPUT}"
+          else
+            printf 'assets_matrix={"include":[%s,%s]}\n' "${LIN_X86}" "${LIN_ARM}" >> "${GITHUB_OUTPUT}"
+            echo "::notice title=darwin-arm64 binary not built on GitHub::Build and upload it on the Mac Studio: scripts/local-build/noetl-publish-mac.sh --repo cli --version ${VERSION} --upload (noetl/ops)."
+          fi
 
   publish-crate:
     runs-on: ubuntu-latest
@@ -310,17 +330,8 @@ jobs:
     needs: verify-version
     runs-on: ${{ matrix.os }}
     strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact_os: linux
-            artifact_arch: x86_64
-          - os: ubuntu-24.04-arm
-            artifact_os: linux
-            artifact_arch: aarch64
-          - os: macos-latest
-            artifact_os: darwin
-            artifact_arch: arm64
+      # linux x86_64 + aarch64 always; darwin-arm64 only when MACOS_BUILDS_ON_GITHUB=true.
+      matrix: ${{ fromJSON(needs.verify-version.outputs.assets_matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

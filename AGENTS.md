@@ -26,3 +26,7 @@ scripts/local-build/noetl-local-build.sh --repos server,worker --remote amd # on
 
 Kind deploys keep using `automation/development/noetl.yaml` (it builds native images on each host).
 Full rule: noetl/ai-meta `agents/rules/build-placement.md`.
+
+Apple Silicon / macOS release artifacts (owner decision 2026-11-28) are built on the Mac Studio, not on GitHub runners:
+`noetl/ops scripts/local-build/noetl-publish-mac.sh --repo cli --version X.Y.Z [--upload|--push]`. The release workflow skips
+those jobs unless the repo variable `MACOS_BUILDS_ON_GITHUB` is `true`.
